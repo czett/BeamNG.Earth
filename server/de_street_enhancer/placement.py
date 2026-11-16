@@ -51,9 +51,9 @@ LAMP_MOUNT_BASE_Z_M = 2.75
 FASCIA_THICK_M = 0.16
 
 # Residential front-yard hedge & fence constants
-DE_YARD_CLEAR_ROAD_M = 1.9
-DE_YARD_WALK_OFFSET_M = 0.45
-DE_YARD_MIN_DEPTH_M = 1.25
+DE_YARD_CLEAR_ROAD_M = 1.15
+DE_YARD_WALK_OFFSET_M = 0.25
+DE_YARD_MIN_DEPTH_M = 0.60
 DE_YARD_MAX_DEPTH_M = 18.0
 DE_YARD_MAX_LEN_M = 22.0
 
@@ -829,7 +829,7 @@ def place_residential_yards(
             road_bands.append((xy, float(sp.width) / 2.0))
     if not road_bands:
         return []
-    road_blocks = _expand_blocker_segments([(ln, hw + 0.35) for ln, hw in road_bands], extra_hw=DE_YARD_CLEAR_ROAD_M * 0.5)
+    road_blocks = _expand_blocker_segments([(ln, hw) for ln, hw in road_bands], extra_hw=max(0.0, DE_YARD_CLEAR_ROAD_M - 0.05))
 
     walk_bands: list[tuple[np.ndarray, float]] = []
     for w in walks or ():
@@ -837,7 +837,7 @@ def place_residential_yards(
             xy = _finite_2d(w["pts"], min_pts=2)
             if xy is not None:
                 walk_bands.append((xy, float(w.get("w", roadsmod.SIDEWALK["w"])) / 2.0))
-    walk_blocks = _expand_blocker_segments([(ln, hw + 0.25) for ln, hw in walk_bands], extra_hw=0.15)
+    walk_blocks = _expand_blocker_segments([(ln, hw + 0.12) for ln, hw in walk_bands], extra_hw=0.05)
 
     import streetfront
     walk_edges: list[np.ndarray] = []
@@ -874,7 +874,7 @@ def place_residential_yards(
         edge, mid, along, wall_w, q, out, tangent, half_road, setback, _local = front
 
         # Place front boundary behind actual sidewalk outer edge (`walk_walls.ray` like fences.py:453-458).
-        offset = float(half_road) + 1.0
+        offset = float(half_road) + DE_YARD_CLEAR_ROAD_M
         curb_probe = q + (float(half_road) - 0.15) * out
         first = None
         if (
@@ -938,7 +938,7 @@ def place_residential_yards(
                 n_seg = max(1, int(round(span / fences.HEDGE_STEP_M)))
                 for k in range(n_seg):
                     p = line[0] + (line[1] - line[0]) * ((k + 0.5) / n_seg)
-                    h_val = 1.05 + 0.16 * _hash01(spec.seed, "de_h", k)
+                    h_val = 0.85 + 0.15 * _hash01(spec.seed, "de_h", k)
                     pending.append((fences.G_HEDGE, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, 0.0))
             else:
                 for p, d, panel_len in fences._panels(line, spacing=fences.PANEL_M):

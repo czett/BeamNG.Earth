@@ -316,7 +316,8 @@ class GeometrySafetyAndPipelineTest(unittest.TestCase):
         self.assertGreater(len(rows), 0)
         self.assertGreater(len(wide_rows), 0)
         for row in wide_rows:
-            self.assertGreaterEqual(row[2], 106.5, f"wide-sidewalk boundary failed to clear outer edge: {row}")
+            # Sidewalk outer edge is at y = 104.6 + 3.2/2 = 106.2; clearance must exceed outer edge + DE_YARD_WALK_OFFSET_M.
+            self.assertGreaterEqual(row[2], 106.2 + placement.DE_YARD_WALK_OFFSET_M - 0.01, f"wide-sidewalk boundary failed to clear outer edge: {row}")
         for row in rows:
             self.assertNotEqual(row[0], "fence", "never emits default US wood fence")
             self.assertTrue(row[0] == "fr_hedge" or str(row[0]).startswith("fr_fence_"))

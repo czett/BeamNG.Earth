@@ -57,6 +57,8 @@ DE_HOUSE_CLASSES = frozenset({
     "house",
     "detached",
     "semidetached_house",
+    "terrace",
+    "apartments",
     "residential",
     "bungalow",
     "villa",
@@ -390,8 +392,20 @@ def classify_commercial_buildings(
             z_band_top = z_eave
 
         fascia_h = 0.64 if L < 10.0 else 0.78
-        z_top = min(z_band_top - 0.10, z_eave - 0.14)
-        z_bot = max(float(gmax) + 2.40, z_top - fascia_h)
+        # Lower Z by ~0.12 m and stay cleanly below overhanging flat cornices (0.45 m down) or pitched eaves.
+        has_cornice = (
+            getattr(spec, "roof", "flat") == "flat"
+            and not getattr(spec, "plain", False)
+            and (spec.floors or 1) <= 6
+        )
+        cornice_clear = (buildings.CORNICE_DOWN_M + 0.06) if has_cornice else 0.0
+        if getattr(spec, "roof", "flat") != "flat":
+            oh_max = max(getattr(spec, "de_eaves", None) or (buildings.EAVE_M,))
+            eave_clear = max(0.26, oh_max * math.tan(math.radians(buildings.roof_pitch(spec))) + 0.08)
+        else:
+            eave_clear = 0.26
+        z_top = min(z_band_top - 0.22, z_eave - max(cornice_clear, eave_clear))
+        z_bot = max(float(gmax) + 2.28, z_top - fascia_h)
         if z_top - z_bot < 0.42:
             continue
 
@@ -435,7 +449,7 @@ def classify_commercial_buildings(
                     continue
                 spec_brand, label = brand_registry.fallback_brand(_hash01(spec.seed, "de_brand"), lat_f, cls)
 
-        center = mid + out * 0.11  # Protrude cleanly from facade wall without z-fighting
+        center = mid + out * 0.15  # Push outward (+0.04 m) past flat cornices/window frames without z-fighting
         targets.append(
             ShopTarget(
                 building_idx=idx,
@@ -485,11 +499,14 @@ def classify_residential_yards(
             continue
         if getattr(spec, "shop", False) or getattr(spec, "door", None) is None:
             continue
-        if getattr(spec, "roof", "flat") == "flat":
-            continue
         cls = (getattr(spec, "cls", None) or "").lower()
         if cls in DE_SKIP_CLASSES or (cls not in DE_HOUSE_CLASSES and cls not in DE_UNTYPED_HOUSE):
             continue
+        # When Overture/OSM omitted an explicit pitched roof tag on an untyped building, still allow
+        # windowed non-industrial dwellings while guarding against windowless/plain commercial sheds.
+        if cls in DE_UNTYPED_HOUSE and getattr(spec, "roof", "flat") == "flat":
+            if getattr(spec, "plain", False) or getattr(spec, "windows", True) is False:
+                continue
         if (getattr(spec, "floors", 1) or 1) > 3:
             continue
 
@@ -498,7 +515,7 @@ def classify_residential_yards(
             continue
         area = abs(buildings._area2(ring)) / 2.0
         min_area = 42.0 if cls in DE_UNTYPED_HOUSE and (spec.floors or 1) == 1 else 28.0
-        if not (min_area <= area <= 420.0):
+        if not (min_area <= area <= 650.0):
             continue
         c = ring.mean(axis=0)
         if not (x0 <= float(c[0]) < x0 + tile_size and y0 <= float(c[1]) < y0 + tile_size):
