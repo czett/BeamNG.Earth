@@ -30,6 +30,7 @@ import osmyears
 import ships
 import staging
 import francehouses
+import de_enhancer
 
 FLOOR_M = 3.0               # m per storey (residential)
 GROUND_FLOOR_SHOP_M = 4.2   # m, a shop's ground floor
@@ -815,7 +816,8 @@ class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
                  "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "across", "hi",
-                 "roof_h", "hf", "holes", "skel", "skel_cap", "tank", "street", "slope_dir", "ml", "name")
+                 "roof_h", "hf", "holes", "skel", "skel_cap", "tank", "street", "slope_dir", "ml", "name",
+                 "de_eaves", "de_in")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1566,7 +1568,8 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                 skel_cap=skel_cap, slope_dir=_slope_dir(roof, attrs.get("roof_direction")), name=attrs.get("name"))
     if skel:
         spec.pitch = skel_pitch
-    return francehouses.adapt(spec, attrs, lat, lon)
+    spec = francehouses.adapt(spec, attrs, lat, lon)
+    return de_enhancer.adapt_building(spec, attrs, lat, lon)
 
 
 class Mesh:
@@ -1672,10 +1675,31 @@ class Mesh:
         self._M += [mat[0]] * len(tris)
         self.n += len(pts3)
 
-    def arrays(self):
+    def raw_arrays(self):
         self._flush()
         blocks = self._blocks or [self._lists()]
         P, UV, C, T, M = (b[0].copy() if len(blocks) == 1 else np.concatenate(b) for b in zip(*blocks))
+        return P, UV, T, M, C
+
+    def set_raw_arrays(self, P, UV, T, M, C):
+        self._P, self._UV, self._C, self._T, self._M = [], [], [], [], []
+        self._blocks = [(P, UV, C, T, M)] if len(P) or len(T) else []
+        self.n = len(P)
+
+    def append_mesh(self, other):
+        if other is None or other.n == 0:
+            return
+        other._flush()
+        blocks = other._blocks or [other._lists()]
+        self._flush()
+        off = self.n
+        for P, UV, C, T, M in blocks:
+            if len(P) or len(T):
+                self._blocks.append((P, UV, C, T + off, M))
+        self.n = off + other.n
+
+    def arrays(self):
+        P, UV, T, M, C = self.raw_arrays()
         for mi, f in _OWN_UV_SCALE:     # (textures with their own repeat: OWN_UV_M)
             sel = M == mi
             if sel.any():
@@ -1760,7 +1784,7 @@ PLAIN_STRIP = 0.3           # of a bay: the plain wall between two windows of a 
 
 def _cornice(m, spec, ring, z_eave, mat_idx):
     """A box moulding round a flat roof's edge (row houses' cornices, parapets), the plain white plaster."""
-    mat = mat_idx["bne_bld_fac_white"]
+    mat = de_enhancer.cornice_look(spec, mat_idx) if de_enhancer.is_de_spec(spec) else mat_idx["bne_bld_fac_white"]
     o, z0, z1 = CORNICE_OUT_M, z_eave - CORNICE_DOWN_M, z_eave + CORNICE_UP_M
     uv = ((0.002, 0.995), (0.012, 0.995), (0.012, 0.999), (0.002, 0.999))
     n = len(ring)
@@ -2474,12 +2498,24 @@ def _skel_roof(m, spec, ring, z_eave, rm, fac):
     facade's plain colour, as a box house's gable)."""
     fast.require(180, "skeleton_roof")
     k = dmath.tan(math.radians(roof_pitch(spec)))
-    tri, grad, gab = fast._ef.skeleton_roof(
-        np.ascontiguousarray(np.asarray(ring, np.float64)[:, :2]),
-        [np.ascontiguousarray(np.asarray(h, np.float64)[:, :2]) for h in spec.holes or ()], float(k), float(z_eave),
-        float(spec.skel_cap or 0.0), spec.roof == "gabled")
+    r2 = np.ascontiguousarray(np.asarray(ring, np.float64)[:, :2])
+    holes2 = [np.ascontiguousarray(np.asarray(h, np.float64)[:, :2]) for h in spec.holes or ()]
+    tri, grad, gab = fast._ef.skeleton_roof(r2, holes2, float(k), float(z_eave),
+                                             float(spec.skel_cap or 0.0), spec.roof == "gabled")
     if not len(grad):
         return False
+    eaves = getattr(spec, "de_eaves", None) if de_enhancer.is_de_spec(spec) else None
+    if eaves and len(eaves) == len(r2):
+        oh = min(float(v) for v in eaves)
+        if oh > 0.02:
+            r_ccw = r2[::-1] if _area2(r2) < 0 else r2
+            r_ov = de_enhancer.offset_ring_safe(r_ccw, [oh] * len(r_ccw))
+            if r_ov is not None:
+                tri_ov, grad_ov, _ = fast._ef.skeleton_roof(
+                    np.ascontiguousarray(r_ov, np.float64), holes2, float(k), float(z_eave) - oh * float(k),
+                    float(spec.skel_cap or 0.0), spec.roof == "gabled")
+                if len(grad_ov):
+                    tri, grad = tri_ov, grad_ov
     # (the gables, then the slopes, as blocks: the per-triangle loop with its texture coordinates in Python was ~3 % of
     # a first visit's far building tiles; earthfast.skeleton_roof_uv, the same numbers)
     fast.require(242, "skeleton_roof_uv")
@@ -2554,6 +2590,18 @@ def _hf_roof(m, spec, ring, z_eave, rm, fac):
         k = dmath.tan(math.radians(roof_pitch(spec)))
     tri, grad, walls = fast._ef.heightfield_roof(r, HF_FORMS[spec.roof], float(c[0]), float(c[1]), float(u[0]),
                                                  float(u[1]), float(k), float(z_eave), HALF_HIP, float(hi))
+    eaves = getattr(spec, "de_eaves", None) if de_enhancer.is_de_spec(spec) else None
+    if eaves and len(eaves) == len(r):
+        oh = min(float(v) for v in eaves)
+        if oh > 0.02:
+            r_ov = de_enhancer.offset_ring_safe(r, [oh] * len(r))
+            if r_ov is not None:
+                tri_ov, grad_ov, _ = fast._ef.heightfield_roof(
+                    np.ascontiguousarray(r_ov, np.float64), HF_FORMS[spec.roof],
+                    float(c[0]), float(c[1]), float(u[0]), float(u[1]),
+                    float(k), float(z_eave) - oh * float(k), HALF_HIP, float(hi))
+                if len(grad_ov):
+                    tri, grad = tri_ov, grad_ov
     for j in range(len(grad)):
         gx, gy = float(grad[j, 0]), float(grad[j, 1])
         gm = math.hypot(gx, gy)
@@ -2708,10 +2756,44 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
     if getattr(spec, "across", False):              # (the ridge across the long axis: the box's frame turned)
         u, hl, hw = np.array([-u[1], u[0]]), hw, hl
     v = np.array([-u[1], u[0]])
-    hl2, hw2 = hl + EAVE_M, hw + EAVE_M
-    rise = hw2 * dmath.tan(math.radians(roof_pitch(spec)))
-    ze = z_eave - EAVE_M * dmath.tan(math.radians(roof_pitch(spec)))
-    zr = ze + rise
+    oh_sn = oh_sp = oh_tn = oh_tp = EAVE_M
+    eaves = getattr(spec, "de_eaves", None) if de_enhancer.is_de_spec(spec) else None
+    if eaves:
+        r_ccw = np.asarray(ring, np.float64)[:, :2]
+        if _area2(r_ccw) < 0:
+            r_ccw = r_ccw[::-1]
+        if len(eaves) == len(r_ccw) and len(r_ccw) >= 3:
+            best_sn = best_sp = best_tn = best_tp = -2.0
+            m_n = len(r_ccw)
+            for k_i in range(m_n):
+                e_d = r_ccw[(k_i + 1) % m_n] - r_ccw[k_i]
+                L_e = float(math.hypot(e_d[0], e_d[1]))
+                if L_e < 1e-4:
+                    continue
+                out_e = np.array([e_d[1] / L_e, -e_d[0] / L_e])
+                du, dv = float(out_e @ u), float(out_e @ v)
+                oh_v = float(eaves[k_i])
+                if -du > best_sn:
+                    best_sn, oh_sn = -du, oh_v
+                if du > best_sp:
+                    best_sp, oh_sp = du, oh_v
+                if -dv > best_tn:
+                    best_tn, oh_tn = -dv, oh_v
+                if dv > best_tp:
+                    best_tp, oh_tp = dv, oh_v
+            if spec.roof in ("hipped", "pyramidal", "mansard"):
+                oh_u = min(oh_sn, oh_sp, oh_tn, oh_tp)
+                oh_sn = oh_sp = oh_tn = oh_tp = oh_u
+    oh_max = max(oh_sn, oh_sp, oh_tn, oh_tp)
+    hl2, hw2 = hl + 0.5 * (oh_sn + oh_sp), hw + max(oh_tn, oh_tp)
+    s0, s1 = -hl - oh_sn, hl + oh_sp
+    t0, t1 = -hw - oh_tn, hw + oh_tp
+    tan_p = dmath.tan(math.radians(roof_pitch(spec)))
+    rise = hw2 * tan_p
+    ze = z_eave - oh_max * tan_p
+    ze_tn = z_eave - oh_tn * tan_p
+    ze_tp = z_eave - oh_tp * tan_p
+    zr = z_eave + hw * tan_p
 
     def at(s, t, z):
         p = c + u * s + v * t
@@ -2719,7 +2801,7 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
     slope = math.hypot(hw2, rise)
 
     def uv(s, t):            # along the ridge, up the slope (m / ROOF_UV_M)
-        return (s / ROOF_UV_M, (hw2 - abs(t)) / hw2 * slope / ROOF_UV_M)
+        return (s / ROOF_UV_M, (hw2 - abs(t)) / max(hw2, 1e-4) * slope / ROOF_UV_M)
 
     def end_wall(sgn, outline):
         """The wall up to the roof at an end of the house: outline (t, z) left to right seen from outside, fanned; the
@@ -2736,8 +2818,8 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
 
         def z(t):
             return z_eave + (hi * t + hw) * tan
-        m.quad(at(-hl2, -hw2, z(-hw2)), at(hl2, -hw2, z(-hw2)), at(hl2, hw2, z(hw2)), at(-hl2, hw2, z(hw2)),
-               uv(-hl2, -hw2), uv(hl2, -hw2), (hl2 / ROOF_UV_M, 2 * hw2 / ROOF_UV_M), (-hl2 / ROOF_UV_M, 2 * hw2 / ROOF_UV_M),
+        m.quad(at(s0, t0, z(t0)), at(s1, t0, z(t0)), at(s1, t1, z(t1)), at(s0, t1, z(t1)),
+               uv(s0, t0), uv(s1, t0), (s1 / ROOF_UV_M, (t1 - t0) / ROOF_UV_M), (s0 / ROOF_UV_M, (t1 - t0) / ROOF_UV_M),
                rm)
         top = z(hi * hw)
         fac = mat_idx[spec.facade]
@@ -2753,9 +2835,9 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
         zs = [z_eave + rise * math.sqrt(max(0.0, 1.0 - dnp.sq(t / hw))) for t in ts]
         arc = 0.0
         for k in range(ROUND_SEGS):                      # (strips along the length, counter-clockwise from above)
-            t0, t1, z0_, z1_ = ts[k], ts[k + 1], zs[k], zs[k + 1]
-            seg = math.hypot(t1 - t0, z1_ - z0_)
-            m.quad(at(hl, t0, z0_), at(hl, t1, z1_), at(-hl, t1, z1_), at(-hl, t0, z0_),
+            t0_, t1_, z0_, z1_ = ts[k], ts[k + 1], zs[k], zs[k + 1]
+            seg = math.hypot(t1_ - t0_, z1_ - z0_)
+            m.quad(at(hl, t0_, z0_), at(hl, t1_, z1_), at(-hl, t1_, z1_), at(-hl, t0_, z0_),
                    (hl / ROOF_UV_M, arc / ROOF_UV_M), (hl / ROOF_UV_M, (arc + seg) / ROOF_UV_M),
                    (-hl / ROOF_UV_M, (arc + seg) / ROOF_UV_M), (-hl / ROOF_UV_M, arc / ROOF_UV_M), rm)
             arc += seg
@@ -2765,28 +2847,32 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
     if spec.roof == "gambrel":
         lo, up = (dmath.tan(math.radians(p)) for p in GAMBREL_PITCHES)
         tb = hw * GAMBREL_BREAK                          # the break line, out from the ridge
-        ze = z_eave - EAVE_M * lo
         zb = z_eave + (hw - tb) * lo
         zr = zb + tb * up
         for sgn in (-1, 1):                              # (the slopes of one side, counter-clockwise from above)
-            for t0, z0, t1, z1 in ((hw2, ze, tb, zb), (tb, zb, 0.0, zr)):
-                a, b = (-hl2, hl2) if sgn < 0 else (hl2, -hl2)
-                m.quad(at(a, sgn * t0, z0), at(b, sgn * t0, z0), at(b, sgn * t1, z1), at(a, sgn * t1, z1),
-                       uv(a, t0), uv(b, t0), uv(b, t1), uv(a, t1), rm)
+            tc = t0 if sgn < 0 else t1
+            oh_c = oh_tn if sgn < 0 else oh_tp
+            ze_c = z_eave - oh_c * lo
+            for tc0, z0_, tc1, z1_ in ((abs(tc), ze_c, tb, zb), (tb, zb, 0.0, zr)):
+                a, b = (s0, s1) if sgn < 0 else (s1, s0)
+                m.quad(at(a, sgn * tc0, z0_), at(b, sgn * tc0, z0_), at(b, sgn * tc1, z1_), at(a, sgn * tc1, z1_),
+                       uv(a, tc0), uv(b, tc0), uv(b, tc1), uv(a, tc1), rm)
         for sgn in (-1, 1):
             end_wall(sgn, [(-hw, z_eave), (hw, z_eave), (tb, zb), (0.0, zr - EAVE_M * 0.2), (-tb, zb)])
         return
     if spec.roof == "mansard":
         lo, up = (dmath.tan(math.radians(p)) for p in MANSARD_PITCHES)
         inset = min(0.3 * hw, MANSARD_INSET_M)           # (from the walls: the overhang carries the slope on down)
-        ze = z_eave - EAVE_M * lo
+        ze = z_eave - oh_max * lo
         zb = z_eave + inset * lo
         il, iw = hl - inset, hw - inset
         zr = zb + iw * up
         r = max(il - iw, 0.0)
-        for (a, ta), (b, tb) in (((-1, -1), (1, -1)), ((1, -1), (1, 1)), ((1, 1), (-1, 1)), ((-1, 1), (-1, -1))):
-            m.quad(at(a * hl2, ta * hw2, ze), at(b * hl2, tb * hw2, ze), at(b * il, tb * iw, zb), at(a * il, ta * iw, zb),
-                   (0, 0), (2 * hl2 / ROOF_UV_M, 0), (2 * hl2 / ROOF_UV_M, (inset + EAVE_M) / ROOF_UV_M), (0, (inset + EAVE_M) / ROOF_UV_M), rm)
+        for (sa, s_v), (sb, s_w) in (((-1, -1), (1, -1)), ((1, -1), (1, 1)), ((1, 1), (-1, 1)), ((-1, 1), (-1, -1))):
+            xs0, yt0 = (s0 if sa < 0 else s1), (t0 if s_v < 0 else t1)
+            xs1, yt1 = (s0 if sb < 0 else s1), (t0 if s_w < 0 else t1)
+            m.quad(at(xs0, yt0, ze), at(xs1, yt1, ze), at(sb * il, s_w * iw, zb), at(sa * il, s_v * iw, zb),
+                   (0, 0), (2 * hl2 / ROOF_UV_M, 0), (2 * hl2 / ROOF_UV_M, (inset + oh_max) / ROOF_UV_M), (0, (inset + oh_max) / ROOF_UV_M), rm)
         m.quad(at(-il, -iw, zb), at(il, -iw, zb), at(r, 0, zr), at(-r, 0, zr), uv(-il, -iw), uv(il, -iw), uv(r, 0), uv(-r, 0), rm)
         m.quad(at(il, iw, zb), at(-il, iw, zb), at(-r, 0, zr), at(r, 0, zr), uv(il, iw), uv(-il, iw), uv(-r, 0), uv(r, 0), rm)
         m.tri(at(il, -iw, zb), at(il, iw, zb), at(r, 0, zr), (-iw / ROOF_UV_M, 0), (iw / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
@@ -2794,54 +2880,58 @@ def _roof(m, spec, ring, z_eave, mat_idx, lite=False):
         return
     if spec.roof == "pyramidal":
         apex = at(0, 0, zr)
-        for (a, ta), (b, tb) in (((-1, -1), (1, -1)), ((1, -1), (1, 1)), ((1, 1), (-1, 1)), ((-1, 1), (-1, -1))):
-            m.tri(at(a * hl2, ta * hw2, ze), at(b * hl2, tb * hw2, ze), apex,
+        for (sa, s_v), (sb, s_w) in (((-1, -1), (1, -1)), ((1, -1), (1, 1)), ((1, 1), (-1, 1)), ((-1, 1), (-1, -1))):
+            xs0, yt0 = (s0 if sa < 0 else s1), (t0 if s_v < 0 else t1)
+            xs1, yt1 = (s0 if sb < 0 else s1), (t0 if s_w < 0 else t1)
+            m.tri(at(xs0, yt0, ze), at(xs1, yt1, ze), apex,
                   (-hl2 / ROOF_UV_M, 0), (hl2 / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
         return
     if spec.roof == "half-hipped":
         tw = hw2 * HALF_HIP                              # where the small hip's foot meets the slopes
         zc = zr - rise * HALF_HIP
         r = max(hl2 - tw, 0.0)
-        m.quad(at(-hl2, -hw2, ze), at(hl2, -hw2, ze), at(hl2, -tw, zc), at(-hl2, -tw, zc),
-               uv(-hl2, -hw2), uv(hl2, -hw2), uv(hl2, -tw), uv(-hl2, -tw), rm)
-        m.quad(at(-hl2, -tw, zc), at(hl2, -tw, zc), at(r, 0, zr), at(-r, 0, zr),
-               uv(-hl2, -tw), uv(hl2, -tw), uv(r, 0), uv(-r, 0), rm)
-        m.quad(at(hl2, hw2, ze), at(-hl2, hw2, ze), at(-hl2, tw, zc), at(hl2, tw, zc),
-               uv(hl2, hw2), uv(-hl2, hw2), uv(-hl2, tw), uv(hl2, tw), rm)
-        m.quad(at(hl2, tw, zc), at(-hl2, tw, zc), at(-r, 0, zr), at(r, 0, zr),
-               uv(hl2, tw), uv(-hl2, tw), uv(-r, 0), uv(r, 0), rm)
-        m.tri(at(hl2, -tw, zc), at(hl2, tw, zc), at(r, 0, zr), (-tw / ROOF_UV_M, 0), (tw / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
-        m.tri(at(-hl2, tw, zc), at(-hl2, -tw, zc), at(-r, 0, zr), (-tw / ROOF_UV_M, 0), (tw / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
-        top = zc + EAVE_M * rise / hw2                   # (the wall reaches the hip above it, under the overhang)
+        m.quad(at(s0, t0, ze_tn), at(s1, t0, ze_tn), at(s1, -tw, zc), at(s0, -tw, zc),
+               uv(s0, t0), uv(s1, t0), uv(s1, -tw), uv(s0, -tw), rm)
+        m.quad(at(s0, -tw, zc), at(s1, -tw, zc), at(r, 0, zr), at(-r, 0, zr),
+               uv(s0, -tw), uv(s1, -tw), uv(r, 0), uv(-r, 0), rm)
+        m.quad(at(s1, t1, ze_tp), at(s0, t1, ze_tp), at(s0, tw, zc), at(s1, tw, zc),
+               uv(s1, t1), uv(s0, t1), uv(s0, tw), uv(s1, tw), rm)
+        m.quad(at(s1, tw, zc), at(s0, tw, zc), at(-r, 0, zr), at(r, 0, zr),
+               uv(s1, tw), uv(s0, tw), uv(-r, 0), uv(r, 0), rm)
+        m.tri(at(s1, -tw, zc), at(s1, tw, zc), at(r, 0, zr), (-tw / ROOF_UV_M, 0), (tw / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
+        m.tri(at(s0, tw, zc), at(s0, -tw, zc), at(-r, 0, zr), (-tw / ROOF_UV_M, 0), (tw / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
+        top = zc + oh_max * rise / max(hw2, 1e-4)        # (the wall reaches the hip above it, under the overhang)
         for sgn in (-1, 1):
             end_wall(sgn, [(-hw, z_eave), (hw, z_eave), (tw, top), (-tw, top)])
         return
     if spec.roof in ("gabled", "hipped") and not lite:
         _chimney(m, spec, c, u, hl2 if spec.roof == "gabled" else max(hl2 - hw2, 0.0), hw, zr, mat_idx[spec.facade])
+    fac = mat_idx[spec.facade]
     if spec.roof == "gabled":
-        r = hl2
-        m.quad(at(-hl2, -hw2, ze), at(hl2, -hw2, ze), at(r, 0, zr), at(-r, 0, zr),
-               uv(-hl2, -hw2), uv(hl2, -hw2), uv(r, 0), uv(-r, 0), rm)
-        m.quad(at(hl2, hw2, ze), at(-hl2, hw2, ze), at(-r, 0, zr), at(r, 0, zr),
-               uv(hl2, hw2), uv(-hl2, hw2), uv(-r, 0), uv(r, 0), rm)
+        m.quad(at(s0, t0, ze_tn), at(s1, t0, ze_tn), at(s1, 0, zr), at(s0, 0, zr),
+               uv(s0, t0), uv(s1, t0), uv(s1, 0), uv(s0, 0), rm)
+        m.quad(at(s1, t1, ze_tp), at(s0, t1, ze_tp), at(s0, 0, zr), at(s1, 0, zr),
+               uv(s1, t1), uv(s0, t1), uv(s0, 0), uv(s1, 0), rm)
+        if de_enhancer.is_de_spec(spec) and not lite:
+            suv = ((0, 0.995), (0.02, 0.995), (0.02, 0.999), (0, 0.999))
+            if oh_tn > 0.05:
+                m.quad(at(s0, -hw, z_eave), at(s1, -hw, z_eave), at(s1, t0, ze_tn), at(s0, t0, ze_tn), *suv, fac)
+            if oh_tp > 0.05:
+                m.quad(at(s1, hw, z_eave), at(s0, hw, z_eave), at(s0, t1, ze_tp), at(s1, t1, ze_tp), *suv, fac)
         # the gable ends: wall triangles from the eave line up to the ridge, the facade's plain colour
-        fac = mat_idx[spec.facade]
         for sgn in (-1, 1):
             s = sgn * hl
             a, b, top = at(s, -sgn * hw, z_eave), at(s, sgn * hw, z_eave), at(s, 0, zr - EAVE_M * 0.2)
-            if sgn > 0:
-                m.tri(a, b, top, (0, 0.995), (0.02, 0.995), (0.01, 0.999), fac)
-            else:
-                m.tri(a, b, top, (0, 0.995), (0.02, 0.995), (0.01, 0.999), fac)
+            m.tri(a, b, top, (0, 0.995), (0.02, 0.995), (0.01, 0.999), fac)
     else:                    # hipped
         r = max(hl2 - hw2, 0.0)
-        m.quad(at(-hl2, -hw2, ze), at(hl2, -hw2, ze), at(r, 0, zr), at(-r, 0, zr),
-               uv(-hl2, -hw2), uv(hl2, -hw2), uv(r, 0), uv(-r, 0), rm)
-        m.quad(at(hl2, hw2, ze), at(-hl2, hw2, ze), at(-r, 0, zr), at(r, 0, zr),
-               uv(hl2, hw2), uv(-hl2, hw2), uv(-r, 0), uv(r, 0), rm)
-        m.tri(at(hl2, -hw2, ze), at(hl2, hw2, ze), at(r, 0, zr),
+        m.quad(at(s0, t0, ze), at(s1, t0, ze), at(r, 0, zr), at(-r, 0, zr),
+               uv(s0, t0), uv(s1, t0), uv(r, 0), uv(-r, 0), rm)
+        m.quad(at(s1, t1, ze), at(s0, t1, ze), at(-r, 0, zr), at(r, 0, zr),
+               uv(s1, t1), uv(s0, t1), uv(-r, 0), uv(r, 0), rm)
+        m.tri(at(s1, t0, ze), at(s1, t1, ze), at(r, 0, zr),
               (-hw2 / ROOF_UV_M, 0), (hw2 / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
-        m.tri(at(-hl2, hw2, ze), at(-hl2, -hw2, ze), at(-r, 0, zr),
+        m.tri(at(s0, t1, ze), at(s0, t0, ze), at(-r, 0, zr),
               (-hw2 / ROOF_UV_M, 0), (hw2 / ROOF_UV_M, 0), (0, slope / ROOF_UV_M), rm)
 
 
@@ -3184,30 +3274,35 @@ def build(specs_and_ground, lite=False):
         mh = spec.min_h or 0.0
         if spec.deck and not lite and _parking_deck(m, spec, gmin, gmax, mat_idx):
             continue
+        de_flag = de_enhancer.is_de_spec(spec)
+        bm = Mesh() if de_flag else m
         z0 = gmin - (SKIRT_LITE_M if lite else SKIRT_M) if mh <= 0.5 else base_z(spec, gmin, gmax) + mh
         z_eave = base_z(spec, gmin, gmax) + mh + spec.height
-        _walls(m, spec, ring, z0, z_eave, mat_idx, lite)
+        _walls(bm, spec, ring, z0, z_eave, mat_idx, lite)
         for hole in (spec.holes or ()):               # (a courtyard's walls, facing the yard: the hole clockwise)
-            _walls(m, spec, hole, z0, z_eave, mat_idx, lite, hole=True)
+            _walls(bm, spec, hole, z0, z_eave, mat_idx, lite, hole=True)
         if mh > 0.5:                                  # a part standing on another / over a street: its underside
-            m.poly([(p[0], p[1], z0) for p in ring[::-1]], [(0.002, 0.995)] * len(ring), mat_idx[spec.facade])
-        _roof(m, spec, ring, z_eave, mat_idx, lite)
+            bm.poly([(p[0], p[1], z0) for p in ring[::-1]], [(0.002, 0.995)] * len(ring), mat_idx[spec.facade])
+        _roof(bm, spec, ring, z_eave, mat_idx, lite)
         if spec.roof == "flat" and not spec.plain and spec.floors <= 6 and not lite:
-            _cornice(m, spec, ring, z_eave, mat_idx)
+            _cornice(bm, spec, ring, z_eave, mat_idx)
         if not lite and not spec.holes:               # (roof clutter scattered over a yard would float)
-            _clutter(m, spec, ring, z_eave, mat_idx)
+            _clutter(bm, spec, ring, z_eave, mat_idx)
         if spec.steeple:
-            _steeple(m, spec, z_eave, mat_idx)
+            _steeple(bm, spec, z_eave, mat_idx)
         if spec.stoop and not lite:
-            _stoop(m, spec, ring, gmin, gmax, mat_idx)
+            _stoop(bm, spec, ring, gmin, gmax, mat_idx)
         if spec.porch and spec.door and not lite:
-            _porch(m, spec, gmax, mat_idx)
+            _porch(bm, spec, gmax, mat_idx)
         if spec.sign is not None and spec.roof == "flat" and not lite:
             if spec.windows is False:           # a big box: over its storefront band (_plain_wall_with_windows)
                 z_top = min(gmax + GROUND_FLOOR_SHOP_M + 1.15, z_eave)
             else:
                 z_top = z_eave - (spec.floors - 1) * spec.floor_h if spec.floors > 1 else z_eave
-            _signs(m, spec, ring, z_top, mat_idx)
+            _signs(bm, spec, ring, z_top, mat_idx)
+        if de_flag:
+            de_enhancer.bake_building_depth(bm, spec, gmin, gmax, z_eave, lite, mat_idx)
+            m.append_mesh(bm)
     if m.n == 0:
         return None
     P, UV, T, M, C = m.arrays()
@@ -5454,6 +5549,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
         cnt = np.maximum(np.asarray(ends, np.int64) - starts, 1)
         house_res = house_land.at_many(np.add.reduceat(la_all, starts) / cnt, np.add.reduceat(lo_all, starts) / cnt) \
             if len(la_all) else np.zeros(len(rings), bool)
+    de_info = de_enhancer.tile_geoms(lo_all, la_all, ends) if len(rings) else None
     # (the roofs' colours in the tile's cached aerial photo, RoofPhoto: all at once)
     # (a measured massing's bands share the colour of the building's first, its lowest: the bands are stacked, each
     # ring over the whole of the ones above it, and sampling each cost the photo's pass twice the pixels, 2026-11-10)
@@ -5510,6 +5606,10 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             at = dict(at, _fr_location=(hlat, hlon), _fr_altitude=float(np.nanmean(g_all[i0:i1])),
                       _fr_part=look is not None or mh > .5, _fr_neighbours=int(sh),
                       _fr_residential=bool(house_res[k]) if house_res is not None else False)
+        if de_info is not None:
+            de_lo, de_la, de_mask = de_info
+            at = dict(at, _de_in=bool(de_mask[k]), _de_lon=float(de_lo[k]), _de_lat=float(de_la[k]),
+                      _de_alpine=bool(alpine), _de_neighbours=int(sh))
         spec = plan(ring, at, int(sh) if look is None else 0, clat, clon, look, town, dense, west_town, alpine)
         spec.min_h = mh
         # (a building drawn from its parts (the map's, New York's 3-D model's): its tank on its topmost part, the
@@ -5557,6 +5657,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             passages = (np.ascontiguousarray(np.concatenate(tun_passages[0]), np.float64),
                         np.ascontiguousarray(np.concatenate(tun_passages[1]), np.float64))
         out = road_clearance(out, carriageways, frame, x0, y0, elev, clear_stats, passages=passages)
+    if de_info is not None and out:
+        de_enhancer.apply_roof_overhangs(out)
     return out
 
 

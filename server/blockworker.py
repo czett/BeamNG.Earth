@@ -3170,8 +3170,11 @@ def far_buildings_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, lamp_regio
     import buildings as buildingsmod
     import revisit
     frame = geodesy.EnuFrame(lat, lon)
+    import de_enhancer
+    box = roadsmod_tile_bbox(tx, ty)
     k = revisit.key("bldfar", round(float(lat), 7), round(float(lon), 7), zoom, tx, ty,
-                    _md_versions(True), lamp_region, bool(left_hand), _nyc_key(frame, roadsmod_tile_bbox(tx, ty)))
+                    _md_versions(True), lamp_region, bool(left_hand), _nyc_key(frame, box),
+                    *de_enhancer.cache_parts(frame, box))
     return _revisit_tile("bldfar", k, aid, tx, ty, out_dir, vfs_dir, f"bldfar_{aid}_{tx}_{ty}.json",
                          lambda: buildingsmod.far_tile(frame, tx, ty, _s.md,
                                                        lambda la, lo: ground(frame, la, lo, _s.dem.sample(la, lo, zoom)),
@@ -3442,10 +3445,15 @@ def far_geo(kind, gx, gy, gzoom, out_dir, vfs_dir, lamp_region=None):
     tile = geotiles.geobox(gx, gy, z)
     names = far_geo_names(kind, tile.key)
     style = buildingsmod.PACK_STYLE if kind == "bldpack" else "lite"
+    de_imm = ()
+    if kind in ("bldfar", "bldpack"):
+        import de_enhancer
+        de_imm = de_enhancer.cache_parts(tile.frame, tile.box)
     k = revisit.key(kind, "g", tile.key, int(gzoom), _md_versions(kind != "brfar"), lamp_region,
                     _nyc_key(tile.frame, tile.box) if kind in ("bldfar", "bldpack") else None,
                     *((f"style={style}",) if style != "lite" else ()),     # (the lite packs' keys as before)
-                    *(_bldhz_key(gx, gy) if kind == "bldhz" else ()))
+                    *(_bldhz_key(gx, gy) if kind == "bldhz" else ()),
+                    *de_imm)
     frame_ll = (float(tile.frame.lat0), float(tile.frame.lon0))
     got = revisit.load(_s.cache_dir, kind, k)
     if got is not None:

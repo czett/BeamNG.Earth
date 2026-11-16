@@ -12,6 +12,12 @@
         "roughnessMap": "/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_r.data.png",
         "ambientOcclusionMap": "/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_ao.data.png",
         "metallicMap": "/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_m.data.png",
+        "clearCoatMap": "/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_m.data.png",
+        "clearCoatFactor": 0.95,
+        "clearCoatRoughnessFactor": 0.045,
+        "metallicFactor": 0.2,
+        "roughnessFactor": 1.0,
+        "normalMapStrength": 1.0,
         "baseColorFactor": [
           1,
           1,
@@ -30,6 +36,7 @@
       {},
       {}
     ],
+    "dynamicCubemap": true,
     "translucent": false
   },
   "bne_bld_shop": {
@@ -45,6 +52,8 @@
         "roughnessMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_r.data.png",
         "ambientOcclusionMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_ao.data.png",
         "metallicMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_m.data.png",
+        "metallicFactor": 0.75,
+        "roughnessFactor": 1.0,
         "baseColorFactor": [
           1,
           1,
@@ -63,6 +72,7 @@
       {},
       {}
     ],
+    "dynamicCubemap": true,
     "translucent": false
   },
   "bne_bld_office": {
@@ -78,6 +88,8 @@
         "roughnessMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_r.data.png",
         "ambientOcclusionMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_ao.data.png",
         "metallicMap": "/assets/materials/trim/metal/t_highrise_metal/t_highrise_metal_m.data.png",
+        "metallicFactor": 0.75,
+        "roughnessFactor": 1.0,
         "baseColorFactor": [
           1,
           1,
@@ -96,6 +108,7 @@
       {},
       {}
     ],
+    "dynamicCubemap": true,
     "translucent": false
   },
   "bne_bld_roof_flat": {
@@ -107,6 +120,9 @@
     "Stages": [
       {
         "baseColorMap": "/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_b.color.png",
+        "normalMap": "/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_nm.normal.png",
+        "roughnessMap": "/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_r.data.png",
+        "ambientOcclusionMap": "/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_ao.data.png",
         "metallicFactor": 0,
         "baseColorFactor": [
           1,
@@ -115,7 +131,7 @@
           1
         ],
         "vertColor": true,
-        "roughnessFactor": 0.9
+        "roughnessFactor": 1.0
       },
       {},
       {},
@@ -290,7 +306,10 @@
     "Stages": [
       {
         "baseColorMap": "/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_b.color.png",
-        "roughnessFactor": 0.85,
+        "normalMap": "/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_nm.normal.png",
+        "roughnessMap": "/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_r.data.png",
+        "ambientOcclusionMap": "/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_ao.data.png",
+        "roughnessFactor": 1.0,
         "metallicFactor": 0,
         "baseColorFactor": [
           1,
@@ -315,8 +334,12 @@
     "Stages": [
       {
         "baseColorMap": "/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_b.color.png",
-        "roughnessFactor": 0.85,
-        "metallicFactor": 0,
+        "normalMap": "/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_nm.normal.png",
+        "roughnessMap": "/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_r.data.png",
+        "ambientOcclusionMap": "/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_ao.data.png",
+        "metallicMap": "/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_m.data.png",
+        "roughnessFactor": 1.0,
+        "metallicFactor": 0.75,
         "baseColorFactor": [
           1,
           1,
@@ -807,6 +830,8 @@
         "normalMap": "/assets/materials/trim/metal/m_facade_corporate/t_windows_corporate_nm.normal.png",
         "roughnessMap": "/assets/materials/trim/metal/m_facade_corporate/t_windows_corporate_r.data.png",
         "metallicMap": "/assets/materials/trim/metal/m_facade_corporate/t_windows_corporate_m.data.png",
+        "metallicFactor": 0.65,
+        "roughnessFactor": 1.0,
         "baseColorFactor": [
           1,
           1,
@@ -819,6 +844,7 @@
       {},
       {}
     ],
+    "dynamicCubemap": true,
     "translucent": false
   },
   "bne_bld_roof_slate_round": {

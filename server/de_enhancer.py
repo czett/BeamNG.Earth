@@ -70,6 +70,65 @@ def cache_parts(frame, box) -> tuple:
     return (True, PACKAGE_VERSION, _package_digest(), germany.signature())
 
 
+def is_de_spec(spec) -> bool:
+    """True when the DE enhancer is active and `spec` is tagged inside Germany."""
+    return enabled() and bool(getattr(spec, "de_in", False))
+
+
+def adapt_building(spec, attrs, lat, lon):
+    """Apply German facade/roof classification and color grading to `spec` when enabled."""
+    if not enabled():
+        return spec
+    from de_street_enhancer.facade_style import adapt_building as _adapt_building
+    return _adapt_building(spec, attrs, lat, lon)
+
+
+def apply_roof_overhangs(items) -> None:
+    """Compute neighbor-safe per-edge roof overhangs across tile building items."""
+    if not enabled() or not items:
+        return
+    from de_street_enhancer.facade_style import compute_roof_overhangs
+    compute_roof_overhangs(items)
+
+
+def offset_ring_safe(ring, edge_oh):
+    """Outward polygon offset safe against self-intersections for DE roofs."""
+    from de_street_enhancer.facade_style import offset_ring_safe as _offset_ring_safe
+    return _offset_ring_safe(ring, edge_oh)
+
+
+def cornice_look(spec, mat_idx):
+    """Return `(mat_id, rgba)` for flat-roof parapets/cornices inside Germany."""
+    from de_street_enhancer.facade_style import DE_CORNICE_RGB
+    import buildings as bld
+    return mat_idx[bld.custom_look(bld.FACADE, DE_CORNICE_RGB)]
+
+
+def tile_geoms(lo_all, la_all, ends):
+    """Return `(clo, cla, in_de_mask)` per building centroid when enabled & touching DE, else `None`."""
+    if not enabled() or len(lo_all) == 0 or len(ends) == 0:
+        return None
+    if not germany.touches(lo_all, la_all):
+        return None
+    ends_i = np.asarray(ends, np.int64)
+    starts = np.concatenate(([0], ends_i[:-1]))
+    cnt = np.maximum(ends_i - starts, 1)
+    cla = np.add.reduceat(la_all, starts) / cnt
+    clo = np.add.reduceat(lo_all, starts) / cnt
+    in_de = germany.contains(clo, cla)
+    if not in_de.any():
+        return None
+    return clo, cla, in_de
+
+
+def bake_building_depth(mesh, spec, gmin, gmax, z_eave, lite, mat_idx) -> None:
+    """Split vertical wall quads (Option B near) and bake Sockel + under-eave AO."""
+    if not is_de_spec(spec):
+        return
+    from de_street_enhancer.facade_style import bake_building_depth as _bake_building_depth
+    _bake_building_depth(mesh, spec, gmin, gmax, z_eave, lite, mat_idx)
+
+
 def suppress_default_fences(frame, box) -> bool:
     """Suppress North American `_front_fence` rows on DE enhanced tiles."""
     return enabled() and in_germany(frame, box)
