@@ -92,14 +92,12 @@ DE_SKIP_CLASSES = frozenset({
     "toll_booth",
 })
 
-# Weighted front-yard style mix for suburban/residential German properties.
+# Weighted front-yard style mix for suburban/residential German properties (~65% hedges, ~35% fences).
 DE_YARD_STYLES = (
-    ("hedge", 0.42),
-    ("wood", 0.18),
-    ("rails", 0.12),
-    ("mesh", 0.16),
-    ("slats", 0.06),
-    ("iron", 0.06),
+    ("hedge", 0.65),
+    ("iron", 0.14),
+    ("slats", 0.11),
+    ("wood", 0.10),
 )
 
 
@@ -497,15 +495,14 @@ def classify_residential_yards(
     for spec, _, _ in items:
         if (spec.min_h or 0.0) > 0.5 or getattr(spec, "portal", False) or getattr(spec, "deck", False) or getattr(spec, "ship", False):
             continue
-        if getattr(spec, "shop", False) or getattr(spec, "door", None) is None:
+        if getattr(spec, "shop", False):
             continue
         cls = (getattr(spec, "cls", None) or "").lower()
         if cls in DE_SKIP_CLASSES or (cls not in DE_HOUSE_CLASSES and cls not in DE_UNTYPED_HOUSE):
             continue
-        # When Overture/OSM omitted an explicit pitched roof tag on an untyped building, still allow
-        # windowed non-industrial dwellings while guarding against windowless/plain commercial sheds.
+        # Guard only against obviously windowless/plain industrial sheds on untyped footprints.
         if cls in DE_UNTYPED_HOUSE and getattr(spec, "roof", "flat") == "flat":
-            if getattr(spec, "plain", False) or getattr(spec, "windows", True) is False:
+            if getattr(spec, "plain", False) and getattr(spec, "windows", True) is False:
                 continue
         if (getattr(spec, "floors", 1) or 1) > 3:
             continue
@@ -514,14 +511,11 @@ def classify_residential_yards(
         if ring.ndim != 2 or ring.shape[0] < 3 or ring.shape[1] < 2 or not np.isfinite(ring[:, :2]).all():
             continue
         area = abs(buildings._area2(ring)) / 2.0
-        min_area = 42.0 if cls in DE_UNTYPED_HOUSE and (spec.floors or 1) == 1 else 28.0
+        min_area = 34.0 if cls in DE_UNTYPED_HOUSE and (spec.floors or 1) == 1 else 24.0
         if not (min_area <= area <= 650.0):
             continue
         c = ring.mean(axis=0)
         if not (x0 <= float(c[0]) < x0 + tile_size and y0 <= float(c[1]) < y0 + tile_size):
-            continue
-        # Leave ~18% of front yards unenclosed for natural variety.
-        if _hash01(spec.seed, "de_yard_on") >= 0.82:
             continue
         style = _pick_yard_style(_hash01(spec.seed, "de_yard_style"))
         cands.append((spec, ring, style, float(c[0]), float(c[1])))

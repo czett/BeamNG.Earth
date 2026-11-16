@@ -51,11 +51,17 @@ LAMP_MOUNT_BASE_Z_M = 2.75
 FASCIA_THICK_M = 0.16
 
 # Residential front-yard hedge & fence constants
-DE_YARD_CLEAR_ROAD_M = 1.15
-DE_YARD_WALK_OFFSET_M = 0.25
-DE_YARD_MIN_DEPTH_M = 0.60
+DE_YARD_CLEAR_ROAD_M = 0.35
+DE_YARD_WALK_OFFSET_M = 0.20
+DE_YARD_MIN_CLEAR_WALK_M = 0.35
+DE_YARD_MIN_NO_WALK_M = 0.95
+DE_YARD_WALL_OFFSET_M = 0.55
 DE_YARD_MAX_DEPTH_M = 18.0
 DE_YARD_MAX_LEN_M = 22.0
+DE_YARD_GAP_HALF_M = 1.4
+DE_HEDGE_STEP_M = 0.95
+DE_YARD_MIN_SPAN_M = 0.55
+DE_HEDGE_Z_SEAT_M = -0.04
 
 
 @dataclass(frozen=True)
@@ -774,7 +780,7 @@ def _driveway_gaps(
     gaps: list[tuple[float, float]] = []
     if door is not None and door[0] == edge:
         dp = a_edge + d_edge * float(door[1])
-        gaps.append((float(np.dot(dp - centre, tangent)), 1.5))
+        gaps.append((float(np.dot(dp - centre, tangent)), DE_YARD_GAP_HALF_M))
 
     p0 = centre - tangent * half_len
     p1 = centre + tangent * half_len
@@ -795,6 +801,48 @@ def _driveway_gaps(
                     if perp <= half_w + 1.4:
                         gaps.append((t_b, float(half_w) + 0.9))
     return gaps
+
+
+def _de_street_front(ring: np.ndarray, streets, door):
+    """DE-specific street-facing wall selector supporting narrow German townhouses (>= 2.6 m) and compact yards (>= 0.95 m)."""
+    from buildings import _area2
+
+    start, direction, length, half, local = streets
+    ends = np.roll(ring, -1, axis=0)
+    mid = (ring + ends) / 2.0
+    edges = ends - ring
+    widths = dnp.norm(edges, axis=1)
+    along = edges / np.maximum(widths, 1e-9)[:, None]
+    toward = np.c_[along[:, 1], -along[:, 0]] * (1 if _area2(ring) > 0 else -1)
+    rel = mid[:, None, :] - start
+    station = np.sum(rel * direction, axis=2)
+    q = start + np.clip(station, 0.0, length)[..., None] * direction
+    delta = mid[:, None, :] - q
+    gap = dnp.norm(delta, axis=2)
+    setback = gap - half
+    faces = np.sum(delta * toward[:, None, :], axis=2) <= -0.57 * gap
+    parallel = np.abs(dnp.matmul(along, direction.T)) >= 0.58
+    abreast = (station >= -2.5) & (station <= length + 2.5)
+    eligible = faces & parallel & abreast & (setback >= DE_YARD_MIN_NO_WALK_M) & (setback <= 22.0) & (widths[:, None] >= 2.6)
+    if not eligible.any():
+        return None
+    rank = np.where(eligible, setback - 0.45 * local, np.inf)
+    if door is not None and door[0] < len(ring):
+        rank[door[0]] -= 1.1
+    edge, road = np.unravel_index(rank.argmin(), rank.shape)
+    tangent = direction[road] * (1 if dnp.matmul(direction[road], along[edge]) > 0 else -1)
+    return (
+        edge,
+        mid[edge],
+        along[edge],
+        widths[edge],
+        q[edge, road],
+        delta[edge, road] / max(float(gap[edge, road]), 1e-6),
+        tangent,
+        half[road],
+        setback[edge, road],
+        local[road],
+    )
 
 
 def place_residential_yards(
@@ -829,7 +877,7 @@ def place_residential_yards(
             road_bands.append((xy, float(sp.width) / 2.0))
     if not road_bands:
         return []
-    road_blocks = _expand_blocker_segments([(ln, hw) for ln, hw in road_bands], extra_hw=max(0.0, DE_YARD_CLEAR_ROAD_M - 0.05))
+    road_blocks = _expand_blocker_segments([(ln, hw) for ln, hw in road_bands], extra_hw=DE_YARD_CLEAR_ROAD_M)
 
     walk_bands: list[tuple[np.ndarray, float]] = []
     for w in walks or ():
@@ -837,7 +885,7 @@ def place_residential_yards(
             xy = _finite_2d(w["pts"], min_pts=2)
             if xy is not None:
                 walk_bands.append((xy, float(w.get("w", roadsmod.SIDEWALK["w"])) / 2.0))
-    walk_blocks = _expand_blocker_segments([(ln, hw + 0.12) for ln, hw in walk_bands], extra_hw=0.05)
+    walk_blocks = _expand_blocker_segments([(ln, hw) for ln, hw in walk_bands], extra_hw=0.02)
 
     import streetfront
     walk_edges: list[np.ndarray] = []
@@ -868,13 +916,12 @@ def place_residential_yards(
     pending: list[tuple] = []
 
     for spec, ring, style in houses:
-        front = fences._street_front(ring, streets, getattr(spec, "door", None))
+        front = _de_street_front(ring, streets, getattr(spec, "door", None))
         if front is None:
             continue
-        edge, mid, along, wall_w, q, out, tangent, half_road, setback, _local = front
+        edge, _mid, along, wall_w, q, out, tangent, half_road, setback, _local = front
 
-        # Place front boundary behind actual sidewalk outer edge (`walk_walls.ray` like fences.py:453-458).
-        offset = float(half_road) + DE_YARD_CLEAR_ROAD_M
+        # Probe sidewalk outer back edge along front-wall outward normal (`walk_walls.ray`).
         curb_probe = q + (float(half_road) - 0.15) * out
         first = None
         if (
@@ -883,7 +930,9 @@ def place_residential_yards(
             and np.isfinite(curb_probe).all()
             and np.isfinite(out).all()
         ):
-            first = walk_walls.ray(curb_probe, out, min(4.5, float(setback)))
+            first = walk_walls.ray(curb_probe, out, min(5.5, float(setback)))
+
+        wall_offset = float(half_road) + float(setback)
         if first is not None:
             reach_second = min(4.9, float(setback) - first + 0.1)
             second = (
@@ -892,16 +941,25 @@ def place_residential_yards(
                 else None
             )
             edge_of_walk = first if second is None else first + 0.04 + second
-            offset = max(offset, float(half_road) - 0.15 + edge_of_walk + DE_YARD_WALK_OFFSET_M)
+            walk_back_offset = float(half_road) - 0.15 + edge_of_walk
+            clearance = wall_offset - walk_back_offset
+            if clearance < DE_YARD_MIN_CLEAR_WALK_M or clearance > DE_YARD_MAX_DEPTH_M:
+                continue
+            # 0.20 m behind sidewalk back edge when roomy; 0.55 m in front of wall when narrow (never on sidewalk).
+            if clearance >= DE_YARD_WALK_OFFSET_M + DE_YARD_WALL_OFFSET_M:
+                offset = walk_back_offset + DE_YARD_WALK_OFFSET_M
+            else:
+                offset = max(walk_back_offset + 0.10, min(walk_back_offset + DE_YARD_WALK_OFFSET_M, wall_offset - DE_YARD_WALL_OFFSET_M))
         else:
-            offset = max(offset, float(half_road) + roadsmod.SIDEWALK["w"] + DE_YARD_WALK_OFFSET_M)
-        depth = float(setback) + float(half_road) - offset
-        if not (DE_YARD_MIN_DEPTH_M <= depth <= DE_YARD_MAX_DEPTH_M):
-            continue
+            if float(setback) < DE_YARD_MIN_NO_WALK_M or float(setback) > DE_YARD_MAX_DEPTH_M:
+                continue
+            offset = max(float(half_road) + 0.40, wall_offset - DE_YARD_WALL_OFFSET_M)
+            if float(setback) > 3.2:
+                offset = min(offset, float(half_road) + 2.20)
 
         centre = q + offset * out
-        length = min(wall_w * abs(float(np.dot(along, tangent))) - 0.35, DE_YARD_MAX_LEN_M)
-        if length < 2.2:
+        length = min(wall_w * abs(float(np.dot(along, tangent))) - 0.25, DE_YARD_MAX_LEN_M)
+        if length < 2.0:
             continue
 
         # Skip if existing OSM mapped barrier/fence/hedge already covers this frontage.
@@ -916,7 +974,7 @@ def place_residential_yards(
         # Carve out contiguous intervals outside doorway & driveway gaps.
         half_l = length * 0.5
         intervals = [(-half_l, half_l)]
-        pad_g = 2.05 if style == "hedge" else 1.55
+        pad_g = DE_YARD_GAP_HALF_M
         for g_c, g_hw in gaps:
             cut_lo, cut_hi = g_c - max(g_hw, pad_g), g_c + max(g_hw, pad_g)
             nxt: list[tuple[float, float]] = []
@@ -924,22 +982,25 @@ def place_residential_yards(
                 if cut_hi <= s0 or cut_lo >= s1:
                     nxt.append((s0, s1))
                 else:
-                    if cut_lo - s0 >= (0.9 if style == "hedge" else 0.72):
+                    if cut_lo - s0 >= DE_YARD_MIN_SPAN_M:
                         nxt.append((s0, cut_lo))
-                    if s1 - cut_hi >= (0.9 if style == "hedge" else 0.72):
+                    if s1 - cut_hi >= DE_YARD_MIN_SPAN_M:
                         nxt.append((cut_hi, s1))
             intervals = nxt
 
         for s0, s1 in intervals:
             line = np.array([centre + s0 * tangent, centre + s1 * tangent], dtype=np.float64)
             if style == "hedge":
-                # Sample compact German Liguster/Buchsbaum hedge line.
+                # Continuous overlapping German Liguster/Buchsbaum hedge line (0.95 m pitch).
                 span = float(np.linalg.norm(line[1] - line[0]))
-                n_seg = max(1, int(round(span / fences.HEDGE_STEP_M)))
+                inset = min(0.35, span * 0.25)
+                usable = max(0.0, span - 2.0 * inset)
+                n_seg = max(1, int(math.floor(usable / DE_HEDGE_STEP_M)) + 1)
                 for k in range(n_seg):
-                    p = line[0] + (line[1] - line[0]) * ((k + 0.5) / n_seg)
-                    h_val = 0.85 + 0.15 * _hash01(spec.seed, "de_h", k)
-                    pending.append((fences.G_HEDGE, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, 0.0))
+                    t_pos = 0.5 if n_seg == 1 else (inset + usable * (k / (n_seg - 1))) / max(span, 1e-6)
+                    p = line[0] + (line[1] - line[0]) * t_pos
+                    h_val = 0.95 + 0.30 * _hash01(spec.seed, "de_h", k)
+                    pending.append((fences.G_HEDGE, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, DE_HEDGE_Z_SEAT_M))
             else:
                 for p, d, panel_len in fences._panels(line, spacing=fences.PANEL_M):
                     pending.append(fences._french_panel_row(style, p, d, panel_len))
@@ -947,7 +1008,8 @@ def place_residential_yards(
     if not pending:
         return []
 
-    # Final spatial safety pass against all carriageways, sidewalks, and buildings.
+    # Final spatial safety pass against all carriageways, sidewalks, driveways, and buildings.
+    drive_blocks = _expand_blocker_segments(access_lines, extra_hw=0.25)
     cleared: list[tuple] = []
     rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
     for row in pending:
@@ -959,14 +1021,12 @@ def place_residential_yards(
             continue
         if _points_near_segments_safe(pt, walk_blocks):
             continue
+        if drive_blocks is not None and _points_near_segments_safe(pt, drive_blocks):
+            continue
         if any(classifier._point_in_ring(pt[0], rr) for rr in rings_arr):
             continue
         cleared.append(row)
 
-    if not cleared:
-        return []
-
-    cleared = [r for r in fences._clear_hedges(cleared, road_bands + access_lines) if r is not None]
     if not cleared:
         return []
 

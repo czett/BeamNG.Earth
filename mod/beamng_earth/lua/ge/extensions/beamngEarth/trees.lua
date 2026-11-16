@@ -419,6 +419,8 @@ M.CATALOG.fr_hedge = { M.CATALOG.shrub[1] } -- Stock East Coast USA broadleaf sh
 M.CATALOG.fr_fence_hedge = M.CATALOG.fr_hedge -- Older server rows still use the same stock bush.
 M.GROUP_MAX_M.fr_hedge = 350
 M.GROUP_MAX_M.fr_fence_hedge = 350
+M.ONE_SPELLING.fr_hedge = true
+M.ONE_SPELLING.fr_fence_hedge = true
 M.NO_COLLIDE.fr_hedge = true
 M.NO_COLLIDE.fr_fence_hedge = true
 for group, asset in pairs(require('beamngEarth/frRadarAssets')) do
