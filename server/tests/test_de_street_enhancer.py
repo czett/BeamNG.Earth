@@ -679,7 +679,7 @@ class FacadeRealismAndExpansionTest(unittest.TestCase):
             (buildings.Spec(ring=terrace_ring, floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="terrace", seed=0.05, door=(0, 3.5), min_h=0.0), 0.0, 0.0),
             (buildings.Spec(ring=flat_house_ring, floors=2, floor_h=2.8, height=5.6, roof="flat", shop=False, cls="house", seed=0.05, door=(0, 5.0), min_h=0.0), 0.0, 0.0),
             (buildings.Spec(ring=apt_ring, floors=3, floor_h=2.8, height=8.4, roof="flat", shop=False, cls="apartments", seed=0.05, door=(0, 11.0), min_h=0.0), 0.0, 0.0),
-            (buildings.Spec(ring=big_apt_ring, floors=5, floor_h=2.8, height=14.0, roof="flat", shop=False, cls="apartments", seed=0.05, door=(0, 12.0), min_h=0.0), 0.0, 0.0),
+            (buildings.Spec(ring=big_apt_ring, floors=6, floor_h=2.8, height=16.8, roof="flat", shop=False, cls="apartments", seed=0.05, door=(0, 12.0), min_h=0.0), 0.0, 0.0),
         ]
         with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
             eligible = classifier.classify_residential_yards(specs, frame, 0, 0)
@@ -693,7 +693,7 @@ class FacadeRealismAndExpansionTest(unittest.TestCase):
         self.assertTrue(any(60.0 <= x <= 67.0 for x in xs), f"terrace missing front yard: {xs}")
         self.assertTrue(any(85.0 <= x <= 95.0 for x in xs), f"flat-roof house missing front yard: {xs}")
         self.assertTrue(any(115.0 <= x <= 137.0 for x in xs), f"small apartments missing front yard: {xs}")
-        self.assertFalse(any(155.0 <= x <= 180.0 for x in xs), f"5-floor apartment should be excluded: {xs}")
+        self.assertFalse(any(155.0 <= x <= 180.0 for x in xs), f"6-floor apartment should be excluded: {xs}")
 
     def test_far_geo_cache_key_parity_outside_de(self):
         nyc_frame = geodesy.EnuFrame(40.758, -73.985)
@@ -819,61 +819,72 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         self.assertGreater(len(nw_rows), 10, "expected hedges/fences on curbless living_street")
         self.assertTrue(all(float(r[2]) >= 183.15 for r in nw_rows), f"boundary intruded into road: {nw_rows[:5]}")
 
-    def test_pillar2_parked_car_clusters_clearances_and_tram_exclusion(self):
-        from de_street_enhancer import parking_de
-
+    def test_residential_yard_wall_clearance_narrow_fallback_and_suburb_apartments(self):
         frame = geodesy.EnuFrame(*MUNICH)
         box = (0.0, 0.0, 256.0, 256.0)
-        # Residential 6.0 m road + crossing road at x=128 + secondary collector with tram track at y=200.
-        r_res_w = np.array([[0.0, 100.0, 0.0], [128.0, 100.0, 0.0]], dtype=np.float64)
-        r_res_e = np.array([[128.0, 100.0, 0.0], [256.0, 100.0, 0.0]], dtype=np.float64)
-        r_cross = np.array([[128.0, 20.0, 0.0], [128.0, 160.0, 0.0]], dtype=np.float64)
-        r_tram_sec = np.array([[10.0, 200.0, 0.0], [246.0, 200.0, 0.0]], dtype=np.float64)
-        near_roads = [
-            ("r_res_w", _road_spec("residential", 6.0), r_res_w, MUNICH[1]),
-            ("r_res_e", _road_spec("residential", 6.0), r_res_e, MUNICH[1]),
-            ("r_cross", _road_spec("unclassified", 5.5), r_cross, MUNICH[1]),
-            ("r_sec_tram", _road_spec("secondary", 8.0), r_tram_sec, MUNICH[1]),
-        ]
-        walks = [{"fid": "r_res_w", "pts": np.array([[0.0, 103.8, 0.0], [128.0, 103.8, 0.0]]), "side": 1, "w": 1.6}]
-        drives = [{"w": 3.0, "n": [[50.0, 112.0, 0.0], [50.0, 103.0, 0.0]]}]
-        lot_spot = [[200.0, 50.0, 0.0, 90.0, 1]]
+        # Road along y=100 (half=3.0 -> curb at 103.0), sidewalk w=2.0 centered at y=104.0 (back edge at 105.0).
+        road_pts = np.array([[0.0, 100.0, 0.0], [256.0, 100.0, 0.0]], dtype=np.float64)
+        near_roads = [("r_res", _road_spec("residential", 6.0), road_pts, MUNICH[1])]
+        walks = [{"fid": "r_res", "pts": np.array([[0.0, 104.0, 0.0], [256.0, 104.0, 0.0]]), "side": 1, "w": 2.0}]
 
-        # Fake infrastructure with a bus_stop at (210, 103) and a tram line along y=200.
-        la_bs, lo_bs, _ = frame.enu_to_geodetic(210.0, 103.0, 0.0)
-        infra_feats = mapgeom.Features(
-            layer="infrastructure",
-            lonlat=np.array([[lo_bs, la_bs]], dtype=np.float64),
-            coord_off=np.array([0, 1], dtype=np.int64),
-            ring_off=np.array([0, 1], dtype=np.int64),
-            part_off=np.array([0, 1], dtype=np.int64),
-            kind=np.array([1], dtype=np.int8),
-            attrs={"class": np.array(["bus_stop"], dtype=object), "tags": np.array(['{"highway":"bus_stop"}'], dtype=object)},
-            ids=np.array(["bs1"], dtype=object),
+        # Pick a seed that selects "hedge" in classifier.DE_YARD_STYLES (0.05 -> "hedge").
+        # 1) Narrow clearance behind sidewalk: c = 0.80 m (wall at y=105.8, sidewalk back at 105.0) -> must fall back to slim fence.
+        narrow_ring = np.array([[20.0, 105.8], [34.0, 105.8], [34.0, 115.8], [20.0, 115.8]], dtype=np.float64)
+        narrow_spec = buildings.Spec(
+            ring=narrow_ring, floors=2, floor_h=2.8, height=5.6, roof="gabled", shop=False,
+            cls="house", seed=0.05, door=(0, 7.0), min_h=0.0,
         )
-        fake_md = types.SimpleNamespace(
-            cell=lambda key, layers=(), kind="demand": types.SimpleNamespace(
-                layers={"infrastructure": infra_feats if "infrastructure" in layers else None}
-            )
+        # 2) Roomy suburban 5-floor apartment block (area = 40 * 30 = 1200 m^2 <= 1400, floors=5), wall at y=107.0 (c = 2.0 m).
+        apt_ring = np.array([[60.0, 107.0], [100.0, 107.0], [100.0, 137.0], [60.0, 137.0]], dtype=np.float64)
+        apt_spec = buildings.Spec(
+            ring=apt_ring, floors=5, floor_h=2.8, height=14.0, roof="flat", shop=False,
+            cls="apartments", seed=0.05, door=(0, 20.0), min_h=0.0,
         )
-        tram_line = np.array([[10.0, 200.0], [246.0, 200.0]], dtype=np.float64)
-        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}), mock.patch.object(
-            parking_de, "_tram_polylines", return_value=[tram_line]
-        ):
-            out = parking_de.refine_parking_spots(
-                fake_md, frame, 0, 0, box, near_roads, walks, [], drives, [], [], lot_spot, _flat_ground
+        # 3) Neighboring zero-setback wing protruding to y=105.3 near x=[72..78] to verify fr_hedge never spawns within 0.85 m of ANY ring.
+        wing_ring = np.array([[72.0, 105.3], [78.0, 105.3], [78.0, 107.0], [72.0, 107.0]], dtype=np.float64)
+        # 4) Excluded shop & inner-city zero-setback perimeter block (wall at y=105.1 -> c=0.10 < 0.35).
+        shop_spec = buildings.Spec(
+            ring=np.array([[120.0, 107.0], [132.0, 107.0], [132.0, 117.0], [120.0, 117.0]], dtype=np.float64),
+            floors=2, floor_h=3.0, height=6.0, roof="flat", shop=True, cls="apartments", seed=0.05, door=(0, 6.0), min_h=0.0,
+        )
+        zero_setback_ring = np.array([[150.0, 105.1], [166.0, 105.1], [166.0, 115.1], [150.0, 115.1]], dtype=np.float64)
+        zero_spec = buildings.Spec(
+            ring=zero_setback_ring, floors=3, floor_h=2.8, height=8.4, roof="flat", shop=False,
+            cls="apartments", seed=0.05, door=(0, 8.0), min_h=0.0,
+        )
+
+        specs = [(narrow_spec, 0.0, 0.0), (apt_spec, 0.0, 0.0), (shop_spec, 0.0, 0.0), (zero_spec, 0.0, 0.0)]
+        all_rings = [narrow_ring, apt_ring, wing_ring, shop_spec.ring, zero_setback_ring]
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            eligible = classifier.classify_residential_yards(specs, frame, 0.0, 0.0)
+            eligible_specs = [sp for sp, _rg, _st in eligible]
+            self.assertIn(apt_spec, eligible_specs, "5-floor <=1400 m^2 suburban apartment block should be eligible")
+            self.assertNotIn(shop_spec, eligible_specs, "shop=True building must be excluded")
+            rows = placement.place_residential_yards(
+                frame, box, specs, near_roads, walks, [], None, all_rings, _flat_ground, md=None
             )
 
-        self.assertIn(lot_spot[0], out)
-        curb = [r for r in out if r[4] == 0]
-        self.assertGreater(len(curb), 6, f"expected residential curb spots, got {curb}")
-        for r in curb:
-            x, y = float(r[0]), float(r[1])
-            self.assertEqual((r[5], r[6]), (2.30, 5.5))
-            self.assertGreaterEqual(math.hypot(x - 128.0, y - 100.0), 10.0 - 1e-6)
-            self.assertGreaterEqual(math.hypot(x - 210.0, y - 103.0), 12.0 - 1e-6)
-            self.assertGreaterEqual(math.hypot(x - 50.0, y - 103.0), 4.2 - 1e-6)
-            self.assertLess(y, 180.0, f"tram-shared secondary collector should have 0 spots: {r}")
+        narrow_rows = [r for r in rows if 19.0 <= float(r[1]) <= 35.0]
+        self.assertGreater(len(narrow_rows), 0, "narrow front yard should fall back to slim fence")
+        self.assertTrue(
+            all(str(r[0]).startswith("fr_fence_") for r in narrow_rows),
+            f"narrow yard (<1.05 m) must not emit fr_hedge: {narrow_rows}",
+        )
+        apt_rows = [r for r in rows if 59.0 <= float(r[1]) <= 101.0]
+        self.assertTrue(any(r[0] == "fr_hedge" for r in apt_rows), "roomy 5-floor apartment yard should emit fr_hedge")
+        zero_rows = [r for r in rows if 149.0 <= float(r[1]) <= 167.0]
+        self.assertEqual(zero_rows, [], f"zero-setback perimeter block should emit no yard rows: {zero_rows}")
+
+        # Verify strict building-footprint clearance for every emitted row against all building rings.
+        closed = [(np.vstack([rr, rr[:1]]), 0.0) for rr in all_rings]
+        hedge_blocks = placement._expand_blocker_segments(closed, extra_hw=0.85 - 1e-6)
+        fence_blocks = placement._expand_blocker_segments(closed, extra_hw=0.25 - 1e-6)
+        for r in rows:
+            pt = np.array([[float(r[1]), float(r[2])]], dtype=np.float64)
+            if r[0] == "fr_hedge":
+                self.assertFalse(placement._points_near_segments_safe(pt, hedge_blocks), f"fr_hedge within 0.85 m of wall: {r}")
+            else:
+                self.assertFalse(placement._points_near_segments_safe(pt, fence_blocks), f"fr_fence within 0.25 m of wall: {r}")
 
     def test_pillar3_bus_stop_micro_props_and_shelter_suppression(self):
         import shelters

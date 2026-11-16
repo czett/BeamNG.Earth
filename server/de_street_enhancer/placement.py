@@ -53,7 +53,11 @@ FASCIA_THICK_M = 0.16
 # Residential front-yard hedge & fence constants
 DE_YARD_CLEAR_ROAD_M = 0.35
 DE_YARD_WALK_OFFSET_M = 0.20
-DE_YARD_MIN_CLEAR_WALK_M = 0.25
+DE_YARD_MIN_CLEAR_WALK_M = 0.35
+DE_YARD_HEDGE_MIN_CLEAR_M = 1.05
+DE_YARD_HEDGE_WALL_CLEAR_M = 0.85
+DE_YARD_FENCE_WALL_CLEAR_M = 0.25
+DE_SLIM_FENCE_STYLES = ("iron", "slats", "wood")
 DE_YARD_MIN_NO_WALK_M = 0.65
 DE_YARD_WALL_OFFSET_M = 0.55
 DE_YARD_MAX_DEPTH_M = 18.0
@@ -1006,6 +1010,13 @@ def place_residential_yards(
                 offset = min(offset, float(half_road) + 2.20)
 
         centre = q + offset * out
+        yard_style = style
+        if yard_style == "hedge" and (
+            (first is not None and clearance < DE_YARD_HEDGE_MIN_CLEAR_M)
+            or (first is None and (wall_offset - offset) < DE_YARD_HEDGE_WALL_CLEAR_M)
+        ):
+            idx = int(_hash01(spec.seed, "de_slim_fence") * len(DE_SLIM_FENCE_STYLES)) % len(DE_SLIM_FENCE_STYLES)
+            yard_style = DE_SLIM_FENCE_STYLES[idx]
         length = min(wall_w * abs(float(np.dot(along, tangent))), DE_YARD_MAX_LEN_M)
         if length < 1.8:
             continue
@@ -1038,7 +1049,7 @@ def place_residential_yards(
         for s0, s1 in intervals:
             line = np.array([centre + s0 * tangent, centre + s1 * tangent], dtype=np.float64)
             span = float(np.linalg.norm(line[1] - line[0]))
-            if style == "hedge":
+            if yard_style == "hedge":
                 # Continuous overlapping German Liguster/Buchsbaum hedge line (0.75 m pitch, 1.15-1.40 m tall).
                 inset = min(0.28, span * 0.22)
                 usable = max(0.0, span - 2.0 * inset)
@@ -1051,12 +1062,12 @@ def place_residential_yards(
             else:
                 if span < 0.66:
                     mid_p = 0.5 * (line[0] + line[1])
-                    pending.append(("fr_fence_" + style, float(mid_p[0]), float(mid_p[1]), fences._yaw(*tangent), fences.FR_HEIGHTS[style], 0.0))
+                    pending.append(("fr_fence_" + yard_style, float(mid_p[0]), float(mid_p[1]), fences._yaw(*tangent), fences.FR_HEIGHTS[yard_style], 0.0))
                 else:
                     for p, d, panel_len in fences._panels(line, spacing=fences.PANEL_M):
-                        row = fences._french_panel_row(style, p, d, panel_len)
+                        row = fences._french_panel_row(yard_style, p, d, panel_len)
                         # Keep fence height upright even on short wing spans.
-                        pending.append((row[0], row[1], row[2], row[3], max(float(row[4]), fences.FR_HEIGHTS[style] * 0.85), row[5]))
+                        pending.append((row[0], row[1], row[2], row[3], max(float(row[4]), fences.FR_HEIGHTS[yard_style] * 0.85), row[5]))
 
     if not pending:
         return []
@@ -1065,6 +1076,9 @@ def place_residential_yards(
     drive_blocks = _expand_blocker_segments(access_lines, extra_hw=0.25)
     cleared: list[tuple] = []
     rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
+    closed_rings = [(np.vstack([rr, rr[:1]]), 0.0) for rr in rings_arr]
+    hedge_wall_blocks = _expand_blocker_segments(closed_rings, extra_hw=DE_YARD_HEDGE_WALL_CLEAR_M)
+    fence_wall_blocks = _expand_blocker_segments(closed_rings, extra_hw=DE_YARD_FENCE_WALL_CLEAR_M)
     for row in pending:
         grp, px, py = row[0], float(row[1]), float(row[2])
         if not (math.isfinite(px) and math.isfinite(py)) or not roadsmod.box_owns(box, px, py):
@@ -1077,6 +1091,9 @@ def place_residential_yards(
         if drive_blocks is not None and _points_near_segments_safe(pt, drive_blocks):
             continue
         if any(classifier._point_in_ring(pt[0], rr) for rr in rings_arr):
+            continue
+        wall_blocks = hedge_wall_blocks if grp == fences.G_HEDGE else fence_wall_blocks
+        if _points_near_segments_safe(pt, wall_blocks):
             continue
         cleared.append(row)
 

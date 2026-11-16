@@ -557,7 +557,7 @@ def classify_residential_yards(
         if cls in DE_UNTYPED_HOUSE and getattr(spec, "roof", "flat") == "flat":
             if getattr(spec, "plain", False) and getattr(spec, "windows", True) is False:
                 continue
-        if (getattr(spec, "floors", 1) or 1) > 4:
+        if (getattr(spec, "floors", 1) or 1) > 5:
             continue
 
         ring = np.asarray(spec.ring, dtype=np.float64) + origin
@@ -565,7 +565,7 @@ def classify_residential_yards(
             continue
         area = abs(buildings._area2(ring)) / 2.0
         min_area = 34.0 if cls in DE_UNTYPED_HOUSE and (spec.floors or 1) == 1 else 24.0
-        if not (min_area <= area <= 900.0):
+        if not (min_area <= area <= 1400.0):
             continue
         c = ring.mean(axis=0)
         if not (x0 <= float(c[0]) < x0 + tile_size and y0 <= float(c[1]) < y0 + tile_size):

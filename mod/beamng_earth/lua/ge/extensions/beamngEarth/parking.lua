@@ -60,7 +60,6 @@ M.VIEW_MARGIN_DEG = 20  -- the camera's half field of view (horizontal, at VIEW_
 M.VIEW_ASPECT = 2.4     -- (the widest screens: 21:9)
 M.DEFAULT_PARKED_AMOUNT = 5   -- the game's trafficParkingAmount default (settings/defaults.json) when unreadable
 M.ACTIVE_CAP = { low = 2, medium = 2 }   -- (Deck drive: 5 active 5.1 ms, 3: 4.2, 2: 3.0, none 0.7)
-M.DE_ACTIVE_CAP = { low = 3, medium = 4, normal = 6, high = 8, ultra = 10, extreme = 12 } -- Ambient parked-car pool in Germany when expDeStreetImmersion is enabled
 M.enabled = true
 
 local spots = {}        -- tile key -> { anchor, rows }
@@ -72,7 +71,6 @@ local sites = nil
 local box = nil          -- the block's ground box {x0, y0, x1, y1} the sites were built for
 local lastGuard = -math.huge
 local started = false   -- the parked cars were started once this level (the player may remove them)
-local deStarted = false
 local scatterPending = false
 
 function M.onRows(aid, key, rows)
@@ -136,7 +134,7 @@ end
 -- setupVehicles spawns its group through core_multiSpawn; gameplay_walk: 0.40's traffic.lua needs it, navgraph.lua)
 M.EXTENSIONS = { 'core_multiSpawn', 'gameplay_traffic', 'gameplay_parking', 'gameplay_walk' }
 local function parkingSystem()
-  if not (gameplay_parking and gameplay_traffic and core_multiSpawn and gameplay_walk) and extensions and extensions.load then
+  if not (gameplay_parking and core_multiSpawn and gameplay_walk) and extensions and extensions.load then
     pcall(extensions.load, unpack(M.EXTENSIONS))
   end
   return gameplay_parking
@@ -312,53 +310,11 @@ function M.amountIsDefault(getValue, defaultValue, choice)
   return v == nil or v == defaultValue
 end
 
--- True when expDeStreetImmersion is enabled and German tiles or DE-sized curbside spots are active.
-function M.hasDeContext()
-  local okS, s = pcall(require, 'beamngEarth/settings')
-  if not (okS and type(s) == 'table' and s.get and s.get('expDeStreetImmersion')) then return false end
-  local okD, de = pcall(require, 'beamngEarth/deEnhancer')
-  if okD and type(de) == 'table' and de.status and de.status().count > 0 then return true end
-  for _, t in pairs(spots) do
-    if t.anchor == anchorId and type(t.rows) == 'table' then
-      for _, r in ipairs(t.rows) do
-        if r[5] ~= 1 and r[6] and r[7] then return true end
-      end
-    end
-  end
-  return false
-end
-
--- Minimum ambient parked-car pool in Germany when expDeStreetImmersion is on, even if freeroam trafficParked was off.
-function M.deAutoStartAmount()
-  if not M.hasDeContext() then return nil end
-  local okS, s = pcall(require, 'beamngEarth/settings')
-  local q = okS and type(s) == 'table' and s.get and s.get('quality') or 'normal'
-  local cap = M.DE_ACTIVE_CAP[q] or M.DE_ACTIVE_CAP.normal
-  local okN, ng = pcall(require, 'beamngEarth/navgraph')
-  local picked = okN and ng.choice and tonumber(ng.choice.parkedAmount)
-  if picked and picked == 0 then return nil end
-  return (picked and picked > 0) and picked or cap
-end
-
--- Germany DE ambient parked-car count when expDeStreetImmersion is on and DE tiles are active.
-function M.deParkedAmount()
-  if not M.hasDeContext() then return nil end
-  local okS, s = pcall(require, 'beamngEarth/settings')
-  local q = okS and type(s) == 'table' and s.get and s.get('quality') or 'normal'
-  local cap = M.DE_ACTIVE_CAP[q] or M.DE_ACTIVE_CAP.normal
-  local gs = rawget(_G, 'settings')
-  local getValue = gs and gs.getValue and function(k) return gs.getValue(k) end
-  local defaults = gs and type(gs.impl) == 'table' and type(gs.impl.defaultValues) == 'table' and gs.impl.defaultValues
-  local okN, ng = pcall(require, 'beamngEarth/navgraph')
-  if not M.amountIsDefault(getValue, defaults and defaults.trafficParkingAmount, okN and ng.choice or nil) then return nil end
-  return cap
-end
-
 -- The quality preset's cap on active parked cars (nil: the player's amount as it is).
 function M.activeCap()
   local ok, s = pcall(require, 'beamngEarth/settings')
   local q = ok and type(s) == 'table' and s.get and s.get('quality')
-  local cap = q and M.ACTIVE_CAP[q] or M.deParkedAmount()
+  local cap = q and M.ACTIVE_CAP[q] or nil
   if not cap then return nil end
   local gs = rawget(_G, 'settings')
   local getValue = gs and gs.getValue and function(k) return gs.getValue(k) end
@@ -504,8 +460,7 @@ function M.update(aid, player, blk, gov)
   -- few seconds while driving, used by nobody, up to 88 ms on a Steam Deck); turning them on (the radial menu: the
   -- stock setupVehicles) rebuilds them first (hookSetup)
   local gpOn = gameplay_parking and gameplay_parking.getState and gameplay_parking.getState()
-  local deAmt = M.deAutoStartAmount()
-  local off = not gpOn and not deAmt and (started or not require('beamngEarth/navgraph').choice.parked)
+  local off = not gpOn and (started or not require('beamngEarth/navgraph').choice.parked)
   local t = os.clock()
   if t - lastBuild < (off and M.REBUILD_OFF_S or M.REBUILD_S) then return end
   if builtAt and started and not scatterPending and M.moving(player)
@@ -531,26 +486,17 @@ function M.update(aid, player, blk, gov)
     started = true
     -- the player's level-start choice (navgraph.choice; the radial menu works at any time)
     local c = require('beamngEarth/navgraph').choice
-    if (c.parked or deAmt) and not gp.getState() then
+    if c.parked and not gp.getState() then
       local amount = (c.parkedAmount and c.parkedAmount > 0) and c.parkedAmount or -1
       -- A small village can have just a few known driveways. Start within their actual capacity.
       if near < M.START_MIN then
         local small = math.max(1, math.floor(near * 0.6))
         amount = amount > 0 and math.min(amount, small) or small
-      elseif amount == -1 then
-        local capAmt = M.deParkedAmount() or deAmt
-        if capAmt then amount = capAmt end
       end
-      if deAmt then deStarted = true end
       local okS, err = pcall(gp.setupVehicles, amount, { pos = vec3(player.x, player.y, player.z) })
       if not okS then log('W', 'beamngEarth', 'parking: setupVehicles: ' .. tostring(err)) end
     end
     scatterPending = false
-  elseif deAmt and not deStarted and not gp.getState() then
-    deStarted = true
-    local amount = near < M.START_MIN and math.max(1, math.floor(near * 0.6)) or deAmt
-    local okS, err = pcall(gp.setupVehicles, amount, { pos = vec3(player.x, player.y, player.z) })
-    if not okS then log('W', 'beamngEarth', 'parking: de setupVehicles: ' .. tostring(err)) end
   elseif scatterPending then
     scatterPending = false
     if heldActive then
@@ -574,7 +520,7 @@ function M.reset()
   spots, objs, anchorId, dirty, lastBuild, sites = {}, {}, nil, false, -math.huge, nil
   hidden, backAt, capped, applied, builtAt, suspended = {}, {}, nil, nil, nil, false
   box, lastGuard, heldActive = nil, -math.huge, nil
-  started, deStarted, scatterPending = false, false, false
+  started, scatterPending = false, false
   lastPlayer = nil
 end
 
