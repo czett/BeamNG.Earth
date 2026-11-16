@@ -684,46 +684,48 @@ def bake_building_depth(
     # crossing `z_sockel = g_local + 0.75` or `z_ao = z_eave - 0.35`.
     # In `Mesh.quads`, every block from `building_walls_np` is pairs of triangles `[0,1,2],[0,2,3]`
     # on 4 consecutive unshared vertices.
-    if not lite and len(T) >= 2 and (len(T) % 2 == 0 or True):
+    if not lite and len(T) >= 2 and len(P) >= 4:
         # Identify 4-vertex quad pairs: adjacent tris (2k, 2k+1) sharing v0 and v2, sequential v0..v3
         n_tri = len(T)
-        # Scan blocks cleanly: find quad-pair triangles whose 4 vertices form a vertical wall quad
-        used_tri = np.zeros(n_tri, dtype=bool)
         # Fast vectorized check for consecutive quad-pairs starting at even indices where T = [v, v+1, v+2], [v, v+2, v+3]
         pair_n = n_tri // 2
         if pair_n > 0:
             t_even = T[0:2 * pair_n:2]
             t_odd = T[1:2 * pair_n:2]
             v0 = t_even[:, 0]
-            is_seq_quad = (
-                (t_even[:, 1] == v0 + 1)
-                & (t_even[:, 2] == v0 + 2)
-                & (t_odd[:, 0] == v0)
-                & (t_odd[:, 1] == v0 + 2)
-                & (t_odd[:, 2] == v0 + 3)
-                & (M[0:2 * pair_n:2] == M[1:2 * pair_n:2])
-            )
-            # Exclude roof/non-wall materials and laid-over window quads on `spec.wall`
             m_even = M[0:2 * pair_n:2]
             is_wall_mat = ~np.isin(m_even, list(wall_exclude_mats))
             if spec.wall:
                 is_wall_mat &= (m_even != white_facade_mi)
-            z0 = P[v0, 2]
-            z1 = P[v0 + 1, 2]
-            z2 = P[v0 + 2, 2]
-            z3 = P[v0 + 3, 2]
-            is_vert = (
-                is_seq_quad
-                & is_wall_mat
-                & (np.abs(z0 - z1) < 1e-4)
-                & (np.abs(z2 - z3) < 1e-4)
-                & (z2 - z0 > 0.5)
-                & (np.abs(P[v0, 0] - P[v0 + 3, 0]) < 1e-4)
-                & (np.abs(P[v0, 1] - P[v0 + 3, 1]) < 1e-4)
-                & (np.abs(P[v0 + 1, 0] - P[v0 + 2, 0]) < 1e-4)
-                & (np.abs(P[v0 + 1, 1] - P[v0 + 2, 1]) < 1e-4)
+            is_seq_quad = (
+                is_wall_mat
+                & (v0 >= 0)
+                & (v0 + 3 < len(P))
+                & (t_even[:, 1] == v0 + 1)
+                & (t_even[:, 2] == v0 + 2)
+                & (t_odd[:, 0] == v0)
+                & (t_odd[:, 1] == v0 + 2)
+                & (t_odd[:, 2] == v0 + 3)
+                & (m_even == M[1:2 * pair_n:2])
             )
-            q_idx = np.flatnonzero(is_vert)
+            cand = np.flatnonzero(is_seq_quad)
+            q_idx = np.empty(0, dtype=np.int64)
+            if len(cand):
+                vc = v0[cand]
+                z0 = P[vc, 2]
+                z1 = P[vc + 1, 2]
+                z2 = P[vc + 2, 2]
+                z3 = P[vc + 3, 2]
+                is_vert = (
+                    (np.abs(z0 - z1) < 1e-4)
+                    & (np.abs(z2 - z3) < 1e-4)
+                    & (z2 - z0 > 0.5)
+                    & (np.abs(P[vc, 0] - P[vc + 3, 0]) < 1e-4)
+                    & (np.abs(P[vc, 1] - P[vc + 3, 1]) < 1e-4)
+                    & (np.abs(P[vc + 1, 0] - P[vc + 2, 0]) < 1e-4)
+                    & (np.abs(P[vc + 1, 1] - P[vc + 2, 1]) < 1e-4)
+                )
+                q_idx = cand[is_vert]
             if len(q_idx):
                 p_mid = 0.5 * (P[v0[q_idx], :2] + P[v0[q_idx] + 1, :2])
                 g_local = _ground_at_xy(spec, gmin, gmax, p_mid)

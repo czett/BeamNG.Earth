@@ -705,6 +705,81 @@ class FacadeRealismAndExpansionTest(unittest.TestCase):
             self.assertEqual(de_enhancer.cache_parts(nyc_frame, box), (True, "outside"))
             self.assertGreater(len(de_enhancer.cache_parts(munich_frame, box)), 2)
 
+    def test_bake_building_depth_20_and_30_vertex_meshes_and_tile_buildings(self):
+        """Regression: trailing 3-vertex triangles at len(P)==20 or 30 must not IndexError on P[v0+3]."""
+        from de_street_enhancer import facade_style
+
+        frame = geodesy.EnuFrame(*self.DORTMUND)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            # 1. Explicit 20-vertex and 30-vertex Meshes ending in 3-vertex triangles
+            for n_quads, n_tris in ((2, 4), (6, 2)):  # 2*4 + 4*3 = 20 verts; 6*4 + 2*3 = 30 verts
+                m = buildings.Mesh()
+                mat_idx = buildings._Looks(0.25)
+                fac_mat = mat_idx["bne_bld_fac_white"]
+                for qi in range(n_quads):
+                    x = float(qi * 2)
+                    m.quad((x, 0.0, 0.0), (x + 2.0, 0.0, 0.0), (x + 2.0, 0.0, 3.0), (x, 0.0, 3.0),
+                           (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), fac_mat)
+                for ti in range(n_tris):
+                    x = float(ti * 2)
+                    m.tri((x, 0.0, 3.0), (x + 2.0, 0.0, 3.0), (x + 1.0, 0.0, 4.5),
+                          (0.0, 0.995), (0.02, 0.995), (0.01, 0.999), fac_mat)
+                self.assertEqual(m.n, n_quads * 4 + n_tris * 3)
+                sp = buildings.Spec(
+                    ring=np.array([[0.0, 0.0], [6.0, 0.0], [6.0, 4.0], [0.0, 4.0]], dtype=np.float64),
+                    floors=1, floor_h=3.0, height=3.0, roof="gabled", cls="garage", seed=0.25, min_h=0.0,
+                )
+                sp.de_in = True
+                facade_style.bake_building_depth(m, sp, 0.0, 0.0, 3.0, False, mat_idx)
+                P, _uv, T, _M, _C = m.arrays()
+                self.assertGreater(len(T), n_quads * 2 + n_tris)
+                self.assertTrue(np.isfinite(P).all())
+
+            # 2. Full tile_buildings + build + road_tile with FACADE multi-floor + single-quad STUCCO/PANEL buildings
+            r_multi = np.array([[20.0, 20.0], [34.0, 20.0], [34.0, 30.0], [20.0, 30.0]], dtype=np.float64)
+            r_stucco = np.array([[50.0, 20.0], [56.0, 20.0], [56.0, 25.0], [50.0, 25.0]], dtype=np.float64)
+            r_panel = np.array([[70.0, 20.0], [82.0, 20.0], [82.0, 28.0], [70.0, 28.0]], dtype=np.float64)
+            rings = [r_multi, r_stucco, r_panel]
+            coords = []
+            ring_off = [0]
+            part_off = [0]
+            for rg in rings:
+                la, lo, _ = frame.enu_to_geodetic(rg[:, 0], rg[:, 1], 0.0)
+                coords.append(np.column_stack([lo, la]))
+                ring_off.append(ring_off[-1] + len(rg))
+                part_off.append(part_off[-1] + 1)
+            feats = mapgeom.Features(
+                layer="building",
+                lonlat=np.concatenate(coords),
+                coord_off=np.array(ring_off, dtype=np.int64),
+                ring_off=np.arange(len(rings) + 1, dtype=np.int64),
+                part_off=np.array(part_off, dtype=np.int64),
+                kind=np.array([3, 3, 3], dtype=np.int8),
+                attrs={
+                    "class": np.array(["apartments", "garage", "warehouse"], dtype=object),
+                    "roof_shape": np.array(["gabled", "gabled", "flat"], dtype=object),
+                    "facade_material": np.array(["plaster", "stucco", "concrete"], dtype=object),
+                    "num_floors": np.array([3, 1, 1], dtype=object),
+                    "height": np.array([9.0, 3.0, 4.5], dtype=object),
+                },
+                ids=np.array(["b_multi", "b_stucco", "b_panel"], dtype=object),
+            )
+            items = buildings.tile_buildings(frame, 0.0, 0.0, 256.0, 256.0, [feats], _flat_elev)
+            self.assertEqual(len(items), 3)
+            built = buildings.build(items, lite=False)
+            self.assertIsNotNone(built)
+            P_b, _uv_b, T_b, _M_b, _mats_b, _C_b = built
+            self.assertGreater(len(T_b), 0)
+            self.assertTrue(np.isfinite(P_b).all())
+
+            proc, custom_entries = buildings.road_tile(
+                frame, 0, 0, None, _flat_elev, items=items, custom=[]
+            )
+            self.assertIsNotNone(proc)
+            self.assertEqual(custom_entries, [])
+            mesh_parts, _boxes, _col = proc
+            self.assertGreater(len(mesh_parts), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
