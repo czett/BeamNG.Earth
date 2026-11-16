@@ -114,6 +114,20 @@ M.LANTERN = { range = 20, inner = 65, outer = 150, brightness = 4.0, color = '1 
 local lastCheck = -1e9
 local shown = {}         -- material name -> the factor and nits set (set again only when they change)
 local shownMap = {}      -- material name -> the emissive map set (none: its materials.json's, M.MAPS' first)
+M.DYNAMIC = {}           -- runtime-created emissive Materials (deEnhancer shop fascias): name -> { color, nits }
+
+function M.addDynamic(name, color, nits)
+  if type(name) ~= 'string' then return end
+  M.DYNAMIC[name] = { tostring(color or '1 0.94 0.84'), tonumber(nits) or 35 }
+  shown[name] = nil
+end
+
+function M.removeDynamic(name)
+  if type(name) ~= 'string' then return end
+  M.DYNAMIC[name] = nil
+  shown[name] = nil
+  shownMap[name] = nil
+end
 local lastLights = -1e9
 M.night = nil            -- the state applied (nil: none yet)
 M.errors = 0
@@ -134,7 +148,7 @@ end
 -- Day / night and the night's step onto the materials, each set (and reloaded) only when its glow or map changes. (By
 -- day a map stays: the glow is off, and the evening's comes back at dusk with the glow.)
 local function apply(night, step)
-  for name, glow in pairs(M.MATERIALS) do
+  local function updateMat(name, glow)
     local want = night and (glow[1] .. '|' .. glow[2]) or 'off'
     local maps = M.MAPS[name]
     local map = night and maps and maps[step] or nil
@@ -158,6 +172,8 @@ local function apply(night, step)
       end
     end
   end
+  for name, glow in pairs(M.MATERIALS) do updateMat(name, glow) end
+  for name, glow in pairs(M.DYNAMIC) do updateMat(name, glow) end
   if night ~= M.night then
     -- the lamps' far glow (trees.lua's lampglow group, off by day)
     local okt, trees = pcall(require, 'beamngEarth/trees')
@@ -343,7 +359,7 @@ end
 
 -- A new level or session: the materials are new (applied again at the next check), the lights gone.
 function M.reset()
-  M.night, M.nightStep, lastCheck, lastLights, shown, shownMap = nil, nil, -1e9, -1e9, {}, {}
+  M.night, M.nightStep, lastCheck, lastLights, shown, shownMap, M.DYNAMIC = nil, nil, -1e9, -1e9, {}, {}, {}
   for _, e in ipairs(pool) do
     local o = scenetree.findObjectById(e.id)
     if o then o:delete() end

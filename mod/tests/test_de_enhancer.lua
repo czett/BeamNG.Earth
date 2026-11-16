@@ -1,0 +1,94 @@
+-- luajit mod/tests/test_de_enhancer.lua
+-- Verifies ref-counted runtime Materials, missing-texture fallback, nightlights day/night integration,
+-- and roads.lua CONTENT_WHATS wiring for the Germany (DE) street enhancer.
+
+local dir = (arg[0]:match('^(.*)[/\\]') or '.')
+local T = dofile(dir .. '/testlib.lua')
+dofile(dir .. '/stubs.lua')
+
+local clock = 10.0
+os.clockhp = function() return clock end
+
+local nightlights = require('beamngEarth/nightlights')
+local deEnhancer = require('beamngEarth/deEnhancer')
+local roads = require('beamngEarth/roads')
+
+-- Reset state cleanly before tests.
+deEnhancer.clearAll()
+nightlights.reset()
+
+local existing = {
+  ['/temp/beamngEarth/s1/de_st_aaa111.dds'] = true,
+  ['/temp/beamngEarth/s1/de_sh_bbb222.dds'] = true,
+  ['/temp/beamngEarth/s2/de_sh_bbb222.dds'] = true,
+}
+FS = {
+  fileExists = function(_, p) return existing[p] == true end,
+}
+
+-- 1. No-op when deFaces is nil
+T.check(deEnhancer.retain('0:0_0', nil) == 0, 'nil deFaces is a safe no-op')
+T.check(deEnhancer.status().count == 0, 'zero materials created')
+
+-- 2. Register street (non-emissive) + shop (emissive) materials for tile 1
+local defs1 = {
+  bne_de_st_aaa111 = { texture = '/temp/beamngEarth/s1/de_st_aaa111.dds', emissive = false },
+  bne_de_sh_bbb222 = { texture = '/temp/beamngEarth/s1/de_sh_bbb222.dds', emissive = true, nits = 35, glowColor = '1 0.94 0.84' },
+}
+T.check(deEnhancer.retain('0:0_0', defs1) == 2, 'retained 2 new materials')
+T.check(deEnhancer.status().count == 2, 'deEnhancer tracks 2 materials')
+
+local mSt = scenetree.findObject('bne_de_st_aaa111')
+local mSh = scenetree.findObject('bne_de_sh_bbb222')
+T.check(mSt ~= nil and mSt.fields.colorMap == '/temp/beamngEarth/s1/de_st_aaa111.dds', 'street material has colorMap')
+T.check(mSt.fields.emissiveMap == nil, 'street sign has no emissiveMap')
+T.check(mSh ~= nil and mSh.fields.emissiveMap == '/temp/beamngEarth/s1/de_sh_bbb222.dds', 'shop fascia has emissiveMap')
+T.check(nightlights.DYNAMIC.bne_de_sh_bbb222 ~= nil, 'shop fascia registered in nightlights.DYNAMIC')
+
+-- 3. Night vs day lighting switch via nightlights.update()
+local fakeNight = true
+core_environment = {
+  getLightState = function() return { isNight = fakeNight } end,
+  getTimeOfDay = function() return { time = 0.48 } end, -- ~23:30
+}
+nightlights.update()
+T.check(mSh.fields.emissiveFactor == '1 0.94 0.84', 'shop glow active at night')
+T.check(mSh.fields.emissiveIntensityNits == '35', 'shop glow calibrated to 35 nits')
+
+fakeNight = false
+clock = clock + nightlights.CHECK_S + 0.2
+nightlights.update()
+T.check(mSh.fields.emissiveFactor == '0 0 0', 'shop glow turns off by day')
+T.check(mSh.fields.emissiveIntensityNits == '-1', 'shop nits disabled (-1) by day')
+
+-- 4. Reference counting & delayed cleanup sweep
+T.check(deEnhancer.retain('0:1_0', { bne_de_sh_bbb222 = defs1.bne_de_sh_bbb222 }) == 0, 'shared material reuses existing instance')
+T.check(deEnhancer.release('0:0_0') == 1, 'releasing first tile queues unique street mat for delete')
+T.check(deEnhancer.sweep() == 1, 'sweep deletes unreferenced street material')
+T.check(scenetree.findObject('bne_de_st_aaa111') == nil, 'unreferenced street material removed from scenetree')
+T.check(scenetree.findObject('bne_de_sh_bbb222') ~= nil, 'shared shop material kept while tile 0:1_0 retains it')
+T.check(nightlights.DYNAMIC.bne_de_sh_bbb222 ~= nil, 'shared shop stays in nightlights while retained')
+
+T.check(deEnhancer.release('0:1_0') == 1, 'releasing last tile queues shared shop material')
+T.check(deEnhancer.sweep() == 1, 'sweep deletes shop material at refs=0')
+T.check(scenetree.findObject('bne_de_sh_bbb222') == nil, 'shop material removed from scenetree')
+T.check(nightlights.DYNAMIC.bne_de_sh_bbb222 == nil, 'shop material unregistered from nightlights')
+
+-- 5. Missing texture uses clean fallback and does not register emissive nightglow
+deEnhancer.retain('0:2_0', {
+  bne_de_missing = { texture = '/temp/beamngEarth/s1/missing.dds', emissive = true, nits = 35 },
+})
+local mMiss = scenetree.findObject('bne_de_missing')
+T.check(mMiss ~= nil and mMiss.fields.colorMap == nil and mMiss.fields.diffuseColor == deEnhancer.FALLBACK_COLOR,
+  'missing texture gets safe fallback color')
+T.check(nightlights.DYNAMIC.bne_de_missing == nil, 'missing texture skips emissive registration')
+
+deEnhancer.clearAll()
+T.check(scenetree.findObject('bne_de_missing') == nil and deEnhancer.status().count == 0, 'clearAll removes all tracked materials')
+
+-- 6. Verify roads.CONTENT_WHATS exposes destreets and deshops
+local seenWhats = {}
+for _, w in ipairs(roads.CONTENT_WHATS) do seenWhats[w] = true end
+T.check(seenWhats.destreets == true and seenWhats.deshops == true, 'roads.CONTENT_WHATS includes destreets and deshops')
+
+T.done('test_de_enhancer')

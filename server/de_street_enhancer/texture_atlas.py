@@ -1,0 +1,336 @@
+"""Pillow-based German sign/fascia typography rendering & cached DXT1 DDS atlases.
+
+Generates dynamic texture atlases for street name signs (`de_st_<hash>.dds`)
+and commercial shopfront fascias (`de_sh_<hash>.dds`) using bundled DIN /
+DejaVu fonts and encodes directly to DDS via `imagery.write_dds` to avoid
+BeamNG's runtime TextureCooker PNG deadlock.
+"""
+
+import functools
+import hashlib
+import math
+import os
+import re
+from typing import Iterable
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+import imagery
+
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SERVER_DIR = os.path.dirname(_HERE)
+_REPO_ROOT = os.path.dirname(_SERVER_DIR)
+
+FONT_CANDIDATES_BOLD = (
+    os.path.join(_REPO_ROOT, "tools", "fonts", "D-DIN-Bold.otf"),
+    os.path.join(_SERVER_DIR, "data", "fonts", "D-DIN.ttf"),
+    os.path.join(_REPO_ROOT, "tools", "fonts", "DejaVuSans-Bold.ttf"),
+)
+FONT_CANDIDATES_CONDENSED = (
+    os.path.join(_SERVER_DIR, "data", "fonts", "D-DINCondensed.ttf"),
+    os.path.join(_REPO_ROOT, "tools", "fonts", "town", "D-DINCondensed.ttf"),
+    os.path.join(_REPO_ROOT, "tools", "fonts", "DejaVuSans-Bold.ttf"),
+)
+
+SLOT_W = 512
+SLOT_H = 64
+ATLAS_W = 1024
+MAX_SLOTS_16 = 16
+MAX_SLOTS_32 = 32
+INNER_PAD = 4  # DXT1 uses 4x4 texel blocks; keeping 4px border inset prevents neighbor mip bleed.
+
+# Authentic German street name sign color schemes.
+STREET_PALETTE_BLUE = {
+    "bg": (14, 52, 108),       # RAL 5010 Enzianblau
+    "fg": (248, 250, 252),     # Pure reflective white
+    "border": (236, 240, 245),
+}
+STREET_PALETTE_WHITE = {
+    "bg": (244, 244, 238),     # Municipal cream-white variant
+    "fg": (18, 22, 28),
+    "border": (24, 28, 36),
+}
+
+_ABBREV_RULES = (
+    (re.compile(r"straße\b", re.IGNORECASE), "str."),
+    (re.compile(r"strasse\b", re.IGNORECASE), "str."),
+    (re.compile(r"\bBürgermeister-", re.IGNORECASE), "Bgm.-"),
+    (re.compile(r"\bSankt\s+", re.IGNORECASE), "St. "),
+)
+
+
+@functools.lru_cache(maxsize=64)
+def _load_font(size: int, condensed: bool = False):
+    """Load bundled DIN / DejaVu font with graceful Pillow default fallback."""
+    candidates = FONT_CANDIDATES_CONDENSED if condensed else FONT_CANDIDATES_BOLD
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except (OSError, TypeError):
+        return ImageFont.load_default()
+
+
+def _shorten_german_street(name: str, max_px: int, draw: ImageDraw.ImageDraw, min_size: int = 24) -> tuple[str, ImageFont.FreeTypeFont]:
+    """Fit German street name inside slot width using DIN Bold -> Condensed -> standard abbreviations."""
+    text = " ".join(str(name or "").split())
+    if not text:
+        return "", _load_font(28, condensed=False)
+
+    candidates = [text]
+    short = text
+    for pat, repl in _ABBREV_RULES:
+        nxt = pat.sub(repl, short)
+        if nxt != short:
+            short = nxt
+            candidates.append(short)
+
+    for cand in candidates:
+        for size in (36, 33, 30, 27):
+            font = _load_font(size, condensed=False)
+            bx = draw.textbbox((0, 0), cand, font=font)
+            if (bx[2] - bx[0]) <= max_px:
+                return cand, font
+        for size in (36, 33, 30, 27, 24, 21):
+            font = _load_font(size, condensed=True)
+            bx = draw.textbbox((0, 0), cand, font=font)
+            if (bx[2] - bx[0]) <= max_px:
+                return cand, font
+
+    # Final clamp with smallest readable condensed size.
+    best = candidates[-1]
+    font = _load_font(max(18, min_size - 4), condensed=True)
+    return best, font
+
+
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int, sizes=(38, 34, 30, 26, 22, 18)):
+    """Select largest font fitting inside `(max_w, max_h)`."""
+    clean = " ".join(str(text or "").split()) or "Shop"
+    for condensed in (False, True):
+        for sz in sizes:
+            f = _load_font(sz, condensed=condensed)
+            bx = draw.textbbox((0, 0), clean, font=f)
+            if (bx[2] - bx[0]) <= max_w and (bx[3] - bx[1]) <= max_h:
+                return clean, f, bx
+    f = _load_font(16, condensed=True)
+    return clean, f, draw.textbbox((0, 0), clean, font=f)
+
+
+def render_street_plate(name: str, variant: str = "blue", w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Render a crisp `w x h` German street name plate (RAL 5010 blue or white municipal style)."""
+    pal = STREET_PALETTE_WHITE if variant == "white" else STREET_PALETTE_BLUE
+    img = Image.new("RGB", (w, h), pal["bg"])
+    draw = ImageDraw.Draw(img)
+
+    # Outer edge flush + crisp rounded inset frame.
+    pad = INNER_PAD
+    draw.rounded_rectangle(
+        [pad, pad, w - 1 - pad, h - 1 - pad],
+        radius=8,
+        fill=pal["bg"],
+        outline=pal["border"],
+        width=2,
+    )
+    if variant == "white":
+        draw.rounded_rectangle(
+            [pad + 3, pad + 3, w - 4 - pad, h - 4 - pad],
+            radius=6,
+            outline=pal["border"],
+            width=1,
+        )
+
+    inner_w = w - 2 * (pad + 14)
+    fitted, font = _shorten_german_street(name, inner_w, draw)
+    bx = draw.textbbox((0, 0), fitted, font=font)
+    tw, th = bx[2] - bx[0], bx[3] - bx[1]
+    tx = (w - tw) / 2.0 - bx[0]
+    ty = (h - th) / 2.0 - bx[1]
+    draw.text((tx, ty), fitted, font=font, fill=pal["fg"])
+    return img
+
+
+def _draw_emblem(draw: ImageDraw.ImageDraw, spec, x0: int, y0: int, size: int) -> bool:
+    """Draw a vector/raster brand emblem inside `[x0, y0, x0+size, y0+size]`. Returns True if drawn."""
+    emb = spec.emblem
+    if not emb or emb == "none":
+        return False
+
+    cx, cy = x0 + size / 2.0, y0 + size / 2.0
+    r = size * 0.44
+    accent = spec.accent_rgb or spec.fg_rgb
+
+    if emb == "apotheke_a":
+        # Stylized German Apotheke red Gothic 'A' with inset white cross.
+        red = (225, 10, 24)
+        draw.rounded_rectangle([x0 + 2, y0 + 2, x0 + size - 2, y0 + size - 2], radius=6, fill=(255, 255, 255), outline=red, width=2)
+        pts = [
+            (x0 + size * 0.18, y0 + size * 0.86),
+            (x0 + size * 0.46, y0 + size * 0.14),
+            (x0 + size * 0.64, y0 + size * 0.14),
+            (x0 + size * 0.84, y0 + size * 0.86),
+            (x0 + size * 0.67, y0 + size * 0.86),
+            (x0 + size * 0.62, y0 + size * 0.68),
+            (x0 + size * 0.36, y0 + size * 0.68),
+            (x0 + size * 0.31, y0 + size * 0.86),
+        ]
+        draw.polygon(pts, fill=red)
+        # White cross inside the upper aperture.
+        mx, my = x0 + size * 0.50, y0 + size * 0.46
+        draw.rectangle([mx - 5, my - 2, mx + 5, my + 2], fill=(255, 255, 255))
+        draw.rectangle([mx - 2, my - 5, mx + 2, my + 5], fill=(255, 255, 255))
+        return True
+
+    if emb == "sparkasse_s":
+        draw.ellipse([cx - r * 0.30, y0 + 4, cx + r * 0.30, y0 + 4 + r * 0.60], fill=(255, 255, 255))
+        draw.arc([cx - r * 0.72, y0 + size * 0.34, cx + r * 0.72, y0 + size * 0.92], 140, 390, fill=(255, 255, 255), width=5)
+        draw.rectangle([cx - r * 0.48, cy + 1, cx + r * 0.48, cy + 6], fill=(255, 255, 255))
+        return True
+
+    if emb == "lidl_disc":
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 240, 0), outline=(227, 6, 19), width=3)
+        f = _load_font(int(size * 0.42), condensed=False)
+        bx = draw.textbbox((0, 0), "L", font=f)
+        draw.text((cx - (bx[2] - bx[0]) / 2 - bx[0], cy - (bx[3] - bx[1]) / 2 - bx[1]), "L", font=f, fill=(0, 80, 170))
+        return True
+
+    if emb == "edeka_e":
+        draw.rounded_rectangle([x0 + 3, y0 + 3, x0 + size - 3, y0 + size - 3], radius=5, fill=(0, 59, 126))
+        f = _load_font(int(size * 0.62), condensed=False)
+        bx = draw.textbbox((0, 0), "E", font=f)
+        draw.text((cx - (bx[2] - bx[0]) / 2 - bx[0], cy - (bx[3] - bx[1]) / 2 - bx[1]), "E", font=f, fill=(255, 237, 0))
+        return True
+
+    if emb == "aldi_a":
+        draw.rounded_rectangle([x0 + 3, y0 + 3, x0 + size - 3, y0 + size - 3], radius=6, fill=(0, 120, 193), outline=accent, width=3)
+        for k, stripe in enumerate((0.26, 0.46, 0.66)):
+            draw.rectangle([x0 + 8, y0 + int(size * stripe), x0 + size - 8, y0 + int(size * stripe) + 4], fill=(255, 255, 255))
+        return True
+
+    if emb == "rewe_bar":
+        draw.rectangle([x0 + 4, y0 + 10, x0 + 10, y0 + size - 10], fill=(255, 255, 255))
+        draw.rectangle([x0 + 14, y0 + 16, x0 + 20, y0 + size - 10], fill=(255, 255, 255))
+        return True
+
+    if emb in ("pretzel", "post_horn", "vr_v", "dm_wave", "kaufland_sq", "netto_ribbon", "penny_dot", "rossmann_dot", "flame_badge"):
+        draw.ellipse([cx - r * 0.85, cy - r * 0.85, cx + r * 0.85, cy + r * 0.85], fill=accent)
+        letter = {"pretzel": "B", "post_horn": "P", "vr_v": "V", "dm_wave": "dm", "kaufland_sq": "K",
+                  "netto_ribbon": "N", "penny_dot": "P", "rossmann_dot": "R", "flame_badge": "D"}[emb]
+        f = _load_font(int(size * (0.36 if len(letter) > 1 else 0.46)), condensed=False)
+        bx = draw.textbbox((0, 0), letter, font=f)
+        ink = spec.bg_rgb if emb != "netto_ribbon" else (255, 255, 255)
+        draw.text((cx - (bx[2] - bx[0]) / 2 - bx[0], cy - (bx[3] - bx[1]) / 2 - bx[1]), letter, font=f, fill=ink)
+        return True
+
+    return False
+
+
+def render_shop_fascia(spec, label: str, w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Render an illuminated commercial fascia banner into a `w x h` RGB image."""
+    img = Image.new("RGB", (w, h), spec.bg_rgb)
+    draw = ImageDraw.Draw(img)
+
+    pad = INNER_PAD
+    border_col = spec.border_rgb or spec.fg_rgb
+    draw.rounded_rectangle(
+        [pad, pad, w - 1 - pad, h - 1 - pad],
+        radius=6,
+        fill=spec.bg_rgb,
+        outline=border_col,
+        width=2,
+    )
+
+    emb_size = h - 2 * (pad + 4)
+    has_emb = _draw_emblem(draw, spec, pad + 10, pad + 4, emb_size)
+    text_left = pad + (18 + emb_size if has_emb else 16)
+    text_w = (w - pad - 14) - text_left
+    fitted, font, bx = _fit_text(draw, label, max(80, text_w), h - 2 * (pad + 6))
+    tw, th = bx[2] - bx[0], bx[3] - bx[1]
+    tx = text_left + max(0.0, (text_w - tw) / 2.0) - bx[0]
+    ty = (h - th) / 2.0 - bx[1]
+    draw.text((tx, ty), fitted, font=font, fill=spec.fg_rgb)
+    return img
+
+
+def _atlas_dims(count: int) -> tuple[int, int, int]:
+    """Return `(atlas_w, atlas_h, max_slots)` power-of-two dimensions for slot packing."""
+    if count <= MAX_SLOTS_16:
+        return ATLAS_W, 512, MAX_SLOTS_16
+    return ATLAS_W, 1024, MAX_SLOTS_32
+
+
+def pack_atlas(
+    entries: Iterable[tuple[str, object]],
+    render_fn,
+    out_dir: str | None,
+    vfs_dir: str | None,
+    prefix: str,
+) -> tuple[str | None, str | None, str | None, dict[str, tuple[float, float, float, float]], Image.Image | None]:
+    """Pack unique items into one DXT1 DDS atlas and compute Collada UV rects.
+
+    Args:
+        entries: Iterable of `(cache_key, payload)` tuples passed to `render_fn(payload)`.
+        render_fn: Callable returning a `SLOT_W x SLOT_H` RGB Pillow image.
+        out_dir: Directory where `de_<prefix>_<hash>.dds` will be written (None skips disk IO).
+        vfs_dir: BeamNG VFS directory corresponding to `out_dir`.
+        prefix: Short tag (`"st"` for street signs, `"sh"` for shop fascias).
+
+    Returns:
+        `(mat_name, dds_disk_path, vfs_path, uv_map, pil_image)` where `uv_map[key]` gives
+        `(u0, v0_dae, u1, v1_dae)` in Collada bottom-up V coordinates.
+    """
+    unique: list[tuple[str, object]] = []
+    seen: set[str] = set()
+    for key, payload in entries:
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((key, payload))
+        if len(unique) >= MAX_SLOTS_32:
+            break
+
+    if not unique:
+        return None, None, None, {}, None
+
+    # Sort keys deterministically so identical tiles hash identically regardless of traversal order.
+    unique.sort(key=lambda kv: kv[0])
+    atlas_w, atlas_h, _ = _atlas_dims(len(unique))
+    cols = atlas_w // SLOT_W
+
+    digest_input = f"v1|{prefix}|{atlas_w}x{atlas_h}|" + "|".join(k for k, _ in unique)
+    h = hashlib.blake2b(digest_input.encode("utf-8"), digest_size=6).hexdigest()
+    mat_name = f"bne_de_{prefix}_{h}"
+    filename = f"de_{prefix}_{h}.dds"
+
+    atlas = Image.new("RGB", (atlas_w, atlas_h), (24, 30, 40))
+    uv_map: dict[str, tuple[float, float, float, float]] = {}
+
+    for idx, (key, payload) in enumerate(unique):
+        col = idx % cols
+        row = idx // cols
+        px0 = col * SLOT_W
+        py0 = row * SLOT_H
+        tile_img = render_fn(payload)
+        if tile_img.size != (SLOT_W, SLOT_H):
+            tile_img = tile_img.resize((SLOT_W, SLOT_H), Image.Resampling.LANCZOS)
+        atlas.paste(tile_img, (px0, py0))
+
+        # Inset 3px inside the 4px padding margin to avoid bilinear bleed across slots;
+        # convert top-down pixel Y into Collada bottom-up V (`v_dae = 1 - y / H`).
+        u0 = (px0 + 3.0) / float(atlas_w)
+        u1 = (px0 + SLOT_W - 3.0) / float(atlas_w)
+        v_top_dae = 1.0 - (py0 + 3.0) / float(atlas_h)
+        v_bot_dae = 1.0 - (py0 + SLOT_H - 3.0) / float(atlas_h)
+        uv_map[key] = (u0, v_bot_dae, u1, v_top_dae)
+
+    disk_path = os.path.join(out_dir, filename) if out_dir else None
+    vfs_path = f"{vfs_dir}/{filename}" if vfs_dir else None
+    if disk_path and not os.path.exists(disk_path):
+        os.makedirs(out_dir, exist_ok=True)
+        imagery.write_dds(disk_path, np.asarray(atlas, dtype=np.uint8))
+
+    return mat_name, disk_path, vfs_path, uv_map, atlas

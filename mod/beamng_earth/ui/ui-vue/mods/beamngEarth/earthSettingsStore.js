@@ -131,6 +131,8 @@ export const settingsSchema = [
         note: RESTART_NOTE },
       { id: "expStaleRevisit", type: "bool", default: false, name: "Show the older world while rebuilding", desc: "Experimental. After an update, places you visited before show the previous version's roads, trees, signs and ground photos while the new version builds them, instead of loading as a first visit.",
         note: RESTART_NOTE },
+      { id: "expDeStreetImmersion", type: "bool", default: false, name: "German street details", desc: "Experimental. In Germany: blue street name signs at intersections, illuminated German commercial shopfront fascias, and residential front-yard hedges and fences.",
+        note: RESTART_NOTE },
     ],
   },
   {

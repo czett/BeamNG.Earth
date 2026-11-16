@@ -1181,6 +1181,8 @@ def _roads_tile_cached(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks,
     if de_junctions:
         import designs
         de = designs.cache_parts(True, geodesy.EnuFrame(lat, lon), designs.tile_reach(roadsmod_tile_bbox(tx, ty)))
+    import de_enhancer
+    de_imm = de_enhancer.cache_parts(geodesy.EnuFrame(lat, lon), roadsmod_tile_bbox(tx, ty))
     k = revisit.key("roads", round(float(lat), 7), round(float(lon), 7), zoom, tx, ty, bool(sidewalks), float(lift),
                     bool(buildings), bool(left_hand), bool(mph), None if q is None else float(q), bool(gas_stations),
                     _md_versions(bool(buildings)), float(buried), lamp_region, country,
@@ -1188,7 +1190,7 @@ def _roads_tile_cached(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks,
                     *_radar_key(), bool(towns_on), roadwear.wear_key(wear, lat),
                     *_surf_tags(geodesy.EnuFrame(lat, lon), *roadsmod_tile_bbox(tx, ty)),
                     _nyc_key(geodesy.EnuFrame(lat, lon), roadsmod_tile_bbox(tx, ty)) if buildings else None,
-                    bool(de_junctions), *de)     # (the German junction parts last)
+                    bool(de_junctions), *de, *de_imm)     # (the German junction / immersion parts last)
     wh = _where_enu(lat, lon, *roadsmod_tile_bbox(tx, ty),
                     sidewalks=bool(sidewalks), lift=float(lift), buildings=bool(buildings),
                     gas_stations=bool(gas_stations), de_junctions=bool(de_junctions), towns_on=bool(towns_on), road_wear=roadwear.tier_of(wear),
@@ -1614,6 +1616,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     town_faces = {}                     # the town signs' faces the tile's props use (towns_on)
     towns = (town_signs(frame, tx, ty, out_dir, vfs_dir, town_faces)
              if towns_on and props is not None and out_dir is not None else None)
+    street_names = {}
     chunks = roadsmod.build_tile(frame, tx, ty, cells, elev, urban, walks=walks, deck_context=ctx, bridges=bridges, widths=_s.widths,
                                  sign_obstacles=sign_obstacles,
                                  # (the stations' made-up driveways: no sidewalk across them; nor along a square's
@@ -1636,7 +1639,8 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
                                  mapped_poles=(mappedpoles.road_points(_s.md, frame, tx, ty, pole_profile)
                                                if props is not None else None),
                                  wear=wear if isinstance(wear, dict) else roadwear.tier_of(wear),
-                                 cover_fn=getattr(getattr(_s, "surface", None), "classes", None))
+                                 cover_fn=getattr(getattr(_s, "surface", None), "classes", None),
+                                 street_names_out=street_names)
     P.town_faces = town_faces
     mark("build_tile")
     chunks += railsmod.tile_chunks(frame, tx, ty, cells, country, urban)     # railway and tram tracks on the ground
@@ -1645,15 +1649,23 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
         chunks += _s.airports.tile_chunks(frame, tx, ty, elev, roadsmod.tile_bbox)
     mark("airports")
     x0, y0, _, _ = box
+    import de_enhancer
+    de_rings = None
+    de_drives_all = list(drives)
+    de_garage_drives = []
     if items is not None:               # front doors and shopfronts, driveways into the road mesh
         frontage_walks = walks if walks_raw is None else walks_raw
         city = frontage_country is None and streetfront.CITY_ON      # (city_frontage: a city's sidewalks to the walls)
         margin = streetfront.BUILT_FRONT_M + 2. if frontage_country else streetfront.CITY_FRONT_M + 2. if city else 2.
         rings = buildingsmod.near_rings(frame, tx, ty, _s.md, margin=margin, skip=skip)
+        de_rings = rings
         props[:] = furniture.off_buildings(props, rings)     # (no street tree in a house)
-        props.extend(buildingsmod.doors(items, lines, x0, y0, drives, infer_fences=frontage_country != "FR"))
+        infer_us_fences = frontage_country != "FR" and not de_enhancer.suppress_default_fences(frame, box)
+        props.extend(buildingsmod.doors(items, lines, x0, y0, drives, infer_fences=infer_us_fences))
         props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
-        drives.extend(buildingsmod.garage_drives(items, lines, x0, y0))
+        de_garage_drives = buildingsmod.garage_drives(items, lines, x0, y0)
+        drives.extend(de_garage_drives)
+        de_drives_all = drives
         chunks += drives
         park = parkingmod.clear_of(park, props, drives)
         park = parkingmod.tile_lot_spots(frame, tx, ty, _s.md, elev, items, park, separate_bays=bool(frontage_country))
@@ -1804,6 +1816,8 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     bld = None
     garage_sound = ()
     oil_wells = []
+    de_faces_map = {}
+    de_shops_blob = None
     if buildings:
         import buildings as buildingsmod
         import oilwells
@@ -1812,8 +1826,17 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
             _entries, _radii, _boxes = buildingsmod.custom_models(frame, _custom, elev, out_dir, vfs_dir,
                                                                   road_ends=_bridge_ends, items=items,
                                                                   origin=(x0, y0))
+
+        def _before_de_parts(cur_items):
+            nonlocal de_shops_blob
+            sf, sb, _ = de_enhancer.prepare_shops(_s.md, frame, tx, ty, cur_items, out_dir, vfs_dir)
+            if sf:
+                de_faces_map.update(sf)
+            de_shops_blob = sb
+
         bld, _entries = buildingsmod.road_tile(frame, tx, ty, _s.md, elev, None, None, items, custom=_custom,
-                                               out_dir=out_dir, vfs_dir=vfs_dir, entries=_entries, radii=_radii)
+                                               out_dir=out_dir, vfs_dir=vfs_dir, entries=_entries, radii=_radii,
+                                               before_parts=_before_de_parts)
         mark("bld")
         garage_sound = buildingsmod.garage_sound_boxes(items, *box[:2], roadsmod.SOUND_GARAGE)
         oil_wells = oilwells.tile_wells(frame, tx, ty, elev)     # (the mod's pump jacks)
@@ -1903,6 +1926,35 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     radar_props, P.speed_traps = radars.tile_rows(frame, box, _s.md, elev, _s.widths, urban)
     if radar_props:
         props = (props or []) + radar_props
+    de_streets_blob = None
+    if out_dir is not None and vfs_dir is not None:
+        st_face, de_streets_blob, de_yard_rows = de_enhancer.finish_streets_and_yards(
+            _s.md,
+            frame,
+            tx,
+            ty,
+            box,
+            near_roads,
+            street_names,
+            props or [],
+            (walks if walks_raw is None else walks_raw) if buildings else walks,
+            items,
+            de_drives_all,
+            de_garage_drives,
+            de_rings,
+            lambda x, y: (
+                np.zeros(0, np.float64)
+                if len(x) == 0
+                else roadmeshmod.drawn_ground(frame, drawn, np.c_[x, y], q)
+            ),
+            out_dir,
+            vfs_dir,
+        )
+        if st_face:
+            de_faces_map.update(st_face)
+        if de_yard_rows:
+            props = (props or []) + de_yard_rows
+    P.de_streets, P.de_shops, P.de_faces = de_streets_blob, de_shops_blob, (de_faces_map or None)
     P.signs = signs
     P.chunks, P.ctx, P.walks, P.box, P.origin = chunks, ctx, walks, box, (x0, y0, 0.0)
     P.custom, P.custom_entries = _custom, _entries
@@ -1944,7 +1996,10 @@ def _roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, 
                               signs=P.signs, custom_entries=P.custom_entries, wells=P.wells, bld_none=bool(buildings),
                                barrier_mesh=P.barrier_mesh, barrier_chunks=P.barrier_chunks, turbines=P.turbines, towns=P.town_faces,
                                walk_ground=lambda x, y: roadmeshmod.drawn_ground(frame, P.drawn, np.c_[x, y], q),
-                               speed_traps=P.speed_traps, bus_col=P.bus_col) + (P.fuel_pads, P.fuel_tried)
+                               speed_traps=P.speed_traps, bus_col=P.bus_col,
+                               de_streets=getattr(P, "de_streets", None),
+                               de_shops=getattr(P, "de_shops", None),
+                               de_faces=getattr(P, "de_faces", None)) + (P.fuel_pads, P.fuel_tried)
     mark("write")
     return out
 
@@ -2049,7 +2104,10 @@ def _write_geo_content(out_dir, vfs_dir, tile, P):
                                    decals=False, barrier_mesh=getattr(P, "barrier_mesh", None),
                                    barrier_chunks=getattr(P, "barrier_chunks", ()),
                                    turbines=getattr(P, "turbines", ()), towns=getattr(P, "town_faces", None),
-                                   speed_traps=getattr(P, "speed_traps", ()), bus_col=getattr(P, "bus_col", None))
+                                   speed_traps=getattr(P, "speed_traps", ()), bus_col=getattr(P, "bus_col", None),
+                                   de_streets=getattr(P, "de_streets", None),
+                                   de_shops=getattr(P, "de_shops", None),
+                                   de_faces=getattr(P, "de_faces", None))
         with open(os.path.join(tmpdir, f"roads_0_{tile}_None.json"), encoding="utf-8") as f:
             data = json.loads(f.read())
         files = roadsmod.shape_files(0, tile, None)
@@ -2126,6 +2184,8 @@ def _geo_content_key(key, zoom, buildings, left_hand, mph, gas_stations, buried,
     if de_junctions:
         import designs
         de = designs.cache_parts(True, tile.frame, designs.tile_reach(tile.box, GEO_SKIN_MARGIN_M))
+    import de_enhancer
+    de_imm = de_enhancer.cache_parts(tile.frame, tile.box)
     return revisit.key("roadsg", str(key), int(zoom), bool(buildings), bool(left_hand), bool(mph), bool(gas_stations),
                        _md_versions(bool(buildings)) if md is None else md, float(buried), lamp_region, country,
                        GEO_SKIN_MARGIN_M,
@@ -2134,7 +2194,7 @@ def _geo_content_key(key, zoom, buildings, left_hand, mph, gas_stations, buried,
                        # (the ground rules: rules, the server's own when it asks, earthd.Server.geo_content_key)
                        ("rules", _ground_rules() if rules is None else rules),
                        _nyc_key(tile.frame, tile.box, cache_dir) if buildings else None,
-                       bool(de_junctions), *de)     # (the German junction parts last)
+                       bool(de_junctions), *de, *de_imm)     # (the German junction / immersion parts last)
 
 
 def prebuild_geo(gx, gy, zoom, scratch, buildings, left_hand, mph, gas_stations, buried=0.0, lamp_region=None,
@@ -2168,6 +2228,12 @@ def prebuild_geo(gx, gy, zoom, scratch, buildings, left_hand, mph, gas_stations,
                              lamp_region, country, pole_profile=pole_profile, de_junctions=de_junctions,
                              towns_on=towns_on, wear=wear)
         finally:
+            for name, p in _town_face_files(scratch, scratch_vfs, geo_names(tile_key)["json"]):
+                if name.startswith("de_"):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
             for name in geo_names(tile_key).values():
                 try:
                     os.remove(os.path.join(scratch, name))
@@ -2211,6 +2277,12 @@ def prebuild_geo_skin(aid, lat, lon, zoom, gx, gy, gzoom, scratch, scratch_vfs, 
                           left_hand, mph, q, gas_stations, buried, lamp_region, country, True, True, None,
                           pole_profile, de_junctions, towns_on, wear)
             finally:
+                for name, p in _town_face_files(scratch, scratch_vfs, geo_names(tile_key)["json"]):
+                    if name.startswith("de_"):
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
                 for name in list(geo_names(tile_key).values()) + list(geo_names(tile_key, aid).values()):
                     try:
                         os.remove(os.path.join(scratch, name))
@@ -2708,7 +2780,7 @@ def _town_face_files(out_dir, vfs_dir, json_name):
     out = []
     for name in revisit.shapes_in(text, vfs_dir):
         p = os.path.join(out_dir, name)
-        if name.startswith("town") and os.path.exists(p):
+        if name.startswith(("town", "de_")) and os.path.exists(p):
             out.append((name, p))
     return out
 

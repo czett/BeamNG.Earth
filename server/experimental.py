@@ -45,6 +45,7 @@ FEATURES = (
     ("expWatertight", {"BNE_WATERTIGHT": "on"}, None),                    # shells.ON
     ("expCanadaLidar", {"BNE_LIDARBC": "1", "BNE_HRDEM_NEAR": "1"}, None),     # dem.LIDARBC / HRDEM_NEAR
     ("expStaleRevisit", {"BNE_STALE_REVISIT": "on"}, None),               # revisit.STALE_ON (not a key: NOT_SWITCHES)
+    ("expDeStreetImmersion", {"BNE_DE_STREET_IMMERSION": "on"}, None),    # de_enhancer.enabled
 )
 IDS = tuple(f[0] for f in FEATURES)
 # A setting that counts only in a file of this version or newer (settings.lua M.VERSION): the Road signs switch was on

@@ -11402,7 +11402,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                signals=None, marks=None, roads_out=None, skin_margin=0.0, walks_raw=None, nodes=None,
                clearance_out=None, development=None, pole_profile=None, signs=None,
                sign_obstacles=None, roadside_jobs=None, towns=None, mapped_poles=None, de_on=False, de_routes=(),
-               driveways_out=None, mapped_lamps=None, wear=None, cover_fn=None):
+               driveways_out=None, mapped_lamps=None, wear=None, cover_fn=None, street_names_out=None):
     """The chunks of one tile. cells: the mapgeom.Features of the "roads" layer of every cell touching
     the tile; elev(lat, lon) -> metres (the DEM); urban_fn: as road_specs. Features in several cells are
     taken once (by id). The carriageways, then each road's sidewalks / gutters / markings (extras), cut
@@ -11454,6 +11454,11 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
             if specs[i] is None or str(feats.ids[i]) in seen:
                 continue
             seen[str(feats.ids[i])] = (feats, i, specs[i])
+    if street_names_out is not None:
+        for fid, (f, i, _sp) in seen.items():
+            names = f.attrs.get("name")
+            if names is not None and names[i]:
+                street_names_out[fid] = str(names[i])
     placement = placement_context(cells, urban_fn, widths, left_hand)
     rings = []                                  # (fid, spec, lon/lat ring) near the tile (xy at h = 0)
     for fid in sorted(seen):
@@ -13023,7 +13028,8 @@ def shape_files(aid, tx, ty):
            "bldcol": f"bldcol_{aid}_{tx}_{ty}.cdae", "wire": f"wire_{aid}_{tx}_{ty}.cdae",
            "bld": f"bld_{aid}_{tx}_{ty}.cdae", "tunnel": f"tunnel_{aid}_{tx}_{ty}.cdae",
            "rail": f"rail_{aid}_{tx}_{ty}.cdae", "signs": f"signs_{aid}_{tx}_{ty}.cdae", "railcol": f"railcol_{aid}_{tx}_{ty}.cdae",
-           "barrier": f"barrier_{aid}_{tx}_{ty}.cdae", "buscol": f"buscol_{aid}_{tx}_{ty}.cdae"}
+           "barrier": f"barrier_{aid}_{tx}_{ty}.cdae", "buscol": f"buscol_{aid}_{tx}_{ty}.cdae",
+           "destreets": f"destreets_{aid}_{tx}_{ty}.cdae", "deshops": f"deshops_{aid}_{tx}_{ty}.cdae"}
     for k in range(2, BLD_PARTS_MAX + 1):
         out[f"bld{k}"] = f"bld_{aid}_{tx}_{ty}_{k}.cdae"
     for k in range(2, RAIL_PARTS_MAX + 1):
@@ -13099,7 +13105,8 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
                props=None, wires=None, park=None, tunnel_mesh=None, fuel=None,
                rail_mesh=None, garage_sound=(), wells=(), guardrail_rows=None, custom_entries=None, decals=True,
                bld_none=False, barrier_mesh=None, barrier_chunks=(), turbines=(), signs=None, towns=None,
-               walk_ground=None, speed_traps=(), bus_col=None):
+               walk_ground=None, speed_traps=(), bus_col=None,
+               de_streets=None, de_shops=None, de_faces=None):
     """Write a tile's chunks (atomically), its sidewalk mesh (walks: build_tile's runs, if any:
     `walks_<a>_<tx>_<ty>.cdae`, announced in the tile as "walk": {shape, pos}) and its road mesh
     (road_mesh: roadmesh.build's result: `road_<a>_<tx>_<ty>.cdae`, "road": {shape, pos}; the mod then
@@ -13245,6 +13252,26 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
         data["fuel"] = fuel
     if custom_entries:              # buildings.road_tile's 3dmr.eu models (ours), [{shape, pos}]
         data["b3dmr"] = custom_entries
+    if de_streets is not None:
+        x0, y0, _, _ = tile_bbox(tx, ty)
+        shape = shape_files(aid, tx, ty)["destreets"]
+        p = os.path.join(out_dir, shape)
+        tmp_s = staging.tmp_for(p)
+        with open(tmp_s, "wb") as fh:
+            fh.write(de_streets)
+        staging.replace(tmp_s, p)
+        data["destreets"] = {"shape": f"{vfs_dir}/{shape}", "pos": [x0, y0, 0.0]}
+    if de_shops is not None:
+        x0, y0, _, _ = tile_bbox(tx, ty)
+        shape = shape_files(aid, tx, ty)["deshops"]
+        p = os.path.join(out_dir, shape)
+        tmp_sh = staging.tmp_for(p)
+        with open(tmp_sh, "wb") as fh:
+            fh.write(de_shops)
+        staging.replace(tmp_sh, p)
+        data["deshops"] = {"shape": f"{vfs_dir}/{shape}", "pos": [x0, y0, 0.0]}
+    if de_faces:
+        data["deFaces"] = de_faces
 
     tmp = staging.tmp_for(path)
     with open(tmp, "w") as f:

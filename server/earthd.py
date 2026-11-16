@@ -3261,6 +3261,7 @@ class Server:
             towns = self.towns.maker(anchor.frame, roadsmod.cells_of_tile(anchor.frame, tx, ty,
                                                                           blockworker.TOWNS_MARGIN_M),
                                      self.out_dir, self.vfs_dir, town_faces)
+        street_names = {}
         chunks = roadsmod.build_tile(anchor.frame, tx, ty, cells, elev, urban, walks=walks, deck_context=ctx, bridges=anchor.bridges,
                                      sign_obstacles=sign_obstacles,
                                      walk_cuts=fuel_cuts,    # (the stations' made-up driveways: no sidewalk across them)
@@ -3278,20 +3279,29 @@ class Server:
                                      development=developmentmod.for_tile(self.mapdata, anchor.frame, tx, ty), towns=towns,
                                      de_on=designsmod.enabled(self.dej_on), de_routes=de_routes, mapped_lamps=mapped_lamps,
                                      wear=Server.wear_arg(self),
-                                     cover_fn=getattr(self.surface, "classes", None))
+                                     cover_fn=getattr(self.surface, "classes", None),
+                                     street_names_out=street_names)
         # (railway and tram tracks on the ground)
         chunks += railsmod.tile_chunks(anchor.frame, tx, ty, cells, self.country(anchor), urban)
         if self.airports is not None:   # runway markings, drawn by the road mesh like the lane lines
             chunks += self.airports.tile_chunks(anchor.frame, tx, ty, elev, roadsmod.tile_bbox)
         x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
+        import de_enhancer
+        de_rings = None
+        de_drives_all = list(drives)
+        de_garage_drives = []
         if items is not None:           # front doors and shopfronts, driveways into the road mesh
             # (no street tree in a house: its own or the next tile's)
             margin = streetfront.BUILT_FRONT_M + 2. if frontage_country else 2.
             rings = buildingsmod.near_rings(anchor.frame, tx, ty, self.mapdata, margin=margin, skip=skip)
+            de_rings = rings
             props[:] = furnituremod.off_buildings(props, rings)
-            props.extend(buildingsmod.doors(items, lines, x0, y0, drives, infer_fences=frontage_country != "FR"))
+            infer_us_fences = frontage_country != "FR" and not de_enhancer.suppress_default_fences(anchor.frame, box)
+            props.extend(buildingsmod.doors(items, lines, x0, y0, drives, infer_fences=infer_us_fences))
             props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
-            drives.extend(buildingsmod.garage_drives(items, lines, x0, y0))
+            de_garage_drives = buildingsmod.garage_drives(items, lines, x0, y0)
+            drives.extend(de_garage_drives)
+            de_drives_all = drives
             chunks += drives
             park = parkingmod.clear_of(park, props, drives)
             park = parkingmod.tile_lot_spots(anchor.frame, tx, ty, self.mapdata, elev, items, park,
@@ -3414,6 +3424,8 @@ class Server:
         garage_sound = ()
         oil_wells = []
         custom_entries = []             # the tile's baked 3dmr.eu / local models (roads.write_tile's "b3dmr")
+        de_faces_map = {}
+        de_shops_blob = None
         if self.buildings:
             import oilwells
             _baked_entries, _baked_radii = [], []
@@ -3422,8 +3434,18 @@ class Server:
                     anchor.frame, _custom, elev, self.out_dir, self.vfs_dir, road_ends=_bridge_ends,
                     items=items, origin=(x0, y0))
                 custom_entries = _baked_entries
+
+            def _before_de_parts(cur_items):
+                nonlocal de_shops_blob
+                sf, sb, _ = de_enhancer.prepare_shops(self.mapdata, anchor.frame, tx, ty, cur_items,
+                                                      self.out_dir, self.vfs_dir)
+                if sf:
+                    de_faces_map.update(sf)
+                de_shops_blob = sb
+
             bld, _ = buildingsmod.road_tile(anchor.frame, tx, ty, self.mapdata, elev, None, None,
-                                            items, entries=_baked_entries, radii=_baked_radii)
+                                            items, entries=_baked_entries, radii=_baked_radii,
+                                            before_parts=_before_de_parts)
             garage_sound = buildingsmod.garage_sound_boxes(items, *roadsmod.tile_bbox(tx, ty)[:2],
                                                            roadsmod.SOUND_GARAGE)
             oil_wells = oilwells.tile_wells(anchor.frame, tx, ty, elev)     # (the mod's pump jacks)
@@ -3513,6 +3535,34 @@ class Server:
         radar_props, speed_traps = radars.tile_rows(anchor.frame, box, self.mapdata, elev, self.road_widths, urban)
         if radar_props:
             props = (props or []) + radar_props
+        de_streets_blob = None
+        if self.out_dir is not None and self.vfs_dir is not None:
+            st_face, de_streets_blob, de_yard_rows = de_enhancer.finish_streets_and_yards(
+                self.mapdata,
+                anchor.frame,
+                tx,
+                ty,
+                box,
+                near_roads,
+                street_names,
+                props or [],
+                walks if self.buildings else None,
+                items,
+                de_drives_all,
+                de_garage_drives,
+                de_rings,
+                lambda x, y: (
+                    np.zeros(0, np.float64)
+                    if len(x) == 0
+                    else roadmeshmod.drawn_ground(anchor.frame, drawn, np.c_[x, y], self.anchor_q(anchor))
+                ),
+                self.out_dir,
+                self.vfs_dir,
+            )
+            if st_face:
+                de_faces_map.update(st_face)
+            if de_yard_rows:
+                props = (props or []) + de_yard_rows
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
                                    rail_mesh=rmesh, guardrail_rows=guardrail_rows, garage_sound=garage_sound,
@@ -3523,7 +3573,10 @@ class Server:
                                    turbines=turbine_rows, towns=town_faces,
                                    walk_ground=lambda x, y: roadmeshmod.drawn_ground(
                                        anchor.frame, drawn, np.c_[x, y], self.anchor_q(anchor)),
-                                   speed_traps=speed_traps)
+                                   speed_traps=speed_traps,
+                                   de_streets=de_streets_blob,
+                                   de_shops=de_shops_blob,
+                                   de_faces=(de_faces_map or None))
 
     def set_dej(self, on):
         """The settings page's German junction signs switch (message german_junctions): True when it changed (the road

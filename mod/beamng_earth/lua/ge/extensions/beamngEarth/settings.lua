@@ -153,6 +153,7 @@ M.SCHEMA = {
   expWatertight = { kind = 'bool', default = false, label = 'Closed 3D models' },
   expCanadaLidar = { kind = 'bool', default = false, label = 'Detailed Canadian lidar' },
   expStaleRevisit = { kind = 'bool', default = false, label = 'Show the older world while rebuilding' },
+  expDeStreetImmersion = { kind = 'bool', default = false, label = 'German street details' },
   -- in Germany: the German right-of-way signs and markings at junctions, 30-zone signs and traffic that gives way
   -- accordingly (server designs.py; the message german_junctions)
   germanJunctionSigns = { kind = 'bool', default = false, label = 'German junction signs' },
@@ -220,7 +221,7 @@ M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'groundPhoto', 'groundGrid', 't
   'expNlRoadSigns', 'expEuScenery', 'expDropRails', 'expEntranceFlares', 'expPriorityStops', 'expRoadBumps', 'expRoughDirt',
   'expWearStrips', 'expGradeGuard', 'expPhotoSurface', 'expTerrainBumps', 'expCliffWalls', 'expTunnelLids', 'expSubseaTunnels',
   'expAiTunnels', 'expRailCollide', 'expCatenary', 'expRailCrossings', 'expRailTunnels', 'expRailCurves', 'expWatertight',
-  'expCanadaLidar', 'expStaleRevisit' }
+  'expCanadaLidar', 'expStaleRevisit', 'expDeStreetImmersion' }
 
 -- Stored but not on the settings page
 M.HIDDEN = { welcomeSeen = true, updateDismissed = true, devNoticeSeen = true, qualityDetected = true, telemetryChoice = true }

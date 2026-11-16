@@ -463,6 +463,9 @@ local function dropTile(key)
   if t.wire then deleteQ[#deleteQ + 1] = t.wire end
   for _, w in ipairs(M.SIGN_WHATS) do if t[w] then deleteQ[#deleteQ + 1] = t[w] end end
   if t.signs then deleteQ[#deleteQ + 1] = t.signs end
+  if t.destreets then deleteQ[#deleteQ + 1] = t.destreets end
+  if t.deshops then deleteQ[#deleteQ + 1] = t.deshops end
+  require('beamngEarth/deEnhancer').release(key)
   -- and its meshes not made yet (from KyzoFox's 1.5.4, PR #64): a tile sent again under the same key left its old
   -- walkQ / held / createQ entries, which were then made for the new tile from pooled shape paths that had just been
   -- reported gone and refilled with another tile's shape: that tile's buildings drawn here at its ground height (houses
@@ -779,7 +782,7 @@ M.geoStats = { tiles = 0, kept = 0, replaced = 0, skins = 0, skinSwaps = 0, exac
 local geotile = require('beamngEarth/geotile')
 local geodesy = require('beamngEarth/geodesy')
 local anchorObj = nil       -- the current anchor (geodesy) the geotiles are placed into (M.update, onTile)
-M.CONTENT_WHATS = { 'signs', 'deck', 'bld', 'bld2', 'bld3', 'bld4', 'bldcol', 'wire', 'tunnel', 'rail', 'rail2', 'rail3', 'railcol', 'railcol2', 'railcol3', 'buscol' }
+M.CONTENT_WHATS = { 'signs', 'destreets', 'deshops', 'deck', 'bld', 'bld2', 'bld3', 'bld4', 'bldcol', 'wire', 'tunnel', 'rail', 'rail2', 'rail3', 'railcol', 'railcol2', 'railcol3', 'buscol' }
 M.SKIN_WHATS = { 'road', 'walk', 'walkcol' }
 
 local swapState = nil        -- a generation swap being staged: { gen, parts, tiles } (M.swapBegin)
@@ -950,7 +953,7 @@ local function queueGeoParts(key, t, data)
   for _, what in ipairs(M.CONTENT_WHATS) do
     if t.parts[what] then
       local q = { key = key, what = what, tile = t, geo = true,
-        renderOnly = what == 'wire' or what == 'signs' or (lean and what:sub(1, 3) == 'bld' and what ~= 'bldcol') or (leanRail and isRailDrawn(what)) }
+        renderOnly = what == 'wire' or what == 'signs' or what == 'destreets' or what == 'deshops' or (lean and what:sub(1, 3) == 'bld' and what ~= 'bldcol') or (leanRail and isRailDrawn(what)) }
       if not q.renderOnly then t.colWant[what] = true end
       if q.renderOnly or M.collideNear(t) then walkQ[#walkQ + 1] = q else parked[#parked + 1] = q end
     end
@@ -1060,6 +1063,9 @@ function M.onGeoTile(msg, currentAnchor, a)
         if id then t.customAt[#t.customAt + 1] = { id = id, pos = pos } end
       end
     end
+  end
+  if type(data.deFaces) == 'table' then
+    require('beamngEarth/deEnhancer').retain(key, data.deFaces)
   end
   geoRows(key, t, data)
   queueGeoParts(key, t, data)
@@ -1502,7 +1508,7 @@ function M.onTile(msg, currentAnchor, a)
   end
   -- pooled shape files: the server's slot paths instead of the tile's own files
   local slots = {}
-  for _, what in ipairs({ 'road', 'deck', 'walk', 'walkcol', 'bld', 'bld2', 'bld3', 'bld4', 'bldcol', 'wire', 'signs', 'tunnel', 'rail', 'rail2', 'rail3',
+  for _, what in ipairs({ 'road', 'deck', 'walk', 'walkcol', 'bld', 'bld2', 'bld3', 'bld4', 'bldcol', 'wire', 'signs', 'destreets', 'deshops', 'tunnel', 'rail', 'rail2', 'rail3',
       'railcol', 'railcol2', 'railcol3', 'barrier', 'buscol', 'exits', 'mileposts', 'merges', 'speeds', 'dirs', 'rsigns', 'autobahn' }) do
     local sl = msgSlot(msg, what)
     if sl then
@@ -1562,11 +1568,14 @@ function M.onTile(msg, currentAnchor, a)
     require('beamngEarth/ambience').onSpaces(key, data.sound)
     tiles[key].sound = true
   end
-  if type(data.signs) == 'table' and data.signs.shape and type(data.signs.pos) == 'table' then
-    walkQ[#walkQ + 1] = { key = key, walk = data.signs, what = 'signs', renderOnly = true, tile = tiles[key] }
+  if type(data.deFaces) == 'table' then
+    require('beamngEarth/deEnhancer').retain(key, data.deFaces)
   end
-  if type(data.wire) == 'table' and data.wire.shape and type(data.wire.pos) == 'table' then    -- pole wires
-    walkQ[#walkQ + 1] = { key = key, walk = data.wire, what = 'wire', tile = tiles[key] }
+  for _, what in ipairs({ 'signs', 'wire', 'destreets', 'deshops' }) do
+    if type(data[what]) == 'table' and data[what].shape and type(data[what].pos) == 'table' then
+      walkQ[#walkQ + 1] = { key = key, walk = data[what], what = what, tile = tiles[key],
+        renderOnly = what == 'signs' or what == 'destreets' or what == 'deshops' }
+    end
   end
   -- a sign tile (key "s<tx>_<ty>"): its render-only sign shapes, kept in signData for setSignsEnabled
   tiles[key].signOnly = tostring(msg.key):match('^s%-?%d+_') ~= nil
@@ -2373,6 +2382,9 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
     noteUnit('delete', ms)
     sinceChange = stopwatch.new()
   end
+  if #deleteQ == 0 then
+    require('beamngEarth/deEnhancer').sweep()
+  end
   while #createQ > 0 and gov:try('roadChunk') do
     local q = table.remove(createQ, 1)
     local t = tiles[q.key]
@@ -3083,6 +3095,7 @@ function M.clear()
     slotObjGone(id)
   end
   deleteQ = {}
+  require('beamngEarth/deEnhancer').clearAll()
   walkQ, parked = {}, {}
   if collisionDirty then be:reloadCollision(); M.collisionRebuilt() end
 end
@@ -3105,6 +3118,7 @@ function M.reset()
   for n, d in pairs(slotDropped) do slotsGone[#slotsGone + 1] = { n, d[1], d[2] } end
   objSlot, slotLive, slotDropped = {}, {}, {}
   tiles, createQ, deleteQ, walkQ, anchorId, loadedMaterials = {}, {}, {}, {}, nil, false
+  require('beamngEarth/deEnhancer').clearAll()
   far, farQ, farSeen = {}, {}, {}
   held, parked, newColliders, swapQuiet = {}, {}, {}, nil     -- (walkQ entries of objects gone with the level)
   collisionDirty, deletesDirty, dirtyAt, extBoxes, farDeletes = false, false, {}, {}, {}

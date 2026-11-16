@@ -815,7 +815,7 @@ class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
                  "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "across", "hi",
-                 "roof_h", "hf", "holes", "skel", "skel_cap", "tank", "street", "slope_dir", "ml")
+                 "roof_h", "hf", "holes", "skel", "skel_cap", "tank", "street", "slope_dir", "ml", "name")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1563,7 +1563,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                 pitch=math.degrees(dmath.atan2(dome_rise(roof, hw, rh), max(float(hw), 0.1))) if roof in DOME_ROOFS
                 else (mapped_pitch(roof, shw, attrs.get("roof_height")) or style.pitch),
                 across=across, hi=hi, roof_h=mapped_roof_h(roof, attrs.get("roof_height")), hf=hf, skel=skel,
-                skel_cap=skel_cap, slope_dir=_slope_dir(roof, attrs.get("roof_direction")))
+                skel_cap=skel_cap, slope_dir=_slope_dir(roof, attrs.get("roof_direction")), name=attrs.get("name"))
     if skel:
         spec.pitch = skel_pitch
     return francehouses.adapt(spec, attrs, lat, lon)
@@ -6951,6 +6951,7 @@ def road_tile(
     vfs_dir=None,
     entries=None,
     radii=None,
+    before_parts=None,
 ):
     """The buildings of road tile (tx, ty) (roads.TILE squares of the anchor frame): ((mesh, collider boxes,
     collision mesh), [b3dmr entries]). The first element is None without any procedural buildings. md:
@@ -6979,6 +6980,8 @@ def road_tile(
         items = _suppress_under_models(items, radii, x0, y0)
     if props is not None and lines:
         props.extend(doors(items, lines, x0, y0))
+    if before_parts is not None:
+        before_parts(items)
     meshes = build_parts(items, with_lod=True)
     bld = (
         (meshes, collider_boxes(items, x0, y0), collision_mesh(items))
