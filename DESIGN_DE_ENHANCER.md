@@ -46,12 +46,18 @@
 - **PBR Window & Cladding Tuning (`buildings.materials.json`):** Wires `dynamicCubemap: true` and `clearCoatMap` (`t_highrise_plaster_m.data.png`, `clearCoatFactor: 0.95`, `clearCoatRoughnessFactor: 0.045`) on `bne_bld_facade`, `bne_bld_shop`, `bne_bld_office`, and `bne_bld_lobby` so glazing reflects the sky cleanly while plaster/brick stays matte, and enables stock normal/roughness/AO maps on precast concrete panels, corrugated metal cladding, and asphalt roofs.
 - **Cache Keys:** `blockworker.far_buildings_tile` and `blockworker.far_geo` (`bldfar` / `bldpack`) append `de_enhancer.cache_parts(frame, box)` cleanly (`()` when off, `(True, "outside")` outside Germany).
 
+### Feature E: Urban Life & Hedges (`feat/de-urban-life-and-hedges`)
+- **Front-Yard Hedges & Fences (`classifier.py`, `placement.py`, `trees.lua`):** DE-specific `_de_street_front` supports narrow townhouses (`>= 2.6 m` wide, `>= 0.95 m` no-sidewalk setback, `>= 0.35 m` sidewalk clearance) with deterministic `0.20 m` sidewalk / `0.55 m` wall offsets, ~65% `fr_hedge` / ~35% `fr_fence_{iron,slats,wood}`, `0.95 m` continuous hedge pitch (`M.ONE_SPELLING.fr_hedge = true`), and `1.4 m` door/driveway cutouts.
+- **Parked Car Clusters (`parking_de.py`, `parking.lua`):** Replaces North American 7.0 m minimum width with German residential & collector curbside clusters (`>= 5.5 m` width, `2.05 x 5.2 m` EU stall footprint, single-side `< 8.5 m`, `>= 10 m` junction, `>= 12 m` bus stop, `>= 4.2 m` driveway, and `rails.tram_lines` exclusions), preserving mapped `amenity=parking` lots and raising `parking.lua` `DE_ACTIVE_CAP` (`high=8`, `ultra=10`) when `expDeStreetImmersion` is active.
+- **German Transit Stops & Micro-Props (`furniture_de.py`, `texture_atlas.py`, `shelters.py`):** Batches cantilevered glass/steel bus shelters (`Bushaltestellen`) with yellow/green `H` signs + real OSM stop names, `Stromkästen`, `DHL Packstationen`, `Altglascontainer` trios, and corner `Poller` directly into `destreets.cdae` & `de_st_<hash>.dds` (0 extra draw calls/materials), suppressing duplicate `busshelter_it` Forest props.
+- **3D House Numbers, Entrance Canopies & Balconies (`facade_style.py`, `classifier.py`, `hooks.py`):** Extracts `addr:housenumber` (with deterministic street-sequential fallback), packs 8 compact `128x32` royal-blue/white enamel plaques per `512x64` slot in `de_sh_<hash>.dds` -> `deshops.cdae`, and batches watertight closed 6-face prism glass/anthracite entrance canopies (`Vordächer`) + upper-floor residential balconies (`2 <= floors <= 5`) directly into `buildings.build()` before `shells.close` (0 extra materials).
+
 ---
 
 ## 4. Verification & Diagnostics
 - **Python Unit & Integration Tests:**
   ```bash
-  PYTHONPATH=server .venv/bin/python -m unittest server/tests/test_de_street_enhancer.py server/tests/test_experimental.py server/tests/test_buildings.py server/tests/test_mod_textures.py
+  PYTHONPATH=server .venv/bin/python -m unittest discover -s server/tests -p 'test_*.py'
   ```
 - **Lua Runtime Tests:**
   ```bash
@@ -61,4 +67,4 @@
   ```bash
   .venv/bin/python tools/preview_de_enhancer.py
   ```
-  Produces `street_signs_atlas.png`, `shop_fascias_atlas.png`, `intersection_topdown.png`, and `facades_comparison.png` for autonomous visual inspection of kerning, umlauts/Eszett, emblems, intersection clearances, narrow front-yard hedges/fences, baked Sockel/eave AO, roof overhangs, and EDEKA cornice clearance.
+  Produces `street_signs_atlas.png`, `shop_fascias_atlas.png`, `intersection_topdown.png`, `facades_comparison.png`, and `urban_life_topdown.png` for autonomous visual inspection of kerning, umlauts/Eszett, emblems, intersection clearances, narrow front-yard hedges/fences, parked car clusters, bus stops & sidewalk furniture, house numbers, baked Sockel/eave AO, roof overhangs, and EDEKA cornice clearance.

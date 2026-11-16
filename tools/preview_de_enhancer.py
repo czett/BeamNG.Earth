@@ -23,8 +23,9 @@ sys.path.insert(0, str(ROOT / "server"))
 
 import buildings  # noqa: E402
 import geodesy  # noqa: E402
+import mapgeom  # noqa: E402
 import roads  # noqa: E402
-from de_street_enhancer import brand_registry, classifier, facade_style, placement, texture_atlas  # noqa: E402
+from de_street_enhancer import brand_registry, classifier, facade_style, furniture_de, parking_de, placement, texture_atlas  # noqa: E402
 
 
 OUT_DIR = Path("/tmp/de_enhancer_preview")
@@ -419,13 +420,171 @@ def generate_facades_comparison_preview():
     return out_path
 
 
+def generate_urban_life_topdown_preview():
+    """Generate `/tmp/de_enhancer_preview/urban_life_topdown.png` exercising Pillars 1-4."""
+    import math
+    import types
+
+    frame = geodesy.EnuFrame(51.5136, 7.4653)  # Dortmund center
+    box = (0.0, 0.0, 256.0, 256.0)
+    road_defs = [
+        ("r_gevels_w", _road_spec("residential", 6.0), np.array([[0.0, 128.0, 0.0], [128.0, 128.0, 0.0]]), "Gevelsbergstraße"),
+        ("r_gevels_e", _road_spec("residential", 6.0), np.array([[128.0, 128.0, 0.0], [256.0, 128.0, 0.0]]), "Gevelsbergstraße"),
+        ("r_bueter_n", _road_spec("living_street", 5.5), np.array([[128.0, 128.0, 0.0], [128.0, 256.0, 0.0]]), "Am Büter"),
+        ("r_stadt_s", _road_spec("tertiary", 7.0), np.array([[128.0, 0.0, 0.0], [128.0, 128.0, 0.0]]), "Stadtgärtnerei"),
+    ]
+    near_roads = [(fid, sp, pts, 7.4653) for fid, sp, pts, _ in road_defs]
+    street_names = {fid: nm for fid, _sp, _pts, nm in road_defs}
+    walks = [
+        {"fid": "r_gevels_w", "pts": np.array([[0.0, 132.0, 0.0], [120.0, 132.0, 0.0]]), "side": 1, "w": 2.0},
+        {"fid": "r_gevels_w", "pts": np.array([[0.0, 124.0, 0.0], [120.0, 124.0, 0.0]]), "side": -1, "w": 2.0},
+        {"fid": "r_gevels_e", "pts": np.array([[136.0, 132.0, 0.0], [256.0, 132.0, 0.0]]), "side": 1, "w": 2.0},
+        {"fid": "r_gevels_e", "pts": np.array([[136.0, 124.0, 0.0], [256.0, 124.0, 0.0]]), "side": -1, "w": 2.0},
+    ]
+    b_list = []
+    # 10 narrow German front-yard terraced & detached houses along Gevelsbergstraße & curbless Am Büter
+    for i in range(6):
+        x0 = 16.0 + i * 16.5
+        b_list.append(buildings.Spec(
+            ring=np.array([[x0, 133.6], [x0 + 11.0, 133.6], [x0 + 11.0, 143.6], [x0, 143.6]]),
+            floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="terrace",
+            seed=0.07 * (i + 1), door=(0, 5.5), min_h=0.0, de_in=True, de_hn=str(2 * i + 2),
+            de_eaves=(0.4, 0.4, 0.4, 0.4),
+        ))
+    for i in range(4):
+        x0 = 148.0 + i * 22.0
+        b_list.append(buildings.Spec(
+            ring=np.array([[x0, 133.5], [x0 + 13.0, 133.5], [x0 + 13.0, 144.5], [x0, 144.5]]),
+            floors=3, floor_h=2.9, height=8.7, roof="gabled", shop=False, cls="apartments",
+            seed=0.11 * (i + 1), door=(0, 6.5), min_h=0.0, de_in=True, de_hn=f"{40 + i}a",
+            de_eaves=(0.45, 0.45, 0.45, 0.45),
+        ))
+    for i in range(3):
+        y0 = 154.0 + i * 24.0
+        b_list.append(buildings.Spec(
+            ring=np.array([[132.2, y0], [142.2, y0], [142.2, y0 + 12.0], [132.2, y0 + 12.0]]),
+            floors=2, floor_h=2.8, height=5.6, roof="flat", shop=False, cls="house",
+            seed=0.19 * (i + 1), door=(3, 6.0), min_h=0.0, de_in=True, de_hn=str(11 + 2 * i),
+            de_eaves=(0.4, 0.4, 0.4, 0.4),
+        ))
+    items = [(b, 0.0, 0.0) for b in b_list]
+    drives = [{"w": 3.0, "n": [[40.0, 134.0, 0.0], [40.0, 131.0, 0.0]]}]
+
+    infra_pts = [(160.0, 123.5), (196.0, 123.5), (222.0, 123.5)]
+    lonlat = np.array([frame.enu_to_geodetic(x, y, 0.0)[1::-1] for x, y in infra_pts], dtype=np.float64)
+    infra_feats = mapgeom.Features(
+        layer="infrastructure",
+        lonlat=lonlat,
+        coord_off=np.array([0, 1, 2, 3], dtype=np.int64),
+        ring_off=np.array([0, 1, 2, 3], dtype=np.int64),
+        part_off=np.array([0, 1, 2, 3], dtype=np.int64),
+        kind=np.array([1, 1, 1], dtype=np.int8),
+        attrs={
+            "class": np.array(["bus_stop", "parcel_locker", "recycling"], dtype=object),
+            "name": np.array(["Gevelsbergstraße", "Packstation 104", ""], dtype=object),
+            "tags": np.array([
+                '{"highway":"bus_stop","name":"Gevelsbergstraße"}',
+                '{"amenity":"parcel_locker"}',
+                '{"amenity":"recycling","recycling_type":"container"}',
+            ], dtype=object),
+        },
+        ids=np.array(["d_bs", "d_lk", "d_rc"], dtype=object),
+    )
+    fake_md = types.SimpleNamespace(
+        cell=lambda key, layers=(), kind="demand": types.SimpleNamespace(
+            layers={"infrastructure": infra_feats if "infrastructure" in layers else None}
+        )
+    )
+
+    with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+        posts = placement.plan_street_signs(frame, near_roads, box, street_names, [], _flat_ground, rings=[b.ring for b in b_list], drives=drives)
+        yard_rows = placement.place_residential_yards(frame, box, items, near_roads, walks, drives, None, [b.ring for b in b_list], _flat_ground, md=fake_md)
+        furn = furniture_de.plan_de_street_furniture(fake_md, frame, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], _flat_ground)
+        park_rows = parking_de.refine_parking_spots(fake_md, frame, 0, 0, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], [], _flat_ground)
+        hn_targets = classifier.collect_housenumbers(items)
+
+    S = 4.0
+    img = Image.new("RGB", (1024, 1024), (235, 240, 232))
+    d = ImageDraw.Draw(img)
+
+    def px(pt):
+        return (float(pt[0]) * S, (256.0 - float(pt[1])) * S)
+
+    for w in walks:
+        pts = w["pts"]
+        d.line([px(pts[0]), px(pts[1])], fill=(195, 198, 202), width=int(round(w["w"] * S)))
+    for dr in drives:
+        n = dr["n"]
+        d.line([px(n[0]), px(n[1])], fill=(210, 180, 135), width=int(round(dr["w"] * S)))
+    for _fid, sp, pts, _ in near_roads:
+        d.line([px(pts[0]), px(pts[1])], fill=(82, 86, 94), width=int(round(sp.width * S)))
+        d.line([px(pts[0]), px(pts[1])], fill=(235, 235, 235), width=1)
+    for b in b_list:
+        d.polygon([px(p) for p in b.ring], fill=(224, 204, 178), outline=(70, 65, 60))
+
+    # Parked cars (rotated blue-grey rectangles)
+    for r in park_rows:
+        cx, cy, h_deg = float(r[0]), float(r[1]), float(r[3])
+        rad = math.radians(h_deg)
+        ux, uy = math.cos(rad) * 2.5, math.sin(rad) * 2.5
+        vx, vy = -math.sin(rad) * 0.95, math.cos(rad) * 0.95
+        poly = [px((cx + sx * ux + sy * vx, cy + sx * uy + sy * vy)) for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        d.polygon(poly, fill=(75, 118, 175), outline=(25, 40, 65))
+
+    # Front-yard hedges & fences
+    for r in yard_rows:
+        cx, cy = px((r[1], r[2]))
+        col = (30, 142, 38) if r[0] == "fr_hedge" else (139, 90, 43)
+        rad = 4.2 if r[0] == "fr_hedge" else 3.2
+        d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=col, outline=(18, 52, 20))
+
+    # Furniture (Bus stop, Stromkästen, Packstation, Altglas, Poller)
+    font_sm = texture_atlas._load_font(11, condensed=False)
+    for bs in furn.bus_stops:
+        cx, cy = px(bs.xy)
+        d.rectangle([cx - 8, cy - 5, cx + 8, cy + 5], fill=(244, 198, 12), outline=(12, 108, 52), width=2)
+        d.text((cx + 10, cy - 6), f"H: {bs.name}", fill=(12, 108, 52), font=font_sm)
+    for cab in furn.cabinets:
+        cx, cy = px(cab.xy)
+        d.rectangle([cx - 3, cy - 3, cx + 3, cy + 3], fill=(160, 165, 162), outline=(40, 40, 40))
+    for lk in furn.lockers:
+        cx, cy = px(lk.xy)
+        d.rectangle([cx - 6, cy - 4, cx + 6, cy + 4], fill=(245, 200, 12), outline=(208, 18, 28), width=2)
+    for rc in furn.recyclers:
+        cx, cy = px(rc.xy)
+        d.rectangle([cx - 6, cy - 3, cx + 6, cy + 3], fill=(34, 106, 52), outline=(20, 40, 20))
+    for bol in furn.bollards:
+        cx, cy = px(bol.xy)
+        d.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(214, 34, 34))
+
+    # House numbers beside doors
+    for hn in hn_targets:
+        cx, cy = px(hn.center_xy)
+        d.text((cx - 6, cy - 12), f"#{hn.number}", fill=(14, 54, 114), font=font_sm)
+
+    for post in posts:
+        cx, cy = px(post.xy)
+        d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(14, 52, 108), outline=(255, 255, 255), width=2)
+
+    d.rectangle([10, 10, 440, 118], fill=(250, 250, 250), outline=(120, 120, 120))
+    d.text((20, 18), f"Dortmund Urban Life Preview (Hedges: {sum(1 for r in yard_rows if r[0]=='fr_hedge')}/{len(yard_rows)})", fill=(20, 25, 30), font=font_sm)
+    d.text((20, 38), f"Parked Car Clusters: {len(park_rows)} (10m junction, 12m H-stop clear)", fill=(50, 90, 150), font=font_sm)
+    d.text((20, 58), f"Bus Stops: {len(furn.bus_stops)} | Cabinets: {len(furn.cabinets)} | Bollards: {len(furn.bollards)}", fill=(12, 108, 52), font=font_sm)
+    d.text((20, 78), f"3D House Numbers: {len(hn_targets)} (blue/white enamel plaques)", fill=(14, 54, 114), font=font_sm)
+
+    out_path = OUT_DIR / "urban_life_topdown.png"
+    img.save(out_path)
+    return out_path
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     p1 = generate_street_atlas_preview()
     p2 = generate_shop_atlas_preview()
     p3 = generate_topdown_layout_preview()
     p4 = generate_facades_comparison_preview()
-    print(f"Generated previews:\n  {p1}\n  {p2}\n  {p3}\n  {p4}")
+    p5 = generate_urban_life_topdown_preview()
+    print(f"Generated previews:\n  {p1}\n  {p2}\n  {p3}\n  {p4}\n  {p5}")
 
 
 if __name__ == "__main__":
