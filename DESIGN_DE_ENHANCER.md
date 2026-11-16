@@ -35,13 +35,23 @@
   - `destreets` and `deshops` render with `collisionType = 'None'` (`renderOnly = true`) so physics collision rebuilds stay unaffected.
   - `deEnhancer.retain` / `release` / `sweep` reference-count runtime Materials and delete unused Materials (`m:delete()`) after queued `TSStatic` removals finish.
   - `nightlights.addDynamic` toggles shop fascia lightbox illumination cleanly between daytime (`-1` nits) and dusk/night (`35` nits).
+- **Shop Fascia & Residential Front-Yard Refinements:**
+  - `classifier.classify_commercial_buildings` lowers fascia `z_top` by `~0.12 m` (and clears flat-roof `CORNICE_DOWN_M = 0.45 m` overhangs + pitched eaves) while pushing fascia depth outward `+0.04 m` to `0.15 m` so retail lightboxes (e.g. `EDEKA`) never clip concrete parapets.
+  - `classifier.classify_residential_yards` includes `terrace` row houses and small multi-family dwellings (`apartments`, `floors <= 3`, `area <= 650.0 m²`) and accepts omitted/flat roofs on residential dwellings, while `placement.place_residential_yards` relaxes setbacks to `1.15 m` from carriageway edge and `0.25 m` behind sidewalk back edge (`0.60 m` min yard depth, compact `0.85–1.00 m` hedges).
+
+### Feature D: Realistic German Facades & Baked Architectural Depth (Zero Draw-Call Overhead)
+- **Regional Color Grading & Material Classification (`facade_style.adapt_building`):** Inside Germany (`de_enhancer.enabled()`), eliminates `PAINT_TINTS` pastels and flattens oversaturated OSM `building:colour` / `roof:colour` into regional mineral palettes (*Altweiß*, sandstone, ochre, Ruhr/North-German clinker brick `BAND_BRICK`, and clay *Biberschwanz* / dark slate roofs). Non-Alpine wood siding outside true Bavaria/Alpine terrain (`alpine=True` or `lat < 47.65`) is converted to mineral plaster/brick.
+- **Option B Baked Vertex-Color Depth (`facade_style.bake_building_depth`):** On near tiles (`lite=False`), vertical wall quads are horizontally split at `g_local + 0.75 m` (stone plinth *Sockel*) and `z_eave - 0.35 m` (under-eave ambient occlusion) using exact UV interpolation in NumPy, then shaded in linear light (`v^2.2`) so plinth caps stay razor-sharp without extra materials, extra draw calls, or collision changes.
+- **Neighbor-Safe Roof Overhangs (`facade_style.compute_roof_overhangs`):** Assigns `0.30–0.40 m` eave overhangs across rectangular `_roof`, heightfield `_hf_roof`, and straight-skeleton `_skel_roof` builders while clamping shared terraced/row party walls to `0.0 m` and adding underside soffit quads on exposed near eaves.
+- **PBR Window & Cladding Tuning (`buildings.materials.json`):** Wires `dynamicCubemap: true` and `clearCoatMap` (`t_highrise_plaster_m.data.png`, `clearCoatFactor: 0.95`, `clearCoatRoughnessFactor: 0.045`) on `bne_bld_facade`, `bne_bld_shop`, `bne_bld_office`, and `bne_bld_lobby` so glazing reflects the sky cleanly while plaster/brick stays matte, and enables stock normal/roughness/AO maps on precast concrete panels, corrugated metal cladding, and asphalt roofs.
+- **Cache Keys:** `blockworker.far_buildings_tile` and `blockworker.far_geo` (`bldfar` / `bldpack`) append `de_enhancer.cache_parts(frame, box)` cleanly (`()` when off, `(True, "outside")` outside Germany).
 
 ---
 
 ## 4. Verification & Diagnostics
 - **Python Unit & Integration Tests:**
   ```bash
-  PYTHONPATH=server .venv/bin/python -m unittest server/tests/test_de_street_enhancer.py server/tests/test_experimental.py
+  PYTHONPATH=server .venv/bin/python -m unittest server/tests/test_de_street_enhancer.py server/tests/test_experimental.py server/tests/test_buildings.py server/tests/test_mod_textures.py
   ```
 - **Lua Runtime Tests:**
   ```bash
@@ -51,4 +61,4 @@
   ```bash
   .venv/bin/python tools/preview_de_enhancer.py
   ```
-  Produces `street_signs_atlas.png`, `shop_fascias_atlas.png`, and `intersection_topdown.png` for autonomous visual inspection of kerning, umlauts/Eszett, emblems, intersection clearances, and driveway gaps.
+  Produces `street_signs_atlas.png`, `shop_fascias_atlas.png`, `intersection_topdown.png`, and `facades_comparison.png` for autonomous visual inspection of kerning, umlauts/Eszett, emblems, intersection clearances, narrow front-yard hedges/fences, baked Sockel/eave AO, roof overhangs, and EDEKA cornice clearance.

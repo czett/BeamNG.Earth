@@ -511,5 +511,201 @@ class GeometrySafetyAndPipelineTest(unittest.TestCase):
                 self.assertEqual(ground_calls, [])
 
 
+class FacadeRealismAndExpansionTest(unittest.TestCase):
+    DORTMUND = (51.5136, 7.4653)
+
+    def test_facade_color_grading_and_regional_bias(self):
+        from de_street_enhancer import facade_style
+
+        ring = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]], dtype=np.float64)
+
+        # Disabled inside DE -> never touches spec
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "off"}):
+            s_off = buildings.plan(ring, {"class": "house", "facade_color": "#ff44cc"}, 0, *MUNICH)
+            self.assertFalse(de_enhancer.is_de_spec(s_off))
+
+        # Enabled outside DE (Paris) -> never touches spec
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            s_paris = buildings.plan(ring, {"class": "house", "facade_color": "#ff44cc"}, 0, 48.8566, 2.3522)
+            self.assertFalse(de_enhancer.is_de_spec(s_paris))
+
+            # Neon OSM facade & roof colors inside DE get clamped into mineral/clay palette
+            s_clamp = buildings.plan(
+                ring,
+                {"class": "house", "facade_color": "#ff44cc", "roof_color": "#00ff88"},
+                0,
+                *self.DORTMUND,
+            )
+            self.assertTrue(facade_style.is_de_spec(s_clamp))
+            _, f_rgb = buildings.LOOKS[s_clamp.facade]
+            _, r_rgb = buildings.LOOKS[s_clamp.roof_mat]
+            self.assertLessEqual(max(f_rgb) - min(f_rgb), 0.36)
+            self.assertLessEqual(max(r_rgb) - min(r_rgb), 0.34)
+
+            # Alpine wood chalet preserved in Bavaria mountains vs converted to plaster in flatland/Dortmund
+            s_alpine = buildings.plan(
+                ring,
+                {"class": "house", "facade_material": "wood", "_de_in": True, "_de_lat": 47.49, "_de_lon": 11.10, "_de_alpine": True},
+                0,
+                47.49,
+                11.10,
+                alpine=True,
+            )
+            self.assertEqual(buildings.LOOKS[s_alpine.facade][0], buildings.SIDING)
+
+            # Regional clinker bias: Dortmund (north_nw) > Munich (south)
+            dort_brick = 0
+            munich_brick = 0
+            for k in range(50):
+                rk = ring + np.array([k * 0.137, k * 0.091])
+                sd = buildings.plan(rk, {"class": "house"}, 0, *self.DORTMUND)
+                sm = buildings.plan(rk, {"class": "house"}, 0, *MUNICH)
+                if sd.band == buildings.BAND_BRICK:
+                    dort_brick += 1
+                if sm.band == buildings.BAND_BRICK:
+                    munich_brick += 1
+            self.assertGreater(dort_brick, munich_brick)
+
+    def test_baked_vertex_color_depth_and_option_b_split(self):
+        ring = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]], dtype=np.float64)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            spec = buildings.plan(ring, {"class": "house", "roof_shape": "gabled", "floors": 2}, 0, *self.DORTMUND)
+            spec.gring = np.zeros(len(ring), dtype=np.float64)
+
+            P_near, _uv, T_near, M_near, mats_near, C_near = buildings.build([(spec, 0.0, 0.0)], lite=False)
+            P_lite, _uv_l, T_lite, M_lite, mats_lite, _C_lite = buildings.build([(spec, 0.0, 0.0)], lite=True)
+
+            # Zero extra materials / draw calls
+            self.assertEqual(mats_near, buildings.MATERIALS)
+            self.assertEqual(mats_lite, buildings.MATERIALS)
+            # Option B near quad split adds Sockel + under-eave horizontal bands cleanly vs lite
+            self.assertGreater(len(T_near), len(T_lite))
+
+            fac_mi = buildings.MATERIALS.index(buildings.LOOKS[spec.facade][0])
+            fac_tris = T_near[M_near == fac_mi]
+            tri_zs = P_near[fac_tris, 2].mean(axis=1)
+            tri_luma = C_near[fac_tris, :3].astype(np.float64).mean(axis=(1, 2))
+            sockel_luma = tri_luma[tri_zs <= 0.55]
+            mid_luma = tri_luma[(tri_zs >= 1.8) & (tri_zs <= 3.8)]
+            self.assertGreater(len(sockel_luma), 0)
+            self.assertGreater(len(mid_luma), 0)
+            self.assertLess(sockel_luma.mean(), mid_luma.mean() * 0.90)
+
+            # Verify wall quads explicitly contain a cut around z = 0.75 m
+            fac_verts = np.unique(fac_tris.ravel())
+            zs = P_near[fac_verts, 2]
+            z_cuts = zs[(zs > 0.70) & (zs < 0.80)]
+            self.assertGreater(len(z_cuts), 0)
+
+    def test_neighbor_safe_roof_overhangs_box_hf_and_skel(self):
+        from de_street_enhancer import facade_style
+
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            # 3 terraced row houses along X: [0..6], [6..12], [12..18] x [0..10]
+            rows = []
+            for x0 in (0.0, 6.0, 12.0):
+                rg = np.array([[x0, 0.0], [x0 + 6.0, 0.0], [x0 + 6.0, 10.0], [x0, 10.0]], dtype=np.float64)
+                sp = buildings.plan(rg, {"class": "terrace", "roof_shape": "gabled", "floors": 2}, 1, *self.DORTMUND)
+                sp.gring = np.zeros(len(rg), dtype=np.float64)
+                rows.append((sp, 0.0, 0.0))
+
+            facade_style.compute_roof_overhangs(rows)
+            # Left house has shared +X party wall -> 0.0 overhang on edge (+X), clear overhang on exposed walls
+            e0 = rows[0][0].de_eaves
+            e1 = rows[1][0].de_eaves
+            self.assertIsNotNone(e0)
+            self.assertIn(0.0, e0)
+            self.assertGreater(max(e0), 0.28)
+            # Middle house shares both side walls (two edges == 0.0)
+            self.assertEqual(sum(1 for v in e1 if v == 0.0), 2)
+
+            # Built roof mesh of left house must never protrude into middle neighbor x >= 6.05
+            P0, _uv, T0, M0, _mats, _C0 = buildings.build([rows[0]], lite=False)
+            rm0 = buildings.MATERIALS.index(buildings.LOOKS[rows[0][0].roof_mat][0])
+            roof_pts = P0[T0[M0 == rm0].ravel()]
+            self.assertLessEqual(float(roof_pts[:, 0].max()), 6.02)
+
+            # Detached L-shaped skel roof + hf half-hipped roof build safely with clear overhangs
+            l_ring = np.array([[0.0, 0.0], [12.0, 0.0], [12.0, 5.0], [6.0, 5.0], [6.0, 10.0], [0.0, 10.0]], dtype=np.float64)
+            sp_skel = buildings.plan(l_ring, {"class": "house", "roof_shape": "gabled", "floors": 2}, 0, *MUNICH)
+            sp_hf = buildings.plan(
+                np.array([[25.0, 0.0], [37.0, 0.0], [37.0, 8.0], [25.0, 8.0]], dtype=np.float64),
+                {"class": "house", "roof_shape": "half-hipped", "floors": 2},
+                0,
+                *MUNICH,
+            )
+            sp_hf.hf = True
+            sp_skel.gring = np.zeros(len(l_ring), dtype=np.float64)
+            sp_hf.gring = np.zeros(4, dtype=np.float64)
+            facade_style.compute_roof_overhangs([(sp_skel, 0.0, 0.0), (sp_hf, 0.0, 0.0)])
+            self.assertGreater(min(sp_skel.de_eaves), 0.28)
+            self.assertGreater(min(sp_hf.de_eaves), 0.28)
+            P_mix, _uv, T_mix, _M, _mats, _C = buildings.build([(sp_skel, 0.0, 0.0), (sp_hf, 0.0, 0.0)], lite=False)
+            self.assertTrue(np.isfinite(P_mix).all())
+            self.assertGreater(len(T_mix), 0)
+
+    def test_edeka_fascia_cornice_clearance(self):
+        frame = geodesy.EnuFrame(*self.DORTMUND)
+        ring = np.array([[90.0, 108.0], [112.0, 108.0], [112.0, 126.0], [90.0, 126.0]], dtype=np.float64)
+        edeka_spec = buildings.Spec(
+            ring=ring, floors=1, floor_h=4.5, height=4.5, roof="flat", plain=False,
+            shop=True, windows=False, cls="supermarket", seed=0.33, min_h=0.0, name="EDEKA", sign=0,
+        )
+        targets, suppress_ids = classifier.classify_commercial_buildings([(edeka_spec, 0.0, 0.0)], [], frame, 0, 0)
+        self.assertEqual(len(targets), 1)
+        self.assertIn(id(edeka_spec), suppress_ids)
+        t = targets[0]
+        self.assertEqual(t.spec_brand.key, "edeka")
+        # Top of EDEKA sign must sit strictly below CORNICE_DOWN_M (0.45 m) overhang under z_eave = 4.5
+        self.assertLessEqual(t.z_top, 4.5 - buildings.CORNICE_DOWN_M - 0.05)
+        # Pushed outward by +0.15 m from wall (was +0.11 m)
+        self.assertAlmostEqual(float(t.center_xy[1]), 108.0 - 0.15, places=3)
+
+    def test_expanded_feature_c_yards_and_narrow_setback(self):
+        frame = geodesy.EnuFrame(*MUNICH)
+        box = (0.0, 0.0, 256.0, 256.0)
+        road_pts = np.array([[30.0, 100.0, 0.0], [210.0, 100.0, 0.0]], dtype=np.float64)
+        near_roads = [("r_sub", _road_spec("residential", 6.0), road_pts, MUNICH[1])]
+        # Narrow suburban sidewalk: y = 103.0 .. 104.2 (outer edge y = 104.2), leaving narrow yard y = 104.2 .. 106.0
+        walks = [{"pts": np.array([[30.0, 103.6, 0.0], [210.0, 103.6, 0.0]]), "side": 1, "w": 1.2}]
+
+        terrace_ring = np.array([[60.0, 106.0], [67.0, 106.0], [67.0, 114.0], [60.0, 114.0]], dtype=np.float64)
+        flat_house_ring = np.array([[85.0, 106.0], [95.0, 106.0], [95.0, 114.0], [85.0, 114.0]], dtype=np.float64)
+        apt_ring = np.array([[115.0, 106.0], [137.0, 106.0], [137.0, 126.0], [115.0, 126.0]], dtype=np.float64)
+        big_apt_ring = np.array([[155.0, 106.0], [180.0, 106.0], [180.0, 130.0], [155.0, 130.0]], dtype=np.float64)
+
+        specs = [
+            (buildings.Spec(ring=terrace_ring, floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="terrace", seed=0.05, door=(0, 3.5), min_h=0.0), 0.0, 0.0),
+            (buildings.Spec(ring=flat_house_ring, floors=2, floor_h=2.8, height=5.6, roof="flat", shop=False, cls="house", seed=0.05, door=(0, 5.0), min_h=0.0), 0.0, 0.0),
+            (buildings.Spec(ring=apt_ring, floors=3, floor_h=2.8, height=8.4, roof="flat", shop=False, cls="apartments", seed=0.05, door=(0, 11.0), min_h=0.0), 0.0, 0.0),
+            (buildings.Spec(ring=big_apt_ring, floors=5, floor_h=2.8, height=14.0, roof="flat", shop=False, cls="apartments", seed=0.05, door=(0, 12.0), min_h=0.0), 0.0, 0.0),
+        ]
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            eligible = classifier.classify_residential_yards(specs, frame, 0, 0)
+            self.assertEqual(len(eligible), 3)
+            rows = placement.place_residential_yards(frame, box, specs, near_roads, walks, [], None, [s[0].ring for s in specs], _flat_ground, md=None)
+        self.assertGreater(len(rows), 0)
+        # All 3 narrow-yard houses receive enclosures placed cleanly >= 104.2 + 0.25 - 0.01 (~ 1.45 m from carriageway)
+        ys = [float(r[2]) for r in rows]
+        self.assertTrue(all(y >= 104.4 for y in ys), f"expected y >= 104.4 behind sidewalk, got {ys}")
+        xs = [float(r[1]) for r in rows]
+        self.assertTrue(any(60.0 <= x <= 67.0 for x in xs), f"terrace missing front yard: {xs}")
+        self.assertTrue(any(85.0 <= x <= 95.0 for x in xs), f"flat-roof house missing front yard: {xs}")
+        self.assertTrue(any(115.0 <= x <= 137.0 for x in xs), f"small apartments missing front yard: {xs}")
+        self.assertFalse(any(155.0 <= x <= 180.0 for x in xs), f"5-floor apartment should be excluded: {xs}")
+
+    def test_far_geo_cache_key_parity_outside_de(self):
+        nyc_frame = geodesy.EnuFrame(40.758, -73.985)
+        munich_frame = geodesy.EnuFrame(*MUNICH)
+        box = (-1000.0, -1000.0, 1000.0, 1000.0)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "off"}):
+            self.assertEqual(de_enhancer.cache_parts(nyc_frame, box), ())
+            self.assertEqual(de_enhancer.cache_parts(munich_frame, box), ())
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            self.assertEqual(de_enhancer.cache_parts(nyc_frame, box), (True, "outside"))
+            self.assertGreater(len(de_enhancer.cache_parts(munich_frame, box)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
+

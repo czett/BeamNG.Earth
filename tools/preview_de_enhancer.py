@@ -16,6 +16,7 @@ os.environ.setdefault(
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT / "server"))
 import buildings  # noqa: E402
 import geodesy  # noqa: E402
 import roads  # noqa: E402
-from de_street_enhancer import brand_registry, classifier, placement, texture_atlas  # noqa: E402
+from de_street_enhancer import brand_registry, classifier, facade_style, placement, texture_atlas  # noqa: E402
 
 
 OUT_DIR = Path("/tmp/de_enhancer_preview")
@@ -131,16 +132,29 @@ def generate_topdown_layout_preview():
         floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="detached",
         seed=0.61, door=(0, 12.0), min_h=0.0,
     )
-    items = [(b, 0.0, 0.0) for b in (b_shop1, b_shop2, b_res1, b_res2)]
+    # Narrow suburban terrace & omitted-roof residential house (setback < 1.25 m behind sidewalk edge)
+    b_terrace = buildings.Spec(
+        ring=np.array([[88.0, 135.6], [96.0, 135.6], [96.0, 145.6], [88.0, 145.6]]),
+        floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="terrace",
+        seed=0.22, door=(0, 2.5), min_h=0.0,
+    )
+    b_flat_res = buildings.Spec(
+        ring=np.array([[100.0, 135.5], [111.0, 135.5], [111.0, 145.5], [100.0, 145.5]]),
+        floors=2, floor_h=2.8, height=5.6, roof="flat", shop=False, cls="house",
+        seed=0.41, door=(0, 5.5), min_h=0.0,
+    )
+    b_list = [b_shop1, b_shop2, b_res1, b_res2, b_terrace, b_flat_res]
+    items = [(b, 0.0, 0.0) for b in b_list]
     drives = [{"w": 3.0, "n": [[42.0, 146.0, 0.0], [42.0, 134.0, 0.0]]}]
 
-    posts = placement.plan_street_signs(
-        frame, near_roads, box, street_names, props, _flat_ground, rings=[b.ring for b in (b_shop1, b_shop2, b_res1, b_res2)], drives=drives
-    )
-    targets, _ = classifier.classify_commercial_buildings(items, [], frame, 0.0, 0.0)
-    yard_rows = placement.place_residential_yards(
-        frame, box, items, near_roads, walks, drives, None, [b.ring for b in (b_shop1, b_shop2, b_res1, b_res2)], _flat_ground
-    )
+    with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+        posts = placement.plan_street_signs(
+            frame, near_roads, box, street_names, props, _flat_ground, rings=[b.ring for b in b_list], drives=drives
+        )
+        targets, _ = classifier.classify_commercial_buildings(items, [], frame, 0.0, 0.0)
+        yard_rows = placement.place_residential_yards(
+            frame, box, items, near_roads, walks, drives, None, [b.ring for b in b_list], _flat_ground
+        )
 
     # Draw 1024x1024 top-down schematic (4 px per metre over 256x256 tile)
     S = 4.0
@@ -228,12 +242,190 @@ def generate_topdown_layout_preview():
     return out_path
 
 
+def _draw_elevation(d: ImageDraw.ImageDraw, rect: tuple[int, int, int, int], spec, fascia_target=None):
+    """Render an orthographic front (-Y) elevation directly from `buildings.build()` arrays."""
+    x0_px, y0_px, x1_px, y1_px = rect
+    spec.gring = np.zeros(len(spec.ring), dtype=np.float64)
+    if fascia_target is not None:
+        spec.sign = None
+    P, _uv, T, M, mats, C = buildings.build([(spec, 0.0, 0.0)], lite=False)
+    roof_mats = {
+        buildings.MATERIALS.index(m)
+        for m in (
+            buildings.ROOF_FLAT, buildings.ROOF_SLATE, buildings.ROOF_SHINGLE, buildings.ROOF_METAL,
+            buildings.ROOF_TILES, buildings.ROOF_SLATE_ROUND, buildings.ROOF_SLATE_DARK, buildings.ROOF_WOOD,
+        )
+    }
+    white_fac_mi = buildings.MATERIALS.index(buildings.FACADE)
+
+    # Orthographic framing around X and Z, back-to-front painter sort by Y centroid.
+    xs = P[:, 0]
+    zs = P[:, 2]
+    xmin, xmax = float(xs.min()) - 0.8, float(xs.max()) + 0.8
+    zmin, zmax = -0.15, max(float(zs.max()) + 0.8, 7.5)
+    pw, ph = x1_px - x0_px - 24, y1_px - y0_px - 28
+    scale = min(pw / max(xmax - xmin, 1.0), ph / max(zmax - zmin, 1.0))
+    cx_box = 0.5 * (x0_px + x1_px)
+    x_mid = 0.5 * (xmin + xmax)
+    y_ground = y1_px - 14
+
+    def proj(pt):
+        sx = cx_box + (float(pt[0]) - x_mid) * scale
+        sy = y_ground - float(pt[2]) * scale
+        return (sx, sy)
+
+    # Background & ground sidewalk slab
+    d.rectangle(rect, fill=(232, 238, 246), outline=(140, 148, 160))
+    d.rectangle([x0_px + 4, y_ground, x1_px - 4, y1_px - 4], fill=(176, 178, 182))
+
+    # Build drawable triangle list sorted far-to-near (+Y to -Y)
+    v0 = P[T[:, 0]]
+    nrm = np.cross(P[T[:, 1]] - v0, P[T[:, 2]] - v0)
+    n_len = np.linalg.norm(nrm, axis=1)
+    tri_items = []
+    for i, tri in enumerate(T):
+        if n_len[i] < 1e-8:
+            continue
+        nv = nrm[i] / n_len[i]
+        if nv[1] > 0.25:
+            continue
+        pts = P[tri]
+        if pts[:, 2].max() < -0.05:
+            continue
+        y_mid = float(pts[:, 1].mean())
+        mi = int(M[i])
+        rgb = C[tri, :3].astype(np.float64).mean(axis=0)
+        # Apply approximate base texture albedo tint for clay tile / clinker / cornice contrast
+        if mats[mi] == buildings.ROOF_TILES:
+            rgb = rgb * np.array([0.78, 0.44, 0.30])
+        elif mats[mi] in (buildings.ROOF_SLATE, buildings.ROOF_SLATE_DARK, buildings.ROOF_SLATE_ROUND):
+            rgb = rgb * np.array([0.42, 0.44, 0.48])
+        elif mats[mi] == buildings.ROOF_FLAT:
+            rgb = rgb * np.array([0.48, 0.48, 0.50])
+        elif spec.band == buildings.BAND_BRICK and mats[mi] == buildings.FACADE:
+            rgb = rgb * np.array([0.82, 0.66, 0.62])
+        shade = 0.72 + 0.18 * max(-1.0, float(nv[2])) - 0.14 * float(nv[1])
+        col = tuple(int(max(0, min(255, round(v * shade)))) for v in rgb)
+        tri_items.append((y_mid, [proj(pts[0]), proj(pts[1]), proj(pts[2])], col, mi, pts))
+
+    tri_items.sort(key=lambda it: -it[0])
+    for _ym, poly, col, mi, pts in tri_items:
+        outline = (65, 62, 60) if mi in roof_mats else None
+        d.polygon(poly, fill=col, outline=outline)
+
+    # Overlay EDEKA / commercial shop fascia box in elevation view
+    if fascia_target is not None:
+        fx0 = float(fascia_target.center_xy[0] - fascia_target.width_m * 0.5)
+        fx1 = float(fascia_target.center_xy[0] + fascia_target.width_m * 0.5)
+        p_bl = proj((fx0, 0.0, fascia_target.z_bottom))
+        p_tr = proj((fx1, 0.0, fascia_target.z_top))
+        d.rectangle([p_bl[0], p_tr[1], p_tr[0], p_bl[1]], fill=fascia_target.spec_brand.bg_rgb, outline=(25, 25, 25), width=2)
+        fnt = texture_atlas._load_font(12, condensed=False)
+        d.text((0.5 * (p_bl[0] + p_tr[0]) - 22, 0.5 * (p_tr[1] + p_bl[1]) - 6), fascia_target.label, fill=fascia_target.spec_brand.fg_rgb, font=fnt)
+
+    # Draw guide ticks: 0.75 m Sockel & eave height
+    z_sock_y = y_ground - 0.75 * scale
+    d.line([(x0_px + 6, z_sock_y), (x0_px + 26, z_sock_y)], fill=(35, 95, 190), width=2)
+    z_eave = float(spec.height)
+    z_eave_y = y_ground - z_eave * scale
+    d.line([(x1_px - 26, z_eave_y), (x1_px - 6, z_eave_y)], fill=(180, 45, 45), width=2)
+
+
+def generate_facades_comparison_preview():
+    img = Image.new("RGB", (1340, 840), (247, 246, 243))
+    d = ImageDraw.Draw(img)
+    f_title = texture_atlas._load_font(18, condensed=False)
+    f_sub = texture_atlas._load_font(13, condensed=False)
+    f_xs = texture_atlas._load_font(11, condensed=True)
+
+    d.text((20, 12), "BeamNG.Earth DE Realistic Facades — Before (Legacy Pastel) vs. After (DE Palette + Option B Sockel/AO + Overhangs + Cornice Fix)", fill=(28, 30, 34), font=f_title)
+
+    # Row 1: Palette comparison swatches
+    def _draw_swatches(x0, y0, title, rgbs, border=(90, 90, 90)):
+        d.text((x0, y0), title, fill=(40, 42, 46), font=f_sub)
+        for i, rgb in enumerate(rgbs):
+            sx = x0 + i * 38
+            sy = y0 + 20
+            col = tuple(int(max(0, min(255, round(v * 255)))) for v in rgb)
+            d.rectangle([sx, sy, sx + 34, sy + 26], fill=col, outline=border)
+
+    legacy_pastels = [rgb for _, (mat, rgb) in buildings.LOOKS.items() if mat == buildings.FACADE][:10]
+    _draw_swatches(20, 46, "Before — Generic North-American Pastels (PAINT_TINTS)", legacy_pastels[:10])
+    _draw_swatches(450, 46, "After — DE South Plaster (Munich / Altweiss / Sandstein)", facade_style.DE_PLASTER_SOUTH[:10])
+    _draw_swatches(890, 46, "After — Ruhr/North Clinker + DE Clay & Slate Roofs", list(facade_style.DE_BRICK_TINTS) + list(facade_style.DE_ROOF_TILE_TINTS) + list(facade_style.DE_ROOF_SLATE_DARK_TINTS[:2]))
+
+    # Row 2 & 3: Three architectural mesh elevations (Before on top row, After on bottom row)
+    cases = [
+        (
+            "1. Dortmund Row End (Pastel -> Clinker Brick + 0.75m Sockel + 0.35m Eave AO + Overhang)",
+            (51.5136, 7.4653),
+            np.array([[1.2, 0.7], [10.7, 0.7], [10.7, 8.7], [1.2, 8.7]]),
+            {"class": "house", "roof_shape": "gabled", "floors": 2},
+            False,
+        ),
+        (
+            "2. Munich House (Non-Alpine Wood -> Warm Plaster + Biberschwanz Clay + Overhang)",
+            (48.1351, 11.5820),
+            np.array([[0.0, 0.0], [11.0, 0.0], [11.0, 8.5], [0.0, 8.5]]),
+            {"class": "house", "roof_shape": "half-hipped", "floors": 2},
+            False,
+        ),
+        (
+            "3. EDEKA Supermarket (Clipped Fascia -> Mineral Wall + Cornice-Cleared Fascia)",
+            (51.5136, 7.4653),
+            np.array([[0.0, 0.0], [16.0, 0.0], [16.0, 12.0], [0.0, 12.0]]),
+            {"class": "supermarket", "roof_shape": "flat", "floors": 1, "height": 4.5, "name": "EDEKA", "shop": True},
+            True,
+        ),
+    ]
+
+    col_w = 420
+    for idx, (label, (lat, lon), ring, attrs, is_edeka) in enumerate(cases):
+        cx0 = 20 + idx * (col_w + 20)
+        d.text((cx0, 108), label, fill=(22, 24, 28), font=f_xs)
+
+        # BEFORE
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "off"}):
+            s_before = buildings.plan(ring, dict(attrs), 0, lat, lon)
+            if is_edeka:
+                s_before.shop = True
+                s_before.windows = False
+                s_before.plain = False
+                s_before.sign = 0
+            d.text((cx0, 128), "BEFORE (BNE_DE_STREET_IMMERSION=off)", fill=(150, 35, 35), font=f_sub)
+            _draw_elevation(d, (cx0, 148, cx0 + col_w, 458), s_before)
+
+        # AFTER
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            s_after = buildings.plan(ring, dict(attrs), 0, lat, lon)
+            if is_edeka:
+                s_after.shop = True
+                s_after.windows = False
+                s_after.plain = False
+                s_after.sign = 0
+                s_after.height = 4.5
+            facade_style.compute_roof_overhangs([(s_after, 0.0, 0.0)])
+            fascia = None
+            if is_edeka:
+                fr = geodesy.EnuFrame(lat, lon)
+                tgts, _ = classifier.classify_commercial_buildings([(s_after, 0.0, 0.0)], [], fr, 0.0, 0.0)
+                fascia = tgts[0] if tgts else None
+            d.text((cx0, 474), "AFTER (DE Realistic Facades + Baked Sockel/AO)", fill=(22, 115, 48), font=f_sub)
+            _draw_elevation(d, (cx0, 494, cx0 + col_w, 804), s_after, fascia_target=fascia)
+
+    d.text((20, 816), "Blue tick = 0.75 m Sockel cap  |  Red tick = eave line (z_eave)  |  0 extra materials / 0 extra draw calls", fill=(70, 75, 82), font=f_xs)
+    out_path = OUT_DIR / "facades_comparison.png"
+    img.save(out_path)
+    return out_path
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     p1 = generate_street_atlas_preview()
     p2 = generate_shop_atlas_preview()
     p3 = generate_topdown_layout_preview()
-    print(f"Generated previews:\n  {p1}\n  {p2}\n  {p3}")
+    p4 = generate_facades_comparison_preview()
+    print(f"Generated previews:\n  {p1}\n  {p2}\n  {p3}\n  {p4}")
 
 
 if __name__ == "__main__":

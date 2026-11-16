@@ -491,10 +491,10 @@ def compute_roof_overhangs(items: list) -> None:
             if L < 1e-4:
                 ohs.append(0.0)
                 continue
-            out = np.array([d[1] / L, -d[0] / L], dtype=np.float64)
+            d_u = d / L
+            out = np.array([d_u[1], -d_u[0]], dtype=np.float64)
             ex0, ey0 = min(a[0], b[0]) - pad, min(a[1], b[1]) - pad
             ex1, ey1 = max(a[0], b[0]) + pad, max(a[1], b[1]) + pad
-            min_d2 = float("inf")
             blocked_inside = False
             # Probe slightly outside the edge for direct containment inside adjacent footprint
             for t_probe in (0.2, 0.5, 0.8):
@@ -510,20 +510,39 @@ def compute_roof_overhangs(items: list) -> None:
                 ohs.append(0.0)
                 continue
 
+            s_lo = min(0.08, 0.1 * L)
+            s_hi = L - s_lo
+            min_out = 99.0
             for nb in neighbors:
                 if nb[:, 0].max() < ex0 or nb[:, 0].min() > ex1 or nb[:, 1].max() < ey0 or nb[:, 1].min() > ey1:
                     continue
                 m = len(nb)
+                rel = nb - a
+                ss = rel @ d_u
+                ts = rel @ out
                 for p_i in range(m):
-                    c_pt, d_pt = nb[p_i], nb[(p_i + 1) % m]
-                    # Only count neighbor edges on or near the outward side of this edge
-                    mid_nb = 0.5 * (c_pt + d_pt)
-                    if float(np.dot(mid_nb - a, out)) < -0.35:
+                    q_i = (p_i + 1) % m
+                    s0_n, t0_n = float(ss[p_i]), float(ts[p_i])
+                    s1_n, t1_n = float(ss[q_i]), float(ts[q_i])
+                    if max(s0_n, s1_n) < s_lo or min(s0_n, s1_n) > s_hi:
                         continue
-                    d2 = _seg_seg_dist2(a, b, c_pt, d_pt)
-                    if d2 < min_d2:
-                        min_d2 = d2
-            dist = math.sqrt(min_d2) if math.isfinite(min_d2) else 99.0
+                    ds = s1_n - s0_n
+                    u0, u1 = 0.0, 1.0
+                    if abs(ds) > 1e-9:
+                        ua, ub = (s_lo - s0_n) / ds, (s_hi - s0_n) / ds
+                        if ua > ub:
+                            ua, ub = ub, ua
+                        u0, u1 = max(u0, ua), min(u1, ub)
+                        if u0 > u1:
+                            continue
+                    ta = t0_n + u0 * (t1_n - t0_n)
+                    tb = t0_n + u1 * (t1_n - t0_n)
+                    if max(ta, tb) < -0.05:
+                        continue
+                    t_min = 0.0 if min(ta, tb) <= 0.0 else min(ta, tb)
+                    if t_min < min_out:
+                        min_out = t_min
+            dist = min_out
             if dist < NEIGHBOR_FLUSH_M:
                 ohs.append(0.0)
             elif dist < NEIGHBOR_CLEAR_M:
