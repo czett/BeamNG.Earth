@@ -48,12 +48,12 @@ def prepare_commercial_fascias(
         (f"shop|{t.spec_brand.key}|{t.label}", ("shop", t.spec_brand, t.label))
         for t in targets
     ]
-    # Compactly pack up to 8 unique house numbers per 512x64 atlas slot.
+    # Compactly pack up to 4 unique house numbers per 512x64 atlas slot (128x64 each).
     unique_nums = sorted({h.number for h in hn_targets})
     hn_groups: list[tuple[str, list[str]]] = []
-    for i in range(0, len(unique_nums), 8):
-        chunk = unique_nums[i : i + 8]
-        g_key = f"hngrid|{i // 8}|" + ",".join(chunk)
+    for i in range(0, len(unique_nums), 4):
+        chunk = unique_nums[i : i + 4]
+        g_key = f"hngrid|{i // 4}|" + ",".join(chunk)
         hn_groups.append((g_key, chunk))
         entries.append((g_key, ("hngrid", chunk, None)))
 
@@ -73,19 +73,18 @@ def prepare_commercial_fascias(
     if not mat_name or not vfs_tex:
         return None, None, set()
 
-    # Slice individual house number UVs from their packed 4x2 grid slots.
+    # Slice individual house number UVs from their packed 4x1 grid slots.
     for g_key, chunk in hn_groups:
         slot_uv = uv_map.get(g_key)
         if slot_uv is None:
             continue
-        for idx_n, num in enumerate(chunk):
-            col, row = idx_n % 4, idx_n // 4
+        for col, num in enumerate(chunk):
             uv_map[f"hn|{num}"] = texture_atlas.uv_subrect(
                 slot_uv,
                 col * 0.25 + 0.008,
-                row * 0.50 + 0.055,
+                0.06,
                 (col + 1) * 0.25 - 0.008,
-                (row + 1) * 0.50 - 0.055,
+                0.94,
             )
 
     # Clear legacy generic sign bands so enhanced brand panels never z-fight.
@@ -161,6 +160,9 @@ def build_streets_and_yards(
             garage_drives,
             rings,
             ground,
+            items=items,
+            tx=tx,
+            ty=ty,
         )
         if furn_plan.suppressed_recycle_xy and isinstance(props, list):
             props[:] = [

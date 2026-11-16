@@ -358,17 +358,16 @@ def render_furniture_swatch(w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
 
 
 def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
-    """Pack up to 8 German royal-blue/white enamel house number plaques (4x2 grid) into one 512x64 slot."""
+    """Pack up to 4 German royal-blue/white enamel house number plaques (4x1 grid, 128x64 each) into one 512x64 slot."""
     img = Image.new("RGB", (w, h), (16, 48, 96))
     draw = ImageDraw.Draw(img)
-    cell_w, cell_h = w // 4, h // 2  # 128 x 32
-    for idx, num in enumerate(numbers[:8]):
-        col, row = idx % 4, idx // 4
-        cx0, cy0 = col * cell_w, row * cell_h
+    cell_w, cell_h = w // 4, h  # 128 x 64 (matches 0.42 m x 0.30 m plaque proportions cleanly)
+    for col, num in enumerate(numbers[:4]):
+        cx0, cy0 = col * cell_w, 0
         # Royal-blue German Hausnummer enamel with crisp white border.
-        draw.rectangle([cx0 + 3, cy0 + 3, cx0 + cell_w - 4, cy0 + cell_h - 4], fill=(14, 54, 114), outline=(238, 240, 244), width=2)
+        draw.rectangle([cx0 + 3, cy0 + 4, cx0 + cell_w - 4, cy0 + cell_h - 5], fill=(14, 54, 114), outline=(238, 240, 244), width=3)
         txt = str(num).strip()[:6]
-        fitted, font, bx = _fit_text(draw, txt, cell_w - 16, cell_h - 10)
+        fitted, font, bx = _fit_text(draw, txt, cell_w - 18, cell_h - 14, sizes=(44, 38, 34, 30, 26, 22, 18))
         tw, th = bx[2] - bx[0], bx[3] - bx[1]
         draw.text((cx0 + (cell_w - tw) / 2.0 - bx[0], cy0 + (cell_h - th) / 2.0 - bx[1]), fitted, font=font, fill=(250, 250, 250))
     return img

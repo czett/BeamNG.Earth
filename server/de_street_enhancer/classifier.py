@@ -92,12 +92,12 @@ DE_SKIP_CLASSES = frozenset({
     "toll_booth",
 })
 
-# Weighted front-yard style mix for suburban/residential German properties (~65% hedges, ~35% fences).
+# Weighted front-yard style mix for suburban/residential German properties (~60% hedges, ~40% fences).
 DE_YARD_STYLES = (
-    ("hedge", 0.65),
-    ("iron", 0.14),
-    ("slats", 0.11),
-    ("wood", 0.10),
+    ("hedge", 0.60),
+    ("iron", 0.16),
+    ("slats", 0.13),
+    ("wood", 0.11),
 )
 
 
@@ -139,6 +139,48 @@ class HouseNumberTarget:
     out_normal: np.ndarray      # outward wall unit vector (2,)
     z_mid: float
     number: str
+
+
+def min_dist_to_polylines(pt: np.ndarray, lines: list[np.ndarray]) -> float:
+    """Minimum Euclidean distance from 2D `pt` to any polyline in `lines`."""
+    best = float("inf")
+    px, py = float(pt[0]), float(pt[1])
+    for ln in lines or ():
+        if len(ln) < 2:
+            continue
+        a = ln[:-1, :2]
+        ab = ln[1:, :2] - a
+        l2 = np.maximum((ab * ab).sum(1), 1e-12)
+        t = np.clip(((px - a[:, 0]) * ab[:, 0] + (py - a[:, 1]) * ab[:, 1]) / l2, 0.0, 1.0)
+        q = a + t[:, None] * ab
+        d = float(np.min(np.hypot(px - q[:, 0], py - q[:, 1])))
+        if d < best:
+            best = d
+    return best
+
+
+def tram_polylines(md, frame, tx: int | None, ty: int | None, cells=None) -> list[np.ndarray]:
+    """Return finite 2D tram track polylines near tile `(tx, ty)`."""
+    if tx is None or ty is None:
+        return []
+    try:
+        import rails as railsmod
+        import roads as roadsmod
+
+        if cells is None and md is not None:
+            keys = roadsmod.cells_of_tile(frame, tx, ty)
+            cells = [md.cell(k, layers=("roads",), kind="demand").layers.get("roads") for k in keys]
+        if not cells:
+            return []
+        raw = railsmod.tram_lines(frame, tx, ty, [c for c in cells if c is not None])
+        out: list[np.ndarray] = []
+        for line, _hw in raw:
+            arr = np.asarray(line, dtype=np.float64)
+            if arr.ndim == 2 and arr.shape[0] >= 2 and arr.shape[1] >= 2 and np.isfinite(arr[:, :2]).all():
+                out.append(np.ascontiguousarray(arr[:, :2], dtype=np.float64))
+        return out
+    except Exception:
+        return []
 
 
 def _hash01(*parts) -> float:
@@ -515,7 +557,7 @@ def classify_residential_yards(
         if cls in DE_UNTYPED_HOUSE and getattr(spec, "roof", "flat") == "flat":
             if getattr(spec, "plain", False) and getattr(spec, "windows", True) is False:
                 continue
-        if (getattr(spec, "floors", 1) or 1) > 3:
+        if (getattr(spec, "floors", 1) or 1) > 4:
             continue
 
         ring = np.asarray(spec.ring, dtype=np.float64) + origin
@@ -523,7 +565,7 @@ def classify_residential_yards(
             continue
         area = abs(buildings._area2(ring)) / 2.0
         min_area = 34.0 if cls in DE_UNTYPED_HOUSE and (spec.floors or 1) == 1 else 24.0
-        if not (min_area <= area <= 650.0):
+        if not (min_area <= area <= 900.0):
             continue
         c = ring.mean(axis=0)
         if not (x0 <= float(c[0]) < x0 + tile_size and y0 <= float(c[1]) < y0 + tile_size):
@@ -579,7 +621,7 @@ def collect_housenumbers(items: list, suppress_ids: set[int] | frozenset[int] = 
         s_pos = float(np.clip(along_d + shift, 0.35, L - 0.35))
         pos_xy = a + d_along * s_pos + out_normal * 0.03
         door_g = buildings.door_ground(spec, edge_i, along_d, gmax)
-        z_mid = float(door_g) + 2.02
+        z_mid = float(door_g) + 1.95
 
         explicit = getattr(spec, "de_hn", None)
         if explicit:

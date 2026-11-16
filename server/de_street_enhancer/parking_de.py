@@ -26,8 +26,8 @@ DE_PARK_CLASSES = frozenset({"residential", "living_street", "unclassified", "te
 DE_MIN_WIDTH_M = 5.5
 DE_TWO_SIDES_WIDTH_M = 8.5
 DE_SECONDARY_TWO_WAY_MIN_M = 7.0
-DE_SPOT_W_M = 2.05
-DE_SPOT_LEN_M = 5.2
+DE_SPOT_W_M = 2.30
+DE_SPOT_LEN_M = 5.5
 DE_PITCH_M = 5.8
 DE_CURB_OFF_NARROW_M = 1.00
 DE_CURB_OFF_WIDE_M = 1.05
@@ -56,20 +56,7 @@ def _finite_2d(pts, min_pts: int = 2) -> np.ndarray | None:
 
 
 def _min_dist_to_polylines(pt: np.ndarray, lines: list[np.ndarray]) -> float:
-    best = float("inf")
-    px, py = float(pt[0]), float(pt[1])
-    for ln in lines:
-        if len(ln) < 2:
-            continue
-        a = ln[:-1, :2]
-        ab = ln[1:, :2] - a
-        l2 = np.maximum((ab * ab).sum(1), 1e-12)
-        t = np.clip(((px - a[:, 0]) * ab[:, 0] + (py - a[:, 1]) * ab[:, 1]) / l2, 0.0, 1.0)
-        q = a + t[:, None] * ab
-        d = float(np.min(np.hypot(px - q[:, 0], py - q[:, 1])))
-        if d < best:
-            best = d
-    return best
+    return classifier.min_dist_to_polylines(pt, lines)
 
 
 def _bus_stop_points(md, frame, box: tuple[float, float, float, float]) -> list[tuple[float, float]]:
@@ -117,16 +104,7 @@ def _bus_stop_points(md, frame, box: tuple[float, float, float, float]) -> list[
 
 
 def _tram_polylines(md, frame, tx: int, ty: int, cells) -> list[np.ndarray]:
-    try:
-        if cells is None and md is not None:
-            keys = roadsmod.cells_of_tile(frame, tx, ty)
-            cells = [md.cell(k, layers=("roads",), kind="demand").layers.get("roads") for k in keys]
-        if not cells:
-            return []
-        raw = railsmod.tram_lines(frame, tx, ty, [c for c in cells if c is not None])
-        return [xy for line, _hw in raw if (xy := _finite_2d(line, min_pts=2)) is not None]
-    except Exception:
-        return []
+    return classifier.tram_polylines(md, frame, tx, ty, cells=cells)
 
 
 def _offset_polyline(pts: np.ndarray, side: int, dist: float) -> np.ndarray | None:
@@ -292,14 +270,7 @@ def refine_parking_spots(
         half_w = width * 0.5
 
         for side in sides:
-            wk = walks_by_fid.get((fid, side))
-            if wk is not None and _finite_2d(wk.get("pts"), min_pts=2) is not None:
-                wk_pts = _finite_2d(wk["pts"], min_pts=2)
-                wk_w = float(wk.get("w", roadsmod.SIDEWALK["w"]))
-                # Walk line sits at sidewalk center; inner curb is -side * wk_w / 2.
-                park_line = _offset_polyline(wk_pts, -side, wk_w * 0.5 + curb_off)
-            else:
-                park_line = _offset_polyline(line_xy, side, max(0.4, half_w - curb_off))
+            park_line = _offset_polyline(line_xy, side, max(0.4, half_w - curb_off))
             if park_line is None:
                 continue
 

@@ -53,14 +53,15 @@ FASCIA_THICK_M = 0.16
 # Residential front-yard hedge & fence constants
 DE_YARD_CLEAR_ROAD_M = 0.35
 DE_YARD_WALK_OFFSET_M = 0.20
-DE_YARD_MIN_CLEAR_WALK_M = 0.35
-DE_YARD_MIN_NO_WALK_M = 0.95
+DE_YARD_MIN_CLEAR_WALK_M = 0.25
+DE_YARD_MIN_NO_WALK_M = 0.65
 DE_YARD_WALL_OFFSET_M = 0.55
 DE_YARD_MAX_DEPTH_M = 18.0
-DE_YARD_MAX_LEN_M = 22.0
-DE_YARD_GAP_HALF_M = 1.4
-DE_HEDGE_STEP_M = 0.95
-DE_YARD_MIN_SPAN_M = 0.55
+DE_YARD_MAX_LEN_M = 32.0
+DE_YARD_GAP_HALF_M = 1.40
+DE_DOOR_GAP_HALF_M = 0.70
+DE_HEDGE_STEP_M = 0.75
+DE_YARD_MIN_SPAN_M = 0.50
 DE_HEDGE_Z_SEAT_M = -0.04
 
 
@@ -726,9 +727,9 @@ def encode_shop_and_housenumbers_mesh(
             axis_x=axis_x,
             axis_y=axis_y,
             axis_z=axis_z,
-            hx=0.14,
+            hx=0.21,
             hy=0.015,
-            hz=0.10,
+            hz=0.15,
             front_uv=uv,
             back_uv=None,
             body_mat=0,
@@ -827,7 +828,7 @@ def _driveway_gaps(
     gaps: list[tuple[float, float]] = []
     if door is not None and door[0] == edge:
         dp = a_edge + d_edge * float(door[1])
-        gaps.append((float(np.dot(dp - centre, tangent)), DE_YARD_GAP_HALF_M))
+        gaps.append((float(np.dot(dp - centre, tangent)), DE_DOOR_GAP_HALF_M))
 
     p0 = centre - tangent * half_len
     p1 = centre + tangent * half_len
@@ -1005,8 +1006,8 @@ def place_residential_yards(
                 offset = min(offset, float(half_road) + 2.20)
 
         centre = q + offset * out
-        length = min(wall_w * abs(float(np.dot(along, tangent))) - 0.25, DE_YARD_MAX_LEN_M)
-        if length < 2.0:
+        length = min(wall_w * abs(float(np.dot(along, tangent))), DE_YARD_MAX_LEN_M)
+        if length < 1.8:
             continue
 
         # Skip if existing OSM mapped barrier/fence/hedge already covers this frontage.
@@ -1021,9 +1022,8 @@ def place_residential_yards(
         # Carve out contiguous intervals outside doorway & driveway gaps.
         half_l = length * 0.5
         intervals = [(-half_l, half_l)]
-        pad_g = DE_YARD_GAP_HALF_M
         for g_c, g_hw in gaps:
-            cut_lo, cut_hi = g_c - max(g_hw, pad_g), g_c + max(g_hw, pad_g)
+            cut_lo, cut_hi = g_c - g_hw, g_c + g_hw
             nxt: list[tuple[float, float]] = []
             for s0, s1 in intervals:
                 if cut_hi <= s0 or cut_lo >= s1:
@@ -1037,20 +1037,26 @@ def place_residential_yards(
 
         for s0, s1 in intervals:
             line = np.array([centre + s0 * tangent, centre + s1 * tangent], dtype=np.float64)
+            span = float(np.linalg.norm(line[1] - line[0]))
             if style == "hedge":
-                # Continuous overlapping German Liguster/Buchsbaum hedge line (0.95 m pitch).
-                span = float(np.linalg.norm(line[1] - line[0]))
-                inset = min(0.35, span * 0.25)
+                # Continuous overlapping German Liguster/Buchsbaum hedge line (0.75 m pitch, 1.15-1.40 m tall).
+                inset = min(0.28, span * 0.22)
                 usable = max(0.0, span - 2.0 * inset)
                 n_seg = max(1, int(math.floor(usable / DE_HEDGE_STEP_M)) + 1)
                 for k in range(n_seg):
                     t_pos = 0.5 if n_seg == 1 else (inset + usable * (k / (n_seg - 1))) / max(span, 1e-6)
                     p = line[0] + (line[1] - line[0]) * t_pos
-                    h_val = 0.95 + 0.30 * _hash01(spec.seed, "de_h", k)
+                    h_val = 1.15 + 0.25 * _hash01(spec.seed, "de_h", k)
                     pending.append((fences.G_HEDGE, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, DE_HEDGE_Z_SEAT_M))
             else:
-                for p, d, panel_len in fences._panels(line, spacing=fences.PANEL_M):
-                    pending.append(fences._french_panel_row(style, p, d, panel_len))
+                if span < 0.66:
+                    mid_p = 0.5 * (line[0] + line[1])
+                    pending.append(("fr_fence_" + style, float(mid_p[0]), float(mid_p[1]), fences._yaw(*tangent), fences.FR_HEIGHTS[style], 0.0))
+                else:
+                    for p, d, panel_len in fences._panels(line, spacing=fences.PANEL_M):
+                        row = fences._french_panel_row(style, p, d, panel_len)
+                        # Keep fence height upright even on short wing spans.
+                        pending.append((row[0], row[1], row[2], row[3], max(float(row[4]), fences.FR_HEIGHTS[style] * 0.85), row[5]))
 
     if not pending:
         return []
