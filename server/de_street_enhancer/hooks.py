@@ -40,13 +40,32 @@ def prepare_commercial_fascias(
     cells = roadsmod.cells_of_tile(frame, tx, ty, 35.0)
     tile_pois = classifier.load_tile_pois(md, frame, cells, x0, y0)
     targets, suppress_ids = classifier.classify_commercial_buildings(items, tile_pois, frame, x0, y0)
-    if not targets:
+    hn_targets = classifier.collect_housenumbers(items, suppress_ids=suppress_ids)
+    if not targets and not hn_targets:
         return None, None, set()
 
-    entries = [(f"shop|{t.spec_brand.key}|{t.label}", (t.spec_brand, t.label)) for t in targets]
+    entries: list[tuple[str, object]] = [
+        (f"shop|{t.spec_brand.key}|{t.label}", ("shop", t.spec_brand, t.label))
+        for t in targets
+    ]
+    # Compactly pack up to 8 unique house numbers per 512x64 atlas slot.
+    unique_nums = sorted({h.number for h in hn_targets})
+    hn_groups: list[tuple[str, list[str]]] = []
+    for i in range(0, len(unique_nums), 8):
+        chunk = unique_nums[i : i + 8]
+        g_key = f"hngrid|{i // 8}|" + ",".join(chunk)
+        hn_groups.append((g_key, chunk))
+        entries.append((g_key, ("hngrid", chunk, None)))
+
+    def _render_shop_or_hn(item):
+        kind, a, b = item
+        if kind == "hngrid":
+            return texture_atlas.render_housenumber_grid(a)
+        return texture_atlas.render_shop_fascia(a, b)
+
     mat_name, _dds, vfs_tex, uv_map, _img = texture_atlas.pack_atlas(
         entries,
-        lambda pair: texture_atlas.render_shop_fascia(pair[0], pair[1]),
+        _render_shop_or_hn,
         out_dir,
         vfs_dir,
         prefix="sh",
@@ -54,23 +73,41 @@ def prepare_commercial_fascias(
     if not mat_name or not vfs_tex:
         return None, None, set()
 
+    # Slice individual house number UVs from their packed 4x2 grid slots.
+    for g_key, chunk in hn_groups:
+        slot_uv = uv_map.get(g_key)
+        if slot_uv is None:
+            continue
+        for idx_n, num in enumerate(chunk):
+            col, row = idx_n % 4, idx_n // 4
+            uv_map[f"hn|{num}"] = texture_atlas.uv_subrect(
+                slot_uv,
+                col * 0.25 + 0.008,
+                row * 0.50 + 0.055,
+                (col + 1) * 0.25 - 0.008,
+                (row + 1) * 0.50 - 0.055,
+            )
+
     # Clear legacy generic sign bands so enhanced brand panels never z-fight.
     for spec, _, _ in items:
         if id(spec) in suppress_ids:
             spec.sign = None
 
-    shop_blob = placement.encode_shop_fascias_mesh(targets, mat_name, uv_map)
+    shop_blob = placement.encode_shop_and_housenumbers_mesh(targets, hn_targets, mat_name, uv_map)
     if shop_blob is None:
         return None, None, set()
 
-    face = {
-        mat_name: {
-            "texture": vfs_tex,
-            "emissive": True,
-            "nits": 35,
-            "glowColor": "1 0.94 0.84",
+    if targets:
+        face = {
+            mat_name: {
+                "texture": vfs_tex,
+                "emissive": True,
+                "nits": 35,
+                "glowColor": "1 0.94 0.84",
+            }
         }
-    }
+    else:
+        face = {mat_name: {"texture": vfs_tex, "emissive": False}}
     return face, shop_blob, suppress_ids
 
 

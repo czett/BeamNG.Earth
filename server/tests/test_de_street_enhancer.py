@@ -7,6 +7,7 @@ os.environ.setdefault(
 )
 
 from pathlib import Path
+import math
 import sys
 import tempfile
 import types
@@ -779,6 +780,190 @@ class FacadeRealismAndExpansionTest(unittest.TestCase):
             self.assertEqual(custom_entries, [])
             mesh_parts, _boxes, _col = proc
             self.assertGreater(len(mesh_parts), 0)
+
+
+class UrbanLifeAndHedgesTest(unittest.TestCase):
+    def test_pillar1_high_hedge_coverage_narrow_yards_with_and_without_sidewalk(self):
+        frame = geodesy.EnuFrame(*MUNICH)
+        box = (0.0, 0.0, 256.0, 256.0)
+        # Road 1: residential 6.0 m with sidewalk (outer edge y = 104.2); Road 2: living_street 5.5 m with NO sidewalk.
+        road1 = np.array([[10.0, 100.0, 0.0], [246.0, 100.0, 0.0]], dtype=np.float64)
+        road2 = np.array([[10.0, 180.0, 0.0], [246.0, 180.0, 0.0]], dtype=np.float64)
+        near_roads = [
+            ("r_walk", _road_spec("residential", 6.0), road1, MUNICH[1]),
+            ("r_nowalk", _road_spec("living_street", 5.5), road2, MUNICH[1]),
+        ]
+        walks = [{"pts": np.array([[10.0, 103.6, 0.0], [246.0, 103.6, 0.0]]), "side": 1, "w": 1.2}]
+
+        specs = []
+        for idx in range(20):
+            x_a = 18.0 + idx * 10.5
+            # Narrow front yard behind sidewalk: y = 104.7 (0.5 m behind walk_back = 104.2)
+            r_w = np.array([[x_a, 104.7], [x_a + 8.0, 104.7], [x_a + 8.0, 113.0], [x_a, 113.0]], dtype=np.float64)
+            specs.append((buildings.Spec(ring=r_w, floors=2, floor_h=2.8, height=5.8, roof="gabled", shop=False, cls="terrace", seed=0.03 * (idx + 1), door=(0, 4.0), min_h=0.0), 0.0, 0.0))
+        for idx in range(10):
+            x_a = 20.0 + idx * 18.0
+            # No sidewalk: road edge is at 182.75, wall at 184.0 (1.25 m setback -> >= 0.95 m)
+            r_nw = np.array([[x_a, 184.0], [x_a + 9.0, 184.0], [x_a + 9.0, 193.0], [x_a, 193.0]], dtype=np.float64)
+            specs.append((buildings.Spec(ring=r_nw, floors=2, floor_h=2.8, height=5.6, roof="flat", shop=False, cls="house", seed=0.05 * (idx + 1), door=(0, 4.5), min_h=0.0), 0.0, 0.0))
+
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            eligible = classifier.classify_residential_yards(specs, frame, 0.0, 0.0)
+            self.assertEqual(len(eligible), 30)
+            hedge_share = sum(1 for _sp, _rg, st in eligible if st == "hedge") / float(len(eligible))
+            self.assertGreaterEqual(hedge_share, 0.50, f"expected >= 50% hedges, got {hedge_share:.2f}")
+            rows = placement.place_residential_yards(frame, box, specs, near_roads, walks, [], None, [s[0].ring for s in specs], _flat_ground, md=None)
+
+        self.assertGreaterEqual(len(rows), 60)
+        nw_rows = [r for r in rows if float(r[2]) > 180.0]
+        self.assertGreater(len(nw_rows), 10, "expected hedges/fences on curbless living_street")
+        self.assertTrue(all(float(r[2]) >= 183.15 for r in nw_rows), f"boundary intruded into road: {nw_rows[:5]}")
+
+    def test_pillar2_parked_car_clusters_clearances_and_tram_exclusion(self):
+        from de_street_enhancer import parking_de
+
+        frame = geodesy.EnuFrame(*MUNICH)
+        box = (0.0, 0.0, 256.0, 256.0)
+        # Residential 6.0 m road + crossing road at x=128 + secondary collector with tram track at y=200.
+        r_res_w = np.array([[0.0, 100.0, 0.0], [128.0, 100.0, 0.0]], dtype=np.float64)
+        r_res_e = np.array([[128.0, 100.0, 0.0], [256.0, 100.0, 0.0]], dtype=np.float64)
+        r_cross = np.array([[128.0, 20.0, 0.0], [128.0, 160.0, 0.0]], dtype=np.float64)
+        r_tram_sec = np.array([[10.0, 200.0, 0.0], [246.0, 200.0, 0.0]], dtype=np.float64)
+        near_roads = [
+            ("r_res_w", _road_spec("residential", 6.0), r_res_w, MUNICH[1]),
+            ("r_res_e", _road_spec("residential", 6.0), r_res_e, MUNICH[1]),
+            ("r_cross", _road_spec("unclassified", 5.5), r_cross, MUNICH[1]),
+            ("r_sec_tram", _road_spec("secondary", 8.0), r_tram_sec, MUNICH[1]),
+        ]
+        walks = [{"fid": "r_res_w", "pts": np.array([[0.0, 103.8, 0.0], [128.0, 103.8, 0.0]]), "side": 1, "w": 1.6}]
+        drives = [{"w": 3.0, "n": [[50.0, 112.0, 0.0], [50.0, 103.0, 0.0]]}]
+        lot_spot = [[200.0, 50.0, 0.0, 90.0, 1]]
+
+        # Fake infrastructure with a bus_stop at (210, 103) and a tram line along y=200.
+        la_bs, lo_bs, _ = frame.enu_to_geodetic(210.0, 103.0, 0.0)
+        infra_feats = mapgeom.Features(
+            layer="infrastructure",
+            lonlat=np.array([[lo_bs, la_bs]], dtype=np.float64),
+            coord_off=np.array([0, 1], dtype=np.int64),
+            ring_off=np.array([0, 1], dtype=np.int64),
+            part_off=np.array([0, 1], dtype=np.int64),
+            kind=np.array([1], dtype=np.int8),
+            attrs={"class": np.array(["bus_stop"], dtype=object), "tags": np.array(['{"highway":"bus_stop"}'], dtype=object)},
+            ids=np.array(["bs1"], dtype=object),
+        )
+        fake_md = types.SimpleNamespace(
+            cell=lambda key, layers=(), kind="demand": types.SimpleNamespace(
+                layers={"infrastructure": infra_feats if "infrastructure" in layers else None}
+            )
+        )
+        tram_line = np.array([[10.0, 200.0], [246.0, 200.0]], dtype=np.float64)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}), mock.patch.object(
+            parking_de, "_tram_polylines", return_value=[tram_line]
+        ):
+            out = parking_de.refine_parking_spots(
+                fake_md, frame, 0, 0, box, near_roads, walks, [], drives, [], [], lot_spot, _flat_ground
+            )
+
+        self.assertIn(lot_spot[0], out)
+        curb = [r for r in out if r[4] == 0]
+        self.assertGreater(len(curb), 6, f"expected residential curb spots, got {curb}")
+        for r in curb:
+            x, y = float(r[0]), float(r[1])
+            self.assertEqual((r[5], r[6]), (2.05, 5.2))
+            self.assertGreaterEqual(math.hypot(x - 128.0, y - 100.0), 10.0 - 1e-6)
+            self.assertGreaterEqual(math.hypot(x - 210.0, y - 103.0), 12.0 - 1e-6)
+            self.assertGreaterEqual(math.hypot(x - 50.0, y - 103.0), 4.2 - 1e-6)
+            self.assertLess(y, 180.0, f"tram-shared secondary collector should have 0 spots: {r}")
+
+    def test_pillar3_bus_stop_micro_props_and_shelter_suppression(self):
+        import shelters
+        from de_street_enhancer import furniture_de, hooks
+
+        frame = geodesy.EnuFrame(*MUNICH)
+        box = (0.0, 0.0, 256.0, 256.0)
+        road = np.array([[10.0, 128.0, 0.0], [246.0, 128.0, 0.0]], dtype=np.float64)
+        near_roads = [("r_main", _road_spec("tertiary", 7.0), road, MUNICH[1])]
+        walks = [{"fid": "r_main", "pts": np.array([[10.0, 132.5, 0.0], [246.0, 132.5, 0.0]]), "side": 1, "w": 2.0}]
+
+        pts_enu = [(80.0, 132.0), (140.0, 133.0), (180.0, 133.0), (210.0, 133.0)]
+        lonlat = np.array([frame.enu_to_geodetic(x, y, 0.0)[1::-1] for x, y in pts_enu], dtype=np.float64)
+        feats = mapgeom.Features(
+            layer="infrastructure",
+            lonlat=lonlat,
+            coord_off=np.array([0, 1, 2, 3, 4], dtype=np.int64),
+            ring_off=np.array([0, 1, 2, 3, 4], dtype=np.int64),
+            part_off=np.array([0, 1, 2, 3, 4], dtype=np.int64),
+            kind=np.array([1, 1, 1, 1], dtype=np.int8),
+            attrs={
+                "class": np.array(["bus_stop", "street_cabinet", "parcel_locker", "recycling"], dtype=object),
+                "name": np.array(["Rathaus Dortmund", "", "Packstation 112", ""], dtype=object),
+                "tags": np.array([
+                    '{"highway":"bus_stop","name":"Rathaus Dortmund"}',
+                    '{"man_made":"street_cabinet"}',
+                    '{"amenity":"parcel_locker"}',
+                    '{"amenity":"recycling","recycling_type":"container"}',
+                ], dtype=object),
+            },
+            ids=np.array(["i_bs", "i_cab", "i_lock", "i_rec"], dtype=object),
+        )
+        fake_md = types.SimpleNamespace(
+            cell=lambda key, layers=(), kind="demand": types.SimpleNamespace(
+                layers={"infrastructure": feats if "infrastructure" in layers else None}
+            )
+        )
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            # Shelters.rows must suppress duplicate stock busshelter_it inside DE.
+            self.assertEqual(shelters.rows(frame, lambda k: feats, box, _flat_elev, near_roads), [])
+            props = [["recyclebin", 210.0, 133.0, 0.0, 0.0, 1.0, 1.48, 0.0]]
+            with tempfile.TemporaryDirectory() as tmp:
+                face, blob, _yards = hooks.build_streets_and_yards(
+                    fake_md, frame, 0, 0, box, near_roads, {"r_main": "Gevelsbergstraße"},
+                    props, walks, None, [], [], [], _flat_ground, tmp, "/temp/vfs",
+                )
+                self.assertIsNotNone(face)
+                self.assertIsNotNone(blob)
+                self.assertEqual(len(face), 1)
+                self.assertEqual(props, [], "duplicate generic recyclebin should be replaced by DE Altglascontainer trio")
+
+    def test_pillar4_housenumbers_subslots_canopies_and_balconies(self):
+        frame = geodesy.EnuFrame(*MUNICH)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            # Pack 50 unique house numbers in compact 4x2 subslots -> fits in 7 slots (<< 32)
+            entries = []
+            nums = [f"{i}" for i in range(1, 51)]
+            for idx in range(0, len(nums), 8):
+                chunk = nums[idx : idx + 8]
+                entries.append((f"hngrid|{idx//8}", chunk))
+            mat, _dds, _vfs, uv_map, _img = texture_atlas.pack_atlas(
+                entries, texture_atlas.render_housenumber_grid, out_dir=None, vfs_dir=None, prefix="sh"
+            )
+            self.assertIsNotNone(mat)
+            self.assertEqual(len(uv_map), 7)
+
+            # Build multi-story residential house with door, canopy, balconies, and explicit addr:housenumber
+            ring = np.array([[20.0, 20.0], [32.0, 20.0], [32.0, 30.0], [20.0, 30.0]], dtype=np.float64)
+            spec = buildings.Spec(
+                ring=ring, floors=3, floor_h=2.9, height=8.7, roof="gabled",
+                roof_mat=buildings.ROOF_TILES, facade="bne_bld_fac_white",
+                shop=False, cls="apartments", seed=0.25, door=(0, 6.0), min_h=0.0,
+                de_in=True, de_hn="48a", de_eaves=(0.45, 0.45, 0.45, 0.45),
+            )
+            spec.gring = np.zeros(4, dtype=np.float64)
+            built = buildings.build([(spec, 0.0, 0.0)], lite=False)
+            self.assertIsNotNone(built)
+            P, _uv, T, _M, _mats, _C = built
+            self.assertTrue(np.isfinite(P).all())
+            self.assertGreater(len(T), 0)
+            # Canopy/balconies extend beyond y=20.0 outward (-Y on edge 0)
+            self.assertLess(float(P[:, 1].min()), 19.3, "expected upper-floor balcony & canopy to extend outward")
+
+            # Residential-only tile with 0 shops still emits deshops.cdae with house numbers (non-emissive)
+            with tempfile.TemporaryDirectory() as tmp:
+                empty_md = types.SimpleNamespace(cell=lambda k, layers=(), kind="demand": types.SimpleNamespace(layers={}))
+                sf, sb, _sup = de_enhancer.prepare_shops(empty_md, frame, 0, 0, [(spec, 0.0, 0.0)], tmp, "/temp/v")
+                self.assertIsNotNone(sf)
+                self.assertIsNotNone(sb)
+                self.assertFalse(next(iter(sf.values()))["emissive"])
 
 
 if __name__ == "__main__":

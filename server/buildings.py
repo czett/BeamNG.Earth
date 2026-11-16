@@ -817,7 +817,7 @@ class Spec:
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
                  "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "across", "hi",
                  "roof_h", "hf", "holes", "skel", "skel_cap", "tank", "street", "slope_dir", "ml", "name",
-                 "de_eaves", "de_in")
+                 "de_eaves", "de_in", "de_hn")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -5239,7 +5239,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             at = {k: (a[k][i] if k in a else None) for k in
                   ("class", "subtype", "height", "num_floors", "min_height", "roof_shape", "roof_height", "name",
                    "facade_material", "facade_color", "roof_material", "roof_color", "roof_orientation",
-                   "roof_direction", "height_src", "roof_rise")}
+                   "roof_direction", "height_src", "roof_rise", "addr:housenumber", "housenumber", "tags")}
             if row_cols is not None and row_cols[i] != (None, None):
                 at = osmcolours.fill_from(at, row_cols[i])
             if key is not None:         # (plan's random choices keyed on the feature, not where the anchor puts it)

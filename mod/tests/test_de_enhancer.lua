@@ -91,4 +91,11 @@ local seenWhats = {}
 for _, w in ipairs(roads.CONTENT_WHATS) do seenWhats[w] = true end
 T.check(seenWhats.destreets == true and seenWhats.deshops == true, 'roads.CONTENT_WHATS includes destreets and deshops')
 
+-- 7. Verify fr_hedge ONE_SPELLING and parking DE_ACTIVE_CAP
+local trees = require('beamngEarth/trees')
+T.check(trees.ONE_SPELLING.fr_hedge == true, 'fr_hedge uses ONE_SPELLING')
+local parking = require('beamngEarth/parking')
+T.check(parking.DE_ACTIVE_CAP and parking.DE_ACTIVE_CAP.high == 8 and parking.DE_ACTIVE_CAP.ultra == 10,
+  'parking exposes DE_ACTIVE_CAP for high/ultra presets')
+
 T.done('test_de_enhancer')

@@ -130,6 +130,17 @@ class ShopTarget:
     label: str
 
 
+@dataclass(frozen=True)
+class HouseNumberTarget:
+    """Resolved German enamel house number plaque placement beside `spec.door`."""
+
+    center_xy: np.ndarray       # tile-local (2,)
+    d_along: np.ndarray         # unit vector (2,)
+    out_normal: np.ndarray      # outward wall unit vector (2,)
+    z_mid: float
+    number: str
+
+
 def _hash01(*parts) -> float:
     h = hashlib.blake2b("|".join(str(p) for p in parts).encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(h, "big") / float(1 << 64)
@@ -529,3 +540,68 @@ def classify_residential_yards(
         return []
     inside = germany.de_at(frame, xs, ys)
     return [(spec, ring, style) for (spec, ring, style, _, _), ok in zip(cands, inside) if ok]
+
+
+def collect_housenumbers(items: list, suppress_ids: set[int] | frozenset[int] = frozenset()) -> list[HouseNumberTarget]:
+    """Collect 3D German house number plaques beside `spec.door` (explicit `addr:housenumber` or deterministic fallback)."""
+    import buildings
+
+    if not items:
+        return []
+    targets: list[HouseNumberTarget] = []
+    for spec, _gmin, gmax in items:
+        if id(spec) in suppress_ids or getattr(spec, "shop", False) or getattr(spec, "plain", False):
+            continue
+        if (getattr(spec, "min_h", 0.0) or 0.0) > 0.5 or getattr(spec, "portal", False) or getattr(spec, "deck", False) or getattr(spec, "ship", False):
+            continue
+        cls = (getattr(spec, "cls", None) or "").lower()
+        if cls in DE_SKIP_CLASSES:
+            continue
+        door = getattr(spec, "door", None)
+        if door is None:
+            continue
+        ring = buildings.drawn_ring(spec)
+        if ring is None or len(ring) < 3:
+            continue
+        edge_i, along_d = int(door[0]), float(door[1])
+        if not (0 <= edge_i < len(ring)):
+            continue
+        a, b = ring[edge_i], ring[(edge_i + 1) % len(ring)]
+        L = float(math.hypot(*(b - a)))
+        if L < 2.2:
+            continue
+        d_along = (b - a) / L
+        sign_out = 1.0 if buildings._area2(ring) > 0 else -1.0
+        out_normal = np.array([d_along[1], -d_along[0]], dtype=np.float64) * sign_out
+
+        # Shift horizontally 0.62 m toward wall center so plaque sits cleanly beside the front door.
+        shift = 0.62 if along_d <= 0.5 * L else -0.62
+        s_pos = float(np.clip(along_d + shift, 0.35, L - 0.35))
+        pos_xy = a + d_along * s_pos + out_normal * 0.03
+        door_g = buildings.door_ground(spec, edge_i, along_d, gmax)
+        z_mid = float(door_g) + 2.02
+
+        explicit = getattr(spec, "de_hn", None)
+        if explicit:
+            num = str(explicit)
+        else:
+            # Deterministic German street-sequential parity number with occasional 'a'/'b' suffix on narrow houses.
+            c_mid = ring.mean(axis=0)
+            base_num = 2 + int(_hash01(spec.seed, "de_hn_num", round(float(c_mid[0]) / 24.0)) * 46) * 2
+            if float(out_normal[1]) < 0:
+                base_num -= 1
+            suffix = ""
+            if L < 8.5 and _hash01(spec.seed, "de_hn_suf") < 0.18:
+                suffix = "a" if _hash01(spec.seed, "de_hn_ab") < 0.7 else "b"
+            num = f"{base_num}{suffix}"
+
+        targets.append(
+            HouseNumberTarget(
+                center_xy=pos_xy,
+                d_along=d_along,
+                out_normal=out_normal,
+                z_mid=z_mid,
+                number=num,
+            )
+        )
+    return targets

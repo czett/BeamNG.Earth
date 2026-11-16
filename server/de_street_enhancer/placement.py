@@ -679,18 +679,19 @@ def build_street_signs_mesh(
     return True
 
 
-def encode_shop_fascias_mesh(
+def encode_shop_and_housenumbers_mesh(
     targets: list[classifier.ShopTarget],
+    hn_targets: list[classifier.HouseNumberTarget] | None,
     atlas_mat: str,
     uv_map: dict[str, tuple[float, float, float, float]],
 ) -> bytes | None:
-    """Encode batched `.cdae` bytes of illuminated commercial fascias relative to tile origin."""
-    if not targets or not atlas_mat or not uv_map:
+    """Encode batched `.cdae` bytes of commercial fascias and 3D German house number plaques relative to tile origin."""
+    if (not targets and not hn_targets) or not atlas_mat or not uv_map:
         return None
     mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=(0.0, 0.0, 0.0))
     axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-    for t in targets:
+    for t in targets or ():
         key = f"shop|{t.spec_brand.key}|{t.label}"
         uv = uv_map.get(key)
         if uv is None:
@@ -713,7 +714,37 @@ def encode_shop_fascias_mesh(
             face_mat=1,
         )
 
+    for hn in hn_targets or ():
+        uv = uv_map.get(f"hn|{hn.number}")
+        if uv is None:
+            continue
+        axis_x = np.array([float(hn.d_along[0]), float(hn.d_along[1]), 0.0], dtype=np.float64)
+        axis_y = np.array([float(hn.out_normal[0]), float(hn.out_normal[1]), 0.0], dtype=np.float64)
+        center = np.array([float(hn.center_xy[0]), float(hn.center_xy[1]), float(hn.z_mid)], dtype=np.float64)
+        mb.add_box(
+            center=center,
+            axis_x=axis_x,
+            axis_y=axis_y,
+            axis_z=axis_z,
+            hx=0.14,
+            hy=0.015,
+            hz=0.10,
+            front_uv=uv,
+            back_uv=None,
+            body_mat=0,
+            face_mat=1,
+        )
+
     return None if mb.empty() else mb.encode()
+
+
+def encode_shop_fascias_mesh(
+    targets: list[classifier.ShopTarget],
+    atlas_mat: str,
+    uv_map: dict[str, tuple[float, float, float, float]],
+) -> bytes | None:
+    """Encode batched `.cdae` bytes of illuminated commercial fascias relative to tile origin."""
+    return encode_shop_and_housenumbers_mesh(targets, None, atlas_mat, uv_map)
 
 
 def build_shop_fascias_mesh(

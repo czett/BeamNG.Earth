@@ -228,6 +228,21 @@ def adapt_building(spec, attrs: dict, lat: float | None, lon: float | None):
 
     zone = region_zone(b_lat, b_lon)
     seed = getattr(spec, "seed", 0.5)
+    # Extract explicit OSM/Overture house number when present.
+    hn_val = attrs.get("addr:housenumber") or attrs.get("housenumber")
+    if not hn_val and attrs.get("tags"):
+        try:
+            import json
+            t_dict = attrs["tags"] if isinstance(attrs["tags"], dict) else json.loads(str(attrs["tags"]))
+            if isinstance(t_dict, dict):
+                hn_val = t_dict.get("addr:housenumber") or t_dict.get("housenumber")
+        except Exception:
+            hn_val = None
+    if hn_val:
+        s_hn = str(hn_val).strip()
+        if s_hn and s_hn.lower() not in ("none", "null", "nan"):
+            spec.de_hn = s_hn[:10]
+
     fm = str(attrs.get("facade_material") or "").strip().lower()
     fc_raw = attrs.get("facade_color")
     rmat = str(attrs.get("roof_material") or "").strip().lower()
@@ -923,3 +938,161 @@ def bake_building_depth(
     C = C.copy()
     C[wall_verts, :3] = np.clip(np.round(np.power(lin, 1.0 / 2.2) * 255.0), 0, 255).astype(np.uint8)
     mesh.set_raw_arrays(P, UV, T, M, C)
+    if not lite:
+        _add_entrance_canopy_and_balconies(mesh, spec, gmin, gmax, z_eave, mat_idx)
+
+
+_BALCONY_SKIP_CLS = frozenset({
+    "industrial", "warehouse", "garage", "garages", "shed", "barn", "farm_auxiliary",
+    "stable", "cowshed", "church", "chapel", "cathedral", "commercial", "retail",
+    "supermarket", "kiosk", "greenhouse", "hangar",
+})
+
+
+def _add_box_prism(mesh, center: np.ndarray, axis_x: np.ndarray, axis_y: np.ndarray, axis_z: np.ndarray,
+                   hx: float, hy: float, hz: float, mat_token) -> None:
+    """Append a watertight closed 6-face prism to `buildings.Mesh` (`CCW` outward normals)."""
+    ex = axis_x * hx
+    ey = axis_y * hy
+    ez = axis_z * hz
+    uv = ((0.05, 0.05), (0.95, 0.05), (0.95, 0.95), (0.05, 0.95))
+
+    # Front (+Y), Back (-Y), Right (+X), Left (-X), Top (+Z), Bottom (-Z)
+    fc = center + ey
+    mesh.quad(fc - ex - ez, fc + ex - ez, fc + ex + ez, fc - ex + ez, *uv, mat_token)
+    bc = center - ey
+    mesh.quad(bc + ex - ez, bc - ex - ez, bc - ex + ez, bc + ex + ez, *uv, mat_token)
+    rc = center + ex
+    mesh.quad(rc + ey - ez, rc - ey - ez, rc - ey + ez, rc + ey + ez, *uv, mat_token)
+    lc = center - ex
+    mesh.quad(lc - ey - ez, lc + ey - ez, lc + ey + ez, lc - ey + ez, *uv, mat_token)
+    tc = center + ez
+    mesh.quad(tc - ex + ey, tc + ex + ey, tc + ex - ey, tc - ex - ey, *uv, mat_token)
+    dc = center - ez
+    mesh.quad(dc - ex - ey, dc + ex - ey, dc + ex + ey, dc - ex + ey, *uv, mat_token)
+
+
+def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_eave: float, mat_idx) -> None:
+    """Append batched 3D glass/metal entrance canopies (`Vordächer`) and residential balconies (`Balkone`)."""
+    import buildings as bld
+
+    if getattr(spec, "portal", False) or getattr(spec, "deck", False) or getattr(spec, "ship", False):
+        return
+    if (getattr(spec, "min_h", 0.0) or 0.0) > 0.5:
+        return
+    if getattr(spec, "shop", False) or getattr(spec, "plain", False):
+        return
+    cls = (getattr(spec, "cls", None) or "").lower()
+    if cls in _BALCONY_SKIP_CLS:
+        return
+
+    ring = bld.drawn_ring(spec)
+    n_edges = len(ring)
+    if n_edges < 3:
+        return
+
+    # Vertex budget guard against `buildings.VERTS_MAX` (65535).
+    if mesh.n > 54000:
+        return
+
+    try:
+        glass_tok = (bld.MATERIALS.index(bld.GLASSHOUSE), (184, 214, 232, 255))
+        steel_tok = (bld.MATERIALS.index(bld.METALWALL), (54, 58, 64, 255))
+        conc_tok = (bld.MATERIALS.index(bld.CONCRETE), (206, 208, 204, 255))
+    except ValueError:
+        return
+
+    eaves = getattr(spec, "de_eaves", None)
+    axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    sign_out = 1.0 if bld._area2(ring) > 0 else -1.0
+
+    # 1. Entrance Canopy (`Vordach`) above `spec.door`
+    door = getattr(spec, "door", None)
+    floors = int(getattr(spec, "floors", 1) or 1)
+    if door is not None and not getattr(spec, "porch", False) and floors <= 5:
+        edge_i, along_d = int(door[0]), float(door[1])
+        if 0 <= edge_i < n_edges and (eaves is None or eaves[edge_i] > 0.12):
+            a, b = ring[edge_i], ring[(edge_i + 1) % n_edges]
+            L = float(math.hypot(*(b - a)))
+            if L >= 3.2:
+                d_u = (b - a) / L
+                out = np.array([d_u[1], -d_u[0]], dtype=np.float64) * sign_out
+                ax = np.array([d_u[0], d_u[1], 0.0], dtype=np.float64)
+                ay = np.array([out[0], out[1], 0.0], dtype=np.float64)
+                door_g = bld.door_ground(spec, edge_i, along_d, gmax)
+                z_can = door_g + 2.46
+                if z_can + 0.25 < z_eave:
+                    c_xy = a + d_u * float(np.clip(along_d, 1.1, L - 1.1))
+                    # Glass canopy pane (1.80 m wide x 0.90 m deep)
+                    c_pane = np.array([c_xy[0] + ay[0] * 0.46, c_xy[1] + ay[1] * 0.46, z_can], dtype=np.float64)
+                    _add_box_prism(mesh, c_pane, ax, ay, axis_z, 0.90, 0.45, 0.024, glass_tok)
+                    # Two cantilevered dark anthracite support arms
+                    for sx in (-0.72, 0.72):
+                        c_arm = np.array([c_xy[0] + ax[0] * sx + ay[0] * 0.44, c_xy[1] + ax[1] * sx + ay[1] * 0.44, z_can - 0.04], dtype=np.float64)
+                        _add_box_prism(mesh, c_arm, ax, ay, axis_z, 0.03, 0.43, 0.025, steel_tok)
+
+    # 2. Residential Balconies (`Balkone`) on upper floors (2 <= floors <= 5)
+    area = abs(bld._area2(ring)) / 2.0
+    if not (2 <= floors <= 5) or area < 55.0 or mesh.n > 50000:
+        return
+
+    floor_h = float(getattr(spec, "floor_h", 2.8) or 2.8)
+    base_z = bld.base_z(spec, gmin, gmax)
+    cand_edges: list[tuple[float, int]] = []
+    for ei in range(n_edges):
+        if eaves is not None and eaves[ei] < 0.25:
+            continue
+        a, b = ring[ei], ring[(ei + 1) % n_edges]
+        L = float(math.hypot(*(b - a)))
+        if L >= 5.2:
+            # Prefer front door edge or long primary facades
+            score = L + (4.0 if (door is not None and ei == door[0]) else 0.0)
+            cand_edges.append((score, ei))
+    if not cand_edges:
+        return
+
+    cand_edges.sort(reverse=True)
+    chosen = [ei for _sc, ei in cand_edges[:2]]
+    bal_w = 2.8
+    bal_d = 1.05
+
+    for ei in chosen:
+        a, b = ring[ei], ring[(ei + 1) % n_edges]
+        L = float(math.hypot(*(b - a)))
+        d_u = (b - a) / L
+        out = np.array([d_u[1], -d_u[0]], dtype=np.float64) * sign_out
+        ax = np.array([d_u[0], d_u[1], 0.0], dtype=np.float64)
+        ay = np.array([out[0], out[1], 0.0], dtype=np.float64)
+        c_mid = (a + b) * 0.5
+
+        for fl in range(1, floors):
+            if mesh.n + 240 > 58000:
+                return
+            slab_z = base_z + fl * floor_h - 0.08
+            if slab_z + 1.15 >= z_eave - 0.10:
+                continue
+            # Concrete deck slab
+            c_deck = np.array([c_mid[0] + ay[0] * (bal_d * 0.5), c_mid[1] + ay[1] * (bal_d * 0.5), slab_z], dtype=np.float64)
+            _add_box_prism(mesh, c_deck, ax, ay, axis_z, bal_w * 0.5, bal_d * 0.5, 0.07, conc_tok)
+
+            rail_z = slab_z + 0.55
+            top_z = slab_z + 1.04
+            # Frosted glass front balustrade + side rail bars
+            c_front_g = np.array([c_mid[0] + ay[0] * (bal_d - 0.04), c_mid[1] + ay[1] * (bal_d - 0.04), rail_z], dtype=np.float64)
+            _add_box_prism(mesh, c_front_g, ax, ay, axis_z, bal_w * 0.5 - 0.05, 0.015, 0.42, glass_tok)
+            # Top anthracite handrail (front + 2 sides)
+            c_top_f = np.array([c_mid[0] + ay[0] * (bal_d - 0.03), c_mid[1] + ay[1] * (bal_d - 0.03), top_z], dtype=np.float64)
+            _add_box_prism(mesh, c_top_f, ax, ay, axis_z, bal_w * 0.5, 0.025, 0.025, steel_tok)
+            for sx in (-1.0, 1.0):
+                c_side_r = np.array([
+                    c_mid[0] + ax[0] * (sx * (bal_w * 0.5 - 0.025)) + ay[0] * (bal_d * 0.5),
+                    c_mid[1] + ax[1] * (sx * (bal_w * 0.5 - 0.025)) + ay[1] * (bal_d * 0.5),
+                    top_z,
+                ], dtype=np.float64)
+                _add_box_prism(mesh, c_side_r, ax, ay, axis_z, 0.025, bal_d * 0.5, 0.025, steel_tok)
+                c_post = np.array([
+                    c_mid[0] + ax[0] * (sx * (bal_w * 0.5 - 0.03)) + ay[0] * (bal_d - 0.03),
+                    c_mid[1] + ax[1] * (sx * (bal_w * 0.5 - 0.03)) + ay[1] * (bal_d - 0.03),
+                    rail_z,
+                ], dtype=np.float64)
+                _add_box_prism(mesh, c_post, ax, ay, axis_z, 0.025, 0.025, 0.50, steel_tok)

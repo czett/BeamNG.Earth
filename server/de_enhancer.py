@@ -16,7 +16,7 @@ import germany
 
 log = logging.getLogger("earthd.de_enhancer")
 
-PACKAGE_VERSION = 1
+PACKAGE_VERSION = 2
 
 
 def enabled() -> bool:
