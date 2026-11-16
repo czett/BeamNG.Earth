@@ -1,9 +1,11 @@
 """Orchestration hooks connecting `de_street_enhancer` cleanly to tile workers."""
 
 import logging
+import math
 import numpy as np
 
 from . import classifier
+from . import furniture_de
 from . import placement
 from . import texture_atlas
 
@@ -95,33 +97,72 @@ def build_streets_and_yards(
     street_face = None
     street_blob = None
 
-    if near_roads and street_names and out_dir is not None and vfs_dir is not None:
-        posts = placement.plan_street_signs(
-            frame,
-            near_roads,
-            box,
-            street_names,
-            props,
-            ground,
-            rings=rings,
-            drives=drives,
-            style_variant="blue",
+    if near_roads and out_dir is not None and vfs_dir is not None:
+        posts = (
+            placement.plan_street_signs(
+                frame,
+                near_roads,
+                box,
+                street_names,
+                props,
+                ground,
+                rings=rings,
+                drives=drives,
+                style_variant="blue",
+            )
+            if street_names
+            else []
         )
-        if posts:
-            entries = [
-                (f"street|{variant}|{name}", (name, variant))
+        furn_plan = furniture_de.plan_de_street_furniture(
+            md,
+            frame,
+            box,
+            near_roads,
+            walks,
+            props,
+            drives,
+            garage_drives,
+            rings,
+            ground,
+        )
+        if furn_plan.suppressed_recycle_xy and isinstance(props, list):
+            props[:] = [
+                r
+                for r in props
+                if not (
+                    str(r[0]) == "recyclebin"
+                    and any(math.hypot(float(r[1]) - sx, float(r[2]) - sy) < 5.0 for sx, sy in furn_plan.suppressed_recycle_xy)
+                )
+            ]
+
+        if posts or furn_plan.has_any:
+            entries: list[tuple[str, object]] = [
+                (f"street|{variant}|{name}", ("street", name, variant))
                 for p in posts
                 for name, _d, _z, variant in p.blades
             ]
+            if furn_plan.has_any:
+                entries.append((furniture_de.FURNITURE_SWATCH_KEY, ("swatch", None, None)))
+                for stop in furn_plan.bus_stops:
+                    entries.append((f"busstop|{stop.name}", ("busstop", stop.name, None)))
+
+            def _render_street_slot(item):
+                kind, a, b = item
+                if kind == "swatch":
+                    return texture_atlas.render_furniture_swatch()
+                if kind == "busstop":
+                    return texture_atlas.render_bus_stop_panel(a)
+                return texture_atlas.render_street_plate(a, variant=b)
+
             mat_name, _dds, vfs_tex, uv_map, _img = texture_atlas.pack_atlas(
                 entries,
-                lambda pair: texture_atlas.render_street_plate(pair[0], variant=pair[1]),
+                _render_street_slot,
                 out_dir,
                 vfs_dir,
                 prefix="st",
             )
             if mat_name and vfs_tex:
-                street_blob = placement.encode_street_signs_mesh(posts, mat_name, uv_map, (x0, y0, 0.0))
+                street_blob = placement.encode_streets_and_furniture_mesh(posts, furn_plan, mat_name, uv_map, (x0, y0, 0.0))
                 if street_blob is not None:
                     street_face = {mat_name: {"texture": vfs_tex, "emissive": False}}
 

@@ -596,19 +596,23 @@ def plan_street_signs(
     return planned
 
 
-def encode_street_signs_mesh(
+def encode_streets_and_furniture_mesh(
     posts: list[StreetSignPost],
+    furn_plan,
     atlas_mat: str,
     uv_map: dict[str, tuple[float, float, float, float]],
     origin: tuple[float, float, float],
 ) -> bytes | None:
-    """Encode batched multi-material `.cdae` bytes containing posts, collars, and street plates."""
-    if not posts or not atlas_mat or not uv_map:
+    """Encode batched `destreets.cdae` containing street signs + German transit stops & sidewalk micro-props."""
+    from . import furniture_de
+
+    has_furn = furn_plan is not None and furn_plan.has_any
+    if (not posts and not has_furn) or not atlas_mat or not uv_map:
         return None
     mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=origin)
     axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-    for post in posts:
+    for post in posts or ():
         if not post.blades:
             continue
         top_blade_z = max(b[2] for b in post.blades) + PLATE_HEIGHT_M * 0.5 + 0.06
@@ -622,7 +626,6 @@ def encode_street_signs_mesh(
                 continue
             axis_x = np.array([float(b_dir[0]), float(b_dir[1]), 0.0], dtype=np.float64)
             axis_y = np.array([float(b_dir[1]), -float(b_dir[0]), 0.0], dtype=np.float64)
-            # Lamp-mounted blades extend cleanly outward from pole radius via short bracket arm.
             offset = (POST_RADIUS_M + 0.08) if post.mounted_on_pole else 0.0
             center = np.array([post.xy[0] + axis_y[0] * offset, post.xy[1] + axis_y[1] * offset, z_mid], dtype=np.float64)
             if post.mounted_on_pole:
@@ -643,7 +646,20 @@ def encode_street_signs_mesh(
                 face_mat=1,
             )
 
+    if has_furn:
+        furniture_de.append_furniture_geometry(mb, furn_plan, uv_map)
+
     return None if mb.empty() else mb.encode()
+
+
+def encode_street_signs_mesh(
+    posts: list[StreetSignPost],
+    atlas_mat: str,
+    uv_map: dict[str, tuple[float, float, float, float]],
+    origin: tuple[float, float, float],
+) -> bytes | None:
+    """Encode batched multi-material `.cdae` bytes containing posts, collars, and street plates."""
+    return encode_streets_and_furniture_mesh(posts, None, atlas_mat, uv_map, origin)
 
 
 def build_street_signs_mesh(

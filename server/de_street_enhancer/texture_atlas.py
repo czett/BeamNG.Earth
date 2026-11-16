@@ -256,11 +256,131 @@ def render_shop_fascia(spec, label: str, w: int = SLOT_W, h: int = SLOT_H) -> Im
     return img
 
 
+def uv_subrect(uv: tuple[float, float, float, float], rx0: float, ry0: float, rx1: float, ry1: float) -> tuple[float, float, float, float]:
+    """Slice a top-down `[0..1]` sub-rectangle `(rx0, ry0, rx1, ry1)` out of a slot's Collada UV rect."""
+    u0, v_bot, u1, v_top = uv
+    du = u1 - u0
+    dv = v_top - v_bot
+    return (
+        u0 + rx0 * du,
+        v_top - ry1 * dv,
+        u0 + rx1 * du,
+        v_top - ry0 * dv,
+    )
+
+
+def render_bus_stop_panel(stop_name: str, w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Render German StVO 224 `H` Haltestelle sign (left 25%) + timetable & stop name (right 75%)."""
+    img = Image.new("RGB", (w, h), (236, 238, 232))
+    draw = ImageDraw.Draw(img)
+    pad = INNER_PAD
+
+    # Left quadrant (0 .. 0.25): yellow StVO 224 square with green ring + bold 'H'.
+    split_x = w // 4
+    draw.rectangle([pad, pad, split_x - pad, h - pad], fill=(244, 198, 12))
+    cx, cy = split_x // 2, h // 2
+    rad = min(split_x // 2 - pad - 2, h // 2 - pad - 2)
+    draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(244, 198, 12), outline=(12, 108, 52), width=4)
+    font_h = _load_font(max(18, int(rad * 1.45)), bold=True, condensed=False)
+    bx_h = draw.textbbox((0, 0), "H", font=font_h)
+    draw.text((cx - (bx_h[2] - bx_h[0]) / 2.0 - bx_h[0], cy - (bx_h[3] - bx_h[1]) / 2.0 - bx_h[1]), "H", font=font_h, fill=(12, 108, 52))
+
+    # Right 3/4 (0.25 .. 1.0): green header bar with stop name + white timetable schedule grid.
+    tx0 = split_x + pad
+    tx1 = w - pad
+    hdr_h = int((h - 2 * pad) * 0.46)
+    draw.rectangle([tx0, pad, tx1, pad + hdr_h], fill=(12, 108, 52))
+    label = " ".join(str(stop_name or "Haltestelle").split()) or "Haltestelle"
+    fitted, font_lbl, bx_l = _fit_text(draw, label, max(60, tx1 - tx0 - 10), max(12, hdr_h - 4), bold=True)
+    draw.text((tx0 + 6 - bx_l[0], pad + (hdr_h - (bx_l[3] - bx_l[1])) / 2.0 - bx_l[1]), fitted, font=font_lbl, fill=(255, 255, 255))
+
+    # Timetable rows below header
+    tt_y0 = pad + hdr_h + 2
+    draw.rectangle([tx0, tt_y0, tx1, h - pad], fill=(248, 248, 244), outline=(140, 148, 142))
+    for row_i, y_frac in enumerate((0.25, 0.55, 0.82)):
+        ry = int(tt_y0 + (h - pad - tt_y0) * y_frac)
+        draw.line([(tx0 + 6, ry), (tx1 - 6, ry)], fill=(120, 130, 126) if row_i % 2 == 0 else (180, 186, 182), width=1)
+    return img
+
+
+def render_furniture_swatch(w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Render 8x 64x64 micro-prop material swatches inside one 512x64 atlas slot."""
+    img = Image.new("RGB", (w, h), (46, 52, 58))
+    draw = ImageDraw.Draw(img)
+    sw = w // 8  # 64 px
+
+    # 0: Stromkasten pebble-grey cabinet with dark louver slots
+    x0 = 0
+    draw.rectangle([x0, 0, x0 + sw - 1, h - 1], fill=(178, 182, 176))
+    for y_l in range(14, 38, 5):
+        draw.line([(x0 + 10, y_l), (x0 + sw - 11, y_l)], fill=(96, 102, 98), width=2)
+    draw.rectangle([x0 + 6, h - 12, x0 + sw - 7, h - 1], fill=(116, 120, 118))
+
+    # 1: DHL Packstation signal yellow + red stripe + locker doors
+    x0 = sw
+    draw.rectangle([x0, 0, x0 + sw - 1, h - 1], fill=(245, 200, 12))
+    draw.rectangle([x0, 4, x0 + sw - 1, 14], fill=(208, 18, 28))
+    for gx in (x0 + 16, x0 + 32, x0 + 48):
+        draw.line([(gx, 16), (gx, h - 4)], fill=(184, 148, 8), width=1)
+    for gy in (24, 38, 50):
+        draw.line([(x0 + 4, gy), (x0 + sw - 5, gy)], fill=(184, 148, 8), width=1)
+    draw.rectangle([x0 + 20, 26, x0 + 42, 42], fill=(42, 48, 56))
+
+    # 2: Altglascontainer trio (Weiss / Braun / Gruen bands)
+    x0 = sw * 2
+    draw.rectangle([x0, 0, x0 + 20, h - 1], fill=(224, 226, 220))
+    draw.rectangle([x0 + 21, 0, x0 + 42, h - 1], fill=(118, 68, 36))
+    draw.rectangle([x0 + 43, 0, x0 + sw - 1, h - 1], fill=(34, 106, 52))
+    for cx_b in (x0 + 10, x0 + 31, x0 + 53):
+        draw.ellipse([cx_b - 5, 16, cx_b + 5, 26], fill=(24, 28, 30))
+
+    # 3: Poller dark anthracite + red/white reflective band
+    x0 = sw * 3
+    draw.rectangle([x0, 0, x0 + sw - 1, h - 1], fill=(44, 48, 54))
+    draw.rectangle([x0, 10, x0 + sw - 1, 18], fill=(214, 34, 34))
+    draw.rectangle([x0, 19, x0 + sw - 1, 27], fill=(240, 240, 236))
+    draw.rectangle([x0, 28, x0 + sw - 1, 36], fill=(214, 34, 34))
+
+    # 4: Bus shelter blue-grey tinted tempered glass
+    x0 = sw * 4
+    draw.rectangle([x0, 0, x0 + sw - 1, h - 1], fill=(108, 138, 162))
+    draw.line([(x0 + 10, 4), (x0 + 26, h - 5)], fill=(142, 174, 198), width=4)
+    for dx in range(x0 + 6, x0 + sw - 4, 10):
+        draw.rectangle([dx, h // 2 - 2, dx + 4, h // 2 + 2], fill=(220, 228, 234))
+
+    # 5: Anthracite shelter steel
+    draw.rectangle([sw * 5, 0, sw * 6 - 1, h - 1], fill=(46, 52, 58))
+    # 6: Warm wood bench slats
+    draw.rectangle([sw * 6, 0, sw * 7 - 1, h - 1], fill=(134, 88, 52))
+    # 7: Concrete plinth
+    draw.rectangle([sw * 7, 0, sw * 8 - 1, h - 1], fill=(136, 138, 134))
+    return img
+
+
+def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Pack up to 8 German royal-blue/white enamel house number plaques (4x2 grid) into one 512x64 slot."""
+    img = Image.new("RGB", (w, h), (16, 48, 96))
+    draw = ImageDraw.Draw(img)
+    cell_w, cell_h = w // 4, h // 2  # 128 x 32
+    for idx, num in enumerate(numbers[:8]):
+        col, row = idx % 4, idx // 4
+        cx0, cy0 = col * cell_w, row * cell_h
+        # Royal-blue German Hausnummer enamel with crisp white border.
+        draw.rectangle([cx0 + 3, cy0 + 3, cx0 + cell_w - 4, cy0 + cell_h - 4], fill=(14, 54, 114), outline=(238, 240, 244), width=2)
+        txt = str(num).strip()[:6]
+        fitted, font, bx = _fit_text(draw, txt, cell_w - 16, cell_h - 10, bold=True, condensed=False)
+        tw, th = bx[2] - bx[0], bx[3] - bx[1]
+        draw.text((cx0 + (cell_w - tw) / 2.0 - bx[0], cy0 + (cell_h - th) / 2.0 - bx[1]), fitted, font=font, fill=(250, 250, 250))
+    return img
+
+
 def _atlas_dims(count: int) -> tuple[int, int, int]:
     """Return `(atlas_w, atlas_h, max_slots)` power-of-two dimensions for slot packing."""
     if count <= MAX_SLOTS_16:
         return ATLAS_W, 512, MAX_SLOTS_16
-    return ATLAS_W, 1024, MAX_SLOTS_32
+    if count <= MAX_SLOTS_32:
+        return ATLAS_W, 1024, MAX_SLOTS_32
+    return ATLAS_W, 2048, 64
 
 
 def pack_atlas(
@@ -290,7 +410,7 @@ def pack_atlas(
             continue
         seen.add(key)
         unique.append((key, payload))
-        if len(unique) >= MAX_SLOTS_32:
+        if len(unique) >= 64:
             break
 
     if not unique:

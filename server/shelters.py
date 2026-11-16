@@ -383,6 +383,9 @@ def rows(frame, infra_fn, box, elev, roads=(), road_cell_fn=None, country=None):
     region's stock shelter (shelter_for: the country, ISO alpha-2; None: the bundled borders at the box's centre)."""
     if infra_fn is None:
         return []
+    import de_enhancer
+    if de_enhancer.suppress_default_shelters(frame, box):
+        return []
     x0, y0, x1, y1 = (float(v) for v in box)
     la, lo, _ = frame.enu_to_geodetic(np.array([x0, x0, x1, x1]), np.array([y0, y1, y0, y1]), np.zeros(4))
     try:

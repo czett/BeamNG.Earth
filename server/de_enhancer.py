@@ -134,6 +134,11 @@ def suppress_default_fences(frame, box) -> bool:
     return enabled() and in_germany(frame, box)
 
 
+def suppress_default_shelters(frame, box) -> bool:
+    """Suppress generic `busshelter_it` Forest props inside DE when batched shelters run."""
+    return enabled() and in_germany(frame, box)
+
+
 def prepare_shops(md, frame, tx, ty, items, out_dir, vfs_dir):
     """Stage 1 hook (after `buildings.doors`, before `buildings.road_tile`)."""
     if not enabled() or not items:
