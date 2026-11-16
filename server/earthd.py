@@ -3563,6 +3563,27 @@ class Server:
                 de_faces_map.update(st_face)
             if de_yard_rows:
                 props = (props or []) + de_yard_rows
+        if park is not None:
+            park = de_enhancer.refine_parking(
+                self.mapdata,
+                anchor.frame,
+                tx,
+                ty,
+                box,
+                near_roads,
+                walks if self.buildings else None,
+                props or [],
+                de_drives_all,
+                de_garage_drives,
+                de_rings,
+                park,
+                lambda x, y: (
+                    np.zeros(0, np.float64)
+                    if len(x) == 0
+                    else roadmeshmod.drawn_ground(anchor.frame, drawn, np.c_[x, y], self.anchor_q(anchor))
+                ),
+                cells=cells,
+            )
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
                                    rail_mesh=rmesh, guardrail_rows=guardrail_rows, garage_sound=garage_sound,

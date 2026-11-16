@@ -199,3 +199,51 @@ def finish_streets_and_yards(
     except Exception as ex:
         log.warning("de_enhancer streets/yards: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         return None, None, []
+
+
+def refine_parking(
+    md,
+    frame,
+    tx,
+    ty,
+    box,
+    near_roads,
+    walks,
+    props,
+    drives,
+    garage_drives,
+    rings,
+    park,
+    ground,
+    cells=None,
+):
+    """Stage 2b hook: refine `park` spots with DE curbside clusters when inside Germany."""
+    if not enabled() or not in_germany(frame, box):
+        return park
+    try:
+        from de_street_enhancer.parking_de import refine_parking_spots
+
+        safe_ground = (
+            (lambda x, y: np.zeros(0, np.float64) if np.asarray(x).size == 0 else ground(x, y))
+            if ground is not None
+            else None
+        )
+        return refine_parking_spots(
+            md,
+            frame,
+            tx,
+            ty,
+            box,
+            near_roads or [],
+            walks,
+            props or [],
+            drives or [],
+            garage_drives or [],
+            rings,
+            park,
+            safe_ground,
+            cells=cells,
+        )
+    except Exception as ex:
+        log.warning("de_enhancer parking: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
+        return park

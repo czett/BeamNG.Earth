@@ -60,6 +60,7 @@ M.VIEW_MARGIN_DEG = 20  -- the camera's half field of view (horizontal, at VIEW_
 M.VIEW_ASPECT = 2.4     -- (the widest screens: 21:9)
 M.DEFAULT_PARKED_AMOUNT = 5   -- the game's trafficParkingAmount default (settings/defaults.json) when unreadable
 M.ACTIVE_CAP = { low = 2, medium = 2 }   -- (Deck drive: 5 active 5.1 ms, 3: 4.2, 2: 3.0, none 0.7)
+M.DE_ACTIVE_CAP = { high = 8, ultra = 10 } -- Higher ambient parked-car cap in Germany when expDeStreetImmersion is enabled
 M.enabled = true
 
 local spots = {}        -- tile key -> { anchor, rows }
@@ -310,11 +311,28 @@ function M.amountIsDefault(getValue, defaultValue, choice)
   return v == nil or v == defaultValue
 end
 
+-- Germany DE ambient parked-car count when expDeStreetImmersion is on and DE tiles are active (High/Ultra only).
+function M.deParkedAmount()
+  local okS, s = pcall(require, 'beamngEarth/settings')
+  if not (okS and type(s) == 'table' and s.get and s.get('expDeStreetImmersion')) then return nil end
+  local q = s.get('quality')
+  local cap = q and M.DE_ACTIVE_CAP[q] or nil
+  if not cap then return nil end
+  local okD, de = pcall(require, 'beamngEarth/deEnhancer')
+  if not (okD and type(de) == 'table' and de.status and de.status().count > 0) then return nil end
+  local gs = rawget(_G, 'settings')
+  local getValue = gs and gs.getValue and function(k) return gs.getValue(k) end
+  local defaults = gs and type(gs.impl) == 'table' and type(gs.impl.defaultValues) == 'table' and gs.impl.defaultValues
+  local okN, ng = pcall(require, 'beamngEarth/navgraph')
+  if not M.amountIsDefault(getValue, defaults and defaults.trafficParkingAmount, okN and ng.choice or nil) then return nil end
+  return cap
+end
+
 -- The quality preset's cap on active parked cars (nil: the player's amount as it is).
 function M.activeCap()
   local ok, s = pcall(require, 'beamngEarth/settings')
   local q = ok and type(s) == 'table' and s.get and s.get('quality')
-  local cap = q and M.ACTIVE_CAP[q] or nil
+  local cap = q and M.ACTIVE_CAP[q] or M.deParkedAmount()
   if not cap then return nil end
   local gs = rawget(_G, 'settings')
   local getValue = gs and gs.getValue and function(k) return gs.getValue(k) end
@@ -492,6 +510,9 @@ function M.update(aid, player, blk, gov)
       if near < M.START_MIN then
         local small = math.max(1, math.floor(near * 0.6))
         amount = amount > 0 and math.min(amount, small) or small
+      elseif amount == -1 then
+        local deAmt = M.deParkedAmount()
+        if deAmt then amount = deAmt end
       end
       local okS, err = pcall(gp.setupVehicles, amount, { pos = vec3(player.x, player.y, player.z) })
       if not okS then log('W', 'beamngEarth', 'parking: setupVehicles: ' .. tostring(err)) end
