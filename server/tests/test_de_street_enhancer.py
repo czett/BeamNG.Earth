@@ -869,7 +869,7 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         self.assertGreater(len(curb), 6, f"expected residential curb spots, got {curb}")
         for r in curb:
             x, y = float(r[0]), float(r[1])
-            self.assertEqual((r[5], r[6]), (2.05, 5.2))
+            self.assertEqual((r[5], r[6]), (2.30, 5.5))
             self.assertGreaterEqual(math.hypot(x - 128.0, y - 100.0), 10.0 - 1e-6)
             self.assertGreaterEqual(math.hypot(x - 210.0, y - 103.0), 12.0 - 1e-6)
             self.assertGreaterEqual(math.hypot(x - 50.0, y - 103.0), 4.2 - 1e-6)
@@ -928,17 +928,17 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
     def test_pillar4_housenumbers_subslots_canopies_and_balconies(self):
         frame = geodesy.EnuFrame(*MUNICH)
         with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
-            # Pack 50 unique house numbers in compact 4x2 subslots -> fits in 7 slots (<< 32)
+            # Pack 50 unique house numbers in 4x1 subslots (128x64 each) -> fits in 13 slots (<< 32)
             entries = []
             nums = [f"{i}" for i in range(1, 51)]
-            for idx in range(0, len(nums), 8):
-                chunk = nums[idx : idx + 8]
-                entries.append((f"hngrid|{idx//8}", chunk))
+            for idx in range(0, len(nums), 4):
+                chunk = nums[idx : idx + 4]
+                entries.append((f"hngrid|{idx//4}", chunk))
             mat, _dds, _vfs, uv_map, _img = texture_atlas.pack_atlas(
                 entries, texture_atlas.render_housenumber_grid, out_dir=None, vfs_dir=None, prefix="sh"
             )
             self.assertIsNotNone(mat)
-            self.assertEqual(len(uv_map), 7)
+            self.assertEqual(len(uv_map), 13)
 
             # Build multi-story residential house with door, canopy, balconies, and explicit addr:housenumber
             ring = np.array([[20.0, 20.0], [32.0, 20.0], [32.0, 30.0], [20.0, 30.0]], dtype=np.float64)
@@ -964,6 +964,121 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
                 self.assertIsNotNone(sf)
                 self.assertIsNotNone(sb)
                 self.assertFalse(next(iter(sf.values()))["emissive"])
+
+    def test_dortmund_live_fixes_tram_island_bollard_hedge_and_housenumber(self):
+        from de_street_enhancer import furniture_de, hooks
+
+        frame = geodesy.EnuFrame(51.5136, 7.4653)  # Dortmund
+        box = (0.0, 0.0, 256.0, 256.0)
+
+        # 1. Divided Brackeler Hellweg with 2.0 m narrow median + tram track + 4-way Freie-Vogel junction with primary arm
+        r_eb_w = np.array([[0.0, 124.0, 0.0], [80.0, 124.0, 0.0]], dtype=np.float64)
+        r_eb_e = np.array([[80.0, 124.0, 0.0], [256.0, 124.0, 0.0]], dtype=np.float64)
+        r_wb_w = np.array([[0.0, 133.0, 0.0], [80.0, 133.0, 0.0]], dtype=np.float64)
+        r_wb_e = np.array([[80.0, 133.0, 0.0], [256.0, 133.0, 0.0]], dtype=np.float64)  # gap = (133-3.5)-(124+3.5) = 2.0 m (<3.0m)
+        r_cross_n = np.array([[80.0, 133.0, 0.0], [80.0, 240.0, 0.0]], dtype=np.float64)
+        r_cross_s = np.array([[80.0, 20.0, 0.0], [80.0, 124.0, 0.0]], dtype=np.float64)
+        near_roads = [
+            ("r_eb_w", _road_spec("primary", 7.0), r_eb_w, 7.4653),
+            ("r_eb_e", _road_spec("primary", 7.0), r_eb_e, 7.4653),
+            ("r_wb_w", _road_spec("primary", 7.0), r_wb_w, 7.4653),
+            ("r_wb_e", _road_spec("primary", 7.0), r_wb_e, 7.4653),
+            ("r_cn", _road_spec("residential", 6.0), r_cross_n, 7.4653),
+            ("r_cs", _road_spec("residential", 6.0), r_cross_s, 7.4653),
+        ]
+        # Outer sidewalks only (no median walk); includes a real corner polygon at (80, 133) NE quadrant
+        walks = [
+            {"fid": "r_wb", "pts": np.array([[90.0, 137.5, 0.0], [250.0, 137.5, 0.0]]), "side": 1, "w": 2.0},
+            {"fid": "r_eb", "pts": np.array([[90.0, 119.5, 0.0], [250.0, 119.5, 0.0]]), "side": -1, "w": 2.0},
+            {
+                "corner": {
+                    "arc": np.array([[83.0, 138.0, 0.0], [84.5, 136.8, 0.0], [86.5, 136.5, 0.0]]),
+                    "inward": np.array([[0.7, 0.7], [0.7, 0.7], [0.0, 1.0]]),
+                    "outer": np.array([[86.5, 138.5, 0.0], [86.5, 140.5, 0.0], [83.0, 140.5, 0.0]]),
+                }
+            },
+        ]
+
+        # House with front door at (110, 139.0) and 4-floor apartment building
+        h_ring = np.array([[104.0, 139.0], [116.0, 139.0], [116.0, 149.0], [104.0, 149.0]], dtype=np.float64)
+        h_spec = buildings.Spec(
+            ring=h_ring, floors=4, floor_h=2.8, height=11.2, roof="gabled", shop=False,
+            cls="apartments", seed=0.05, door=(0, 6.0), min_h=0.0, de_in=True, de_hn="22a",
+        )
+        items = [(h_spec, 0.0, 0.0)]
+
+        # Bus stop on the median/tram corridor (160, 128.5) + shelter=no stop at (200, 119.5) + street cabinet near door (110, 138.0)
+        pts_enu = [(160.0, 128.5), (200.0, 119.5), (110.0, 138.0)]
+        lonlat = np.array([frame.enu_to_geodetic(x, y, 0.0)[1::-1] for x, y in pts_enu], dtype=np.float64)
+        feats = mapgeom.Features(
+            layer="infrastructure",
+            lonlat=lonlat,
+            coord_off=np.array([0, 1, 2, 3], dtype=np.int64),
+            ring_off=np.array([0, 1, 2, 3], dtype=np.int64),
+            part_off=np.array([0, 1, 2, 3], dtype=np.int64),
+            kind=np.array([1, 1, 1], dtype=np.int8),
+            attrs={
+                "class": np.array(["bus_stop", "bus_stop", "street_cabinet"], dtype=object),
+                "name": np.array(["Brackeler Hellweg", "Stadtgärtnerei", ""], dtype=object),
+                "tags": np.array([
+                    '{"highway":"bus_stop","name":"Brackeler Hellweg"}',
+                    '{"highway":"bus_stop","shelter":"no","name":"Stadtgärtnerei"}',
+                    '{"man_made":"street_cabinet"}',
+                ], dtype=object),
+            },
+            ids=np.array(["bs_med", "bs_noshel", "cab_door"], dtype=object),
+        )
+        fake_md = types.SimpleNamespace(
+            cell=lambda key, layers=(), kind="demand": types.SimpleNamespace(
+                layers={"infrastructure": feats if "infrastructure" in layers else None}
+            )
+        )
+        tram_line = np.array([[0.0, 128.5], [256.0, 128.5]], dtype=np.float64)
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}), mock.patch.object(
+            classifier, "tram_polylines", return_value=[tram_line]
+        ):
+            furn = furniture_de.plan_de_street_furniture(
+                fake_md, frame, box, near_roads, walks, [], [], [], [h_ring], _flat_ground, items=items, tx=0, ty=0
+            )
+            yard_rows = placement.place_residential_yards(
+                frame, box, items, near_roads, walks, [], None, [h_ring], _flat_ground, md=None
+            )
+
+        # Bus stop snapped out of median/tram onto outer sidewalk (>= 2.2 m from tram, >= half_w + 0.45 m from roads)
+        self.assertGreaterEqual(len(furn.bus_stops), 1)
+        for bs in furn.bus_stops:
+            self.assertGreaterEqual(classifier.min_dist_to_polylines(bs.xy, [tram_line]), 2.2)
+            self.assertFalse(120.5 <= float(bs.xy[1]) <= 136.5, f"bus stop landed on median/roadway: {bs.xy}")
+        noshel = [b for b in furn.bus_stops if b.name == "Stadtgärtnerei"]
+        self.assertTrue(noshel and not noshel[0].has_shelter, "shelter=no must emit slim H-pole only")
+
+        # Cabinets <= 2 procedural + none within 2.5 m of door (110, 139)
+        self.assertLessEqual(len(furn.cabinets), 2)
+        for cab in furn.cabinets:
+            self.assertGreaterEqual(math.hypot(float(cab.xy[0]) - 110.0, float(cab.xy[1]) - 139.0), 2.5)
+
+        # Bollards strictly on outer walk polygon, >= 0.35 m behind kerb, and 0 inside roadway/median
+        self.assertGreater(len(furn.bollards), 0)
+        road_bands = furniture_de._all_road_bands(near_roads)
+        for bol in furn.bollards:
+            self.assertGreaterEqual(furniture_de._min_road_edge_dist(bol.xy, road_bands), 0.45)
+            self.assertGreaterEqual(classifier.min_dist_to_polylines(bol.xy, [tram_line]), 2.2)
+
+        # 4-floor apartment yard gets full-length tall hedge/fence rows
+        self.assertGreater(len(yard_rows), 0)
+        for r in yard_rows:
+            if r[0] == "fr_hedge":
+                self.assertGreaterEqual(float(r[6]), 1.15)
+
+        # House number plaque size 0.42 m x 0.30 m at z = door_g + 1.95 m
+        hn_targets = classifier.collect_housenumbers(items)
+        self.assertEqual(len(hn_targets), 1)
+        self.assertAlmostEqual(hn_targets[0].z_mid, 1.95, places=3)
+        blob = placement.encode_shop_and_housenumbers_mesh([], hn_targets, "bne_de_sh_test", {"hn|22a": (0.1, 0.1, 0.9, 0.9)})
+        dec = cdae.decode(blob)
+        verts = cdae.mesh_arrays(dec["meshes"][0])["verts"]
+        self.assertAlmostEqual(float(verts[:, 0].max() - verts[:, 0].min()), 0.42, places=2)
+        self.assertAlmostEqual(float(verts[:, 2].max() - verts[:, 2].min()), 0.30, places=2)
 
 
 if __name__ == "__main__":

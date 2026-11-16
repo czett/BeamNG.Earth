@@ -172,8 +172,9 @@ def generate_topdown_layout_preview():
 
     # Sidewalks & driveways
     for w in walks:
-        pts = w["pts"]
-        d.line([px(pts[0]), px(pts[1])], fill=(195, 198, 202), width=int(round(w["w"] * S)))
+        if "pts" in w:
+            pts = w["pts"]
+            d.line([px(pts[0]), px(pts[1])], fill=(195, 198, 202), width=int(round(w["w"] * S)))
     for dr in drives:
         n = dr["n"]
         d.line([px(n[0]), px(n[1])], fill=(210, 180, 135), width=int(round(dr["w"] * S)))
@@ -440,6 +441,13 @@ def generate_urban_life_topdown_preview():
         {"fid": "r_gevels_w", "pts": np.array([[0.0, 124.0, 0.0], [120.0, 124.0, 0.0]]), "side": -1, "w": 2.0},
         {"fid": "r_gevels_e", "pts": np.array([[136.0, 132.0, 0.0], [256.0, 132.0, 0.0]]), "side": 1, "w": 2.0},
         {"fid": "r_gevels_e", "pts": np.array([[136.0, 124.0, 0.0], [256.0, 124.0, 0.0]]), "side": -1, "w": 2.0},
+        {
+            "corner": {
+                "arc": np.array([[120.0, 132.0, 0.0], [121.5, 133.5, 0.0], [122.0, 135.5, 0.0]]),
+                "inward": np.array([[-0.7, 0.7], [-0.7, 0.7], [-1.0, 0.0]]),
+                "outer": np.array([[120.0, 135.5, 0.0], [118.0, 135.5, 0.0], [118.0, 132.0, 0.0]]),
+            }
+        },
     ]
     b_list = []
     # 10 narrow German front-yard terraced & detached houses along Gevelsbergstraße & curbless Am Büter
@@ -499,7 +507,7 @@ def generate_urban_life_topdown_preview():
     with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
         posts = placement.plan_street_signs(frame, near_roads, box, street_names, [], _flat_ground, rings=[b.ring for b in b_list], drives=drives)
         yard_rows = placement.place_residential_yards(frame, box, items, near_roads, walks, drives, None, [b.ring for b in b_list], _flat_ground, md=fake_md)
-        furn = furniture_de.plan_de_street_furniture(fake_md, frame, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], _flat_ground)
+        furn = furniture_de.plan_de_street_furniture(fake_md, frame, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], _flat_ground, items=items, tx=0, ty=0)
         park_rows = parking_de.refine_parking_spots(fake_md, frame, 0, 0, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], [], _flat_ground)
         hn_targets = classifier.collect_housenumbers(items)
 
@@ -511,8 +519,9 @@ def generate_urban_life_topdown_preview():
         return (float(pt[0]) * S, (256.0 - float(pt[1])) * S)
 
     for w in walks:
-        pts = w["pts"]
-        d.line([px(pts[0]), px(pts[1])], fill=(195, 198, 202), width=int(round(w["w"] * S)))
+        if "pts" in w:
+            pts = w["pts"]
+            d.line([px(pts[0]), px(pts[1])], fill=(195, 198, 202), width=int(round(w["w"] * S)))
     for dr in drives:
         n = dr["n"]
         d.line([px(n[0]), px(n[1])], fill=(210, 180, 135), width=int(round(dr["w"] * S)))

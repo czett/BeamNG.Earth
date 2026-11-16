@@ -28,10 +28,14 @@ end
 worldEditorCppApi = { createObject = function(class) return createObject(class) end }
 Sim = { getDataBlockSet = function() return { addObject = function() end } end }
 loadJsonMaterialsFile = function() end
-local matrices = 0
+local matrices, lastMatrixCol2 = 0, nil
 MatrixF = function()        -- (copies what it is given, as the engine's matrix does)
   matrices = matrices + 1
-  return { setFromEuler = function(self, e) self.e = vec3(e) end, setPosition = function(self, p) self.p = vec3(p) end }
+  return {
+    setFromEuler = function(self, e) self.e = vec3(e) end,
+    setPosition = function(self, p) self.p = vec3(p) end,
+    setColumn = function(self, c, v) if c == 2 then lastMatrixCol2 = vec3(v) end end,
+  }
 end
 local files = {}
 readFile = function(p) return files[p] end
@@ -961,4 +965,18 @@ do -- PROP_LEAD_S: at speed the furniture tiles ahead count nearer for the group
 end
 T.check(trees.spareWanted(trees.FRAME_MS) == 0 and trees.spareWanted(trees.LOADING_FRAME_MS) >= trees.POOL_SPARE,
   'no spare Forests while driving by default (POOL_SPARE_DRIVE 0)')
+do -- fr_hedge uses non-uniform MatrixF column scaling (sxy=0.75, Z-boosted height) with scalar scale 1
+  local sxy, sz = trees.hedgeScale(1.35, 1.35)
+  T.check(math.abs(sxy - 0.75) < 1e-6 and math.abs(sz - 1.65) < 1e-6, 'hedgeScale computes tight sxy and Z boost')
+  lastMatrixCol2 = nil
+  trees.onRows(8, 'p0_0', { { 0, 50, 50, 0, 0, 1, 1.35, 0.0 } }, { 'fr_hedge' })
+  trees.update(8, { x = 50, y = 50 })
+  local foundHedge = false
+  for it in pairs(items) do
+    if it.m.p.x == 50 and it.m.p.y == 50 and it.sc == 1 then foundHedge = true end
+  end
+  T.check(foundHedge and lastMatrixCol2 and math.abs(lastMatrixCol2.z - 1.65) < 1e-4, 'fr_hedge applies non-uniform Z-scale via setColumn with scalar 1')
+  trees.dropKey('8:p0_0')
+  trees.update(8, { x = 50, y = 50 })
+end
 T.done('test_trees')
