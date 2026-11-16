@@ -415,8 +415,14 @@ for group, asset in pairs(require('beamngEarth/frFenceAssets')) do
   M.GROUP_MAX_M[group] = 320
   M.ONE_SPELLING[group] = true
 end
-M.CATALOG.fr_hedge = { M.CATALOG.shrub[1] } -- Stock East Coast USA broadleaf shrub.
+M.CATALOG.fr_hedge = { { ECA .. 'trees/ECA_coast_bush/generibush', 1.35 } } -- Stock ECA broadleaf bush, Z-boosted to manicured hedge height.
 M.CATALOG.fr_fence_hedge = M.CATALOG.fr_hedge -- Older server rows still use the same stock bush.
+M.HEDGE_SXY = 0.75
+M.HEDGE_Z_BOOST = 1.65
+function M.hedgeScale(h, refH)
+  local base = (tonumber(h) or 1.25) / math.max(tonumber(refH) or 1.35, 0.1)
+  return M.HEDGE_SXY, math.max(0.5, math.min(3.5, base * M.HEDGE_Z_BOOST))
+end
 M.GROUP_MAX_M.fr_hedge = 350
 M.GROUP_MAX_M.fr_fence_hedge = 350
 M.ONE_SPELLING.fr_hedge = true
@@ -1034,6 +1040,7 @@ local function makeItem(fd, t, i, shape, sc, solid, group, variant)
   else
     itemPos:set(f[b + F_X], f[b + F_Y], f[b + F_Z])
   end
+  local itemScale = sc
   if t.s >= 17 and type(f[b + 17]) == 'number' then
     -- Guardrails carry their orthonormal world-space basis; local X follows the road chord. (A geotile's: in its
     -- frame, turned by its placement's rotation.)
@@ -1046,13 +1053,23 @@ local function makeItem(fd, t, i, shape, sc, solid, group, variant)
       itemVec:set(vx, vy, vz); m:setColumn(c, itemVec)
     end
     m:setPosition(itemPos)
+  elseif (group == 'fr_hedge' or group == 'fr_fence_hedge') and m.setColumn then
+    -- Non-uniform XYZ scale via MatrixF columns (PF3 probe) so generibush renders as a tight, upright 1.15-1.40 m hedge.
+    local yaw = -math.rad(f[b + F_YAW] + yawAdd)
+    local sxy, sz = M.hedgeScale(f[b + F_HEIGHT], M.CATALOG.fr_hedge[1][2])
+    local c, s = math.cos(yaw), math.sin(yaw)
+    itemVec:set(c * sxy, s * sxy, 0); m:setColumn(0, itemVec)
+    itemVec:set(-s * sxy, c * sxy, 0); m:setColumn(1, itemVec)
+    itemVec:set(0, 0, sz); m:setColumn(2, itemVec)
+    m:setPosition(itemPos)
+    itemScale = 1
   else
     -- Existing props use a flat yaw (counter-clockwise in server coordinates).
     itemVec:set(0, 0, -math.rad(f[b + F_YAW] + yawAdd))
     m:setFromEuler(itemVec)
     m:setPosition(itemPos)
   end
-  local ok, it = pcall(function() return fd:createNewItem(d, m, sc) end)
+  local ok, it = pcall(function() return fd:createNewItem(d, m, itemScale) end)
   if not ok then M.errors = M.errors + 1; return nil end
   local body = vienna.body(group) or townsigns.body(group)
   if body then
