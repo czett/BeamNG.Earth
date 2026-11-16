@@ -281,7 +281,7 @@ def render_bus_stop_panel(stop_name: str, w: int = SLOT_W, h: int = SLOT_H) -> I
     cx, cy = split_x // 2, h // 2
     rad = min(split_x // 2 - pad - 2, h // 2 - pad - 2)
     draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=(244, 198, 12), outline=(12, 108, 52), width=4)
-    font_h = _load_font(max(18, int(rad * 1.45)), bold=True, condensed=False)
+    font_h = _load_font(max(18, int(rad * 1.45)), condensed=False)
     bx_h = draw.textbbox((0, 0), "H", font=font_h)
     draw.text((cx - (bx_h[2] - bx_h[0]) / 2.0 - bx_h[0], cy - (bx_h[3] - bx_h[1]) / 2.0 - bx_h[1]), "H", font=font_h, fill=(12, 108, 52))
 
@@ -291,7 +291,7 @@ def render_bus_stop_panel(stop_name: str, w: int = SLOT_W, h: int = SLOT_H) -> I
     hdr_h = int((h - 2 * pad) * 0.46)
     draw.rectangle([tx0, pad, tx1, pad + hdr_h], fill=(12, 108, 52))
     label = " ".join(str(stop_name or "Haltestelle").split()) or "Haltestelle"
-    fitted, font_lbl, bx_l = _fit_text(draw, label, max(60, tx1 - tx0 - 10), max(12, hdr_h - 4), bold=True)
+    fitted, font_lbl, bx_l = _fit_text(draw, label, max(60, tx1 - tx0 - 10), max(12, hdr_h - 4))
     draw.text((tx0 + 6 - bx_l[0], pad + (hdr_h - (bx_l[3] - bx_l[1])) / 2.0 - bx_l[1]), fitted, font=font_lbl, fill=(255, 255, 255))
 
     # Timetable rows below header
@@ -368,7 +368,7 @@ def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H
         # Royal-blue German Hausnummer enamel with crisp white border.
         draw.rectangle([cx0 + 3, cy0 + 3, cx0 + cell_w - 4, cy0 + cell_h - 4], fill=(14, 54, 114), outline=(238, 240, 244), width=2)
         txt = str(num).strip()[:6]
-        fitted, font, bx = _fit_text(draw, txt, cell_w - 16, cell_h - 10, bold=True, condensed=False)
+        fitted, font, bx = _fit_text(draw, txt, cell_w - 16, cell_h - 10)
         tw, th = bx[2] - bx[0], bx[3] - bx[1]
         draw.text((cx0 + (cell_w - tw) / 2.0 - bx[0], cy0 + (cell_h - th) / 2.0 - bx[1]), fitted, font=font, fill=(250, 250, 250))
     return img
