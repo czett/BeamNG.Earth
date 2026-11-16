@@ -1954,27 +1954,6 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
             de_faces_map.update(st_face)
         if de_yard_rows:
             props = (props or []) + de_yard_rows
-    if park is not None:
-        park = de_enhancer.refine_parking(
-            _s.md,
-            frame,
-            tx,
-            ty,
-            box,
-            near_roads,
-            (walks if walks_raw is None else walks_raw) if buildings else walks,
-            props or [],
-            de_drives_all,
-            de_garage_drives,
-            de_rings,
-            park,
-            lambda x, y: (
-                np.zeros(0, np.float64)
-                if len(x) == 0
-                else roadmeshmod.drawn_ground(frame, drawn, np.c_[x, y], q)
-            ),
-            cells=cells,
-        )
     P.de_streets, P.de_shops, P.de_faces = de_streets_blob, de_shops_blob, (de_faces_map or None)
     P.signs = signs
     P.chunks, P.ctx, P.walks, P.box, P.origin = chunks, ctx, walks, box, (x0, y0, 0.0)

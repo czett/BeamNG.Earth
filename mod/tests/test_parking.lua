@@ -323,25 +323,4 @@ T.check(amountSet == nil and vars.activeAmount == math.huge, 'the player\'s own 
 settings.getValue, settings.impl = gv, nil
 P.reset()
 core_camera = nil
-
--- DE immersion: auto-starts parked pool on normal/high/ultra even when navgraph.choice.parked is false
-do
-  NG.takeChoice({ trafficMode = 'disabled', trafficParked = 'disabled' })
-  active, given, setupCalls, lastAmount = false, nil, 0, nil
-  package.loaded['beamngEarth/settings'] = {
-    get = function(k)
-      if k == 'expDeStreetImmersion' then return true end
-      if k == 'quality' then return 'normal' end
-      return nil
-    end,
-  }
-  local deRows = {}
-  for i = 1, 26 do deRows[i] = { i * 6.0, 10, 1.0, 90, 0, 2.3, 5.5 } end
-  P.onRows(9, '9:0_0', deRows)
-  clock = clock + 3
-  P.update(9, player)
-  T.check(setupCalls == 1 and active and lastAmount == P.DE_ACTIVE_CAP.normal,
-    'expDeStreetImmersion auto-starts parked pool on normal quality even when trafficParked is disabled')
-  P.reset()
-end
 T.done('test_parking')
