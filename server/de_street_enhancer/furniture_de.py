@@ -421,6 +421,8 @@ def plan_de_street_furniture(
     items: list | None = None,
     tx: int | None = None,
     ty: int | None = None,
+    arms_map: dict | None = None,
+    rings_arr: list[np.ndarray] | None = None,
 ) -> FurniturePlan:
     """Plan German bus stops, Stromkästen, Packstationen, Altglascontainer, and corner bollards."""
     empty = FurniturePlan((), (), (), (), (), ())
@@ -431,7 +433,8 @@ def plan_de_street_furniture(
     tram_lines = classifier.tram_polylines(md, frame, tx, ty)
     walk_polys = _outer_walk_polygons(walks)
     door_pts = _door_points(items, box)
-    rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
+    if rings_arr is None:
+        rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
     drive_pts: list[tuple[float, float]] = []
     for d in list(drives or ()) + list(garage_drives or ()):
         xy = _finite_2d(d.get("n"), min_pts=2)
@@ -439,7 +442,8 @@ def plan_de_street_furniture(
             drive_pts.append((float(xy[-1, 0]), float(xy[-1, 1])))
 
     junc_pts: list[tuple[float, float]] = []
-    arms_map = furniture._arms(near_roads) or {}
+    if arms_map is None:
+        arms_map = furniture._arms(near_roads) or {}
     for _k, arms in arms_map.items():
         if len(arms) >= 2:
             p = np.asarray(arms[0][3], dtype=np.float64)
@@ -560,23 +564,16 @@ def plan_de_street_furniture(
                         sup_rec_xy.append((float(pt[0]), float(pt[1])))
 
         # Also scan Overture `places` for fuel stations when `infrastructure` had none at that site.
-        for cell_key in mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon):
-            try:
-                cd = md.cell(cell_key, layers=("places",), kind="demand")
-                p_feats = cd.layers.get("places")
-            except Exception:
+        bbox_cells = list(mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon))
+        for cand, xy_local in classifier.load_tile_pois(md, frame, bbox_cells, 0.0, 0.0):
+            cat = (cand.category or "").lower()
+            if cat not in ("gas_station", "fueling_station"):
                 continue
-            if p_feats is None or len(p_feats) == 0:
+            if not roadsmod.box_owns(box, float(xy_local[0]), float(xy_local[1])):
                 continue
-            for cand, xy_local in classifier.load_tile_pois(md, frame, [(cell_key, p_feats)], 0.0, 0.0):
-                cat = (cand.category or "").lower()
-                if cat not in ("gas_station", "fueling_station"):
-                    continue
-                if not roadsmod.box_owns(box, float(xy_local[0]), float(xy_local[1])):
-                    continue
-                if any(math.hypot(float(xy_local[0]) - float(fp[0]), float(xy_local[1]) - float(fp[1])) < 35.0 for fp, _, _ in fuel_cands):
-                    continue
-                fuel_cands.append((xy_local, cand.fid, cand.brand or cand.name or ""))
+            if any(math.hypot(float(xy_local[0]) - float(fp[0]), float(xy_local[1]) - float(fp[1])) < 35.0 for fp, _, _ in fuel_cands):
+                continue
+            fuel_cands.append((xy_local, cand.fid, cand.brand or cand.name or ""))
 
     fuel_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray, str, str, str, str, str]] = []
     placed_fuel_xy: list[tuple[float, float]] = []
@@ -796,9 +793,16 @@ def plan_de_street_furniture(
     )
 
 
-def append_furniture_geometry(mb, plan: FurniturePlan, uv_map: dict[str, tuple[float, float, float, float]]) -> None:
+def append_furniture_geometry(
+    mb,
+    plan: FurniturePlan,
+    uv_map: dict[str, tuple[float, float, float, float]],
+    macro_only: bool = False,
+) -> None:
     """Append watertight closed prisms & posts for all planned German street furniture into `_MeshBuilder`."""
     if not plan.has_any:
+        return
+    if macro_only and not plan.bus_stops and not plan.fuel_pylons:
         return
     axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     sw_uv = uv_map.get(FURNITURE_SWATCH_KEY)
@@ -855,36 +859,37 @@ def append_furniture_geometry(mb, plan: FurniturePlan, uv_map: dict[str, tuple[f
             mb.add_box(np.array([post_xy[0], post_xy[1], stop.z + 1.56]), ax, ay, axis_z, 0.14, 0.018, 0.21, tt_uv, tt_uv, body_mat=0, face_mat=1)
 
     # 2. Utility Cabinets (`Stromkästen`)
-    cab_uv = sw("stromkasten")
-    for cab in plan.cabinets:
-        ax = np.array([float(cab.along[0]), float(cab.along[1]), 0.0], dtype=np.float64)
-        ay = np.array([float(cab.toward_road[0]), float(cab.toward_road[1]), 0.0], dtype=np.float64)
-        mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.04]), ax, ay, axis_z, 0.48, 0.22, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1)
-        mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.68]), ax, ay, axis_z, 0.46, 0.20, 0.56, cab_uv, cab_uv, body_mat=1, face_mat=1)
+    if not macro_only:
+        cab_uv = sw("stromkasten")
+        for cab in plan.cabinets:
+            ax = np.array([float(cab.along[0]), float(cab.along[1]), 0.0], dtype=np.float64)
+            ay = np.array([float(cab.toward_road[0]), float(cab.toward_road[1]), 0.0], dtype=np.float64)
+            mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.04]), ax, ay, axis_z, 0.48, 0.22, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1)
+            mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.68]), ax, ay, axis_z, 0.46, 0.20, 0.56, cab_uv, cab_uv, body_mat=1, face_mat=1)
 
-    # 3. DHL `Packstationen`
-    lock_uv = sw("packstation")
-    for lk in plan.lockers:
-        ax = np.array([float(lk.along[0]), float(lk.along[1]), 0.0], dtype=np.float64)
-        ay = np.array([float(lk.toward_road[0]), float(lk.toward_road[1]), 0.0], dtype=np.float64)
-        mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 1.02]), ax, ay, axis_z, 1.20, 0.34, 1.08, lock_uv, lock_uv, body_mat=1, face_mat=1)
-        mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 2.12]), ax, ay, axis_z, 1.24, 0.38, 0.04, steel_uv, steel_uv, body_mat=1, face_mat=1)
+        # 3. DHL `Packstationen`
+        lock_uv = sw("packstation")
+        for lk in plan.lockers:
+            ax = np.array([float(lk.along[0]), float(lk.along[1]), 0.0], dtype=np.float64)
+            ay = np.array([float(lk.toward_road[0]), float(lk.toward_road[1]), 0.0], dtype=np.float64)
+            mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 1.02]), ax, ay, axis_z, 1.20, 0.34, 1.08, lock_uv, lock_uv, body_mat=1, face_mat=1)
+            mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 2.12]), ax, ay, axis_z, 1.24, 0.38, 0.04, steel_uv, steel_uv, body_mat=1, face_mat=1)
 
-    # 4. `Altglascontainer` Trio (Weiss / Braun / Grün)
-    alt_uvs = (sw("altglas_w"), sw("altglas_b"), sw("altglas_g"))
-    for rc in plan.recyclers:
-        ax = np.array([float(rc.along[0]), float(rc.along[1]), 0.0], dtype=np.float64)
-        ay = np.array([float(rc.toward_road[0]), float(rc.toward_road[1]), 0.0], dtype=np.float64)
-        for idx_b, b_off in enumerate((-0.92, 0.0, 0.92)):
-            c_bin = np.array([rc.xy[0] + ax[0] * b_off, rc.xy[1] + ax[1] * b_off, rc.z + 0.72])
-            mb.add_box(c_bin, ax, ay, axis_z, 0.40, 0.44, 0.76, alt_uvs[idx_b], alt_uvs[idx_b], body_mat=1, face_mat=1)
+        # 4. `Altglascontainer` Trio (Weiss / Braun / Grün)
+        alt_uvs = (sw("altglas_w"), sw("altglas_b"), sw("altglas_g"))
+        for rc in plan.recyclers:
+            ax = np.array([float(rc.along[0]), float(rc.along[1]), 0.0], dtype=np.float64)
+            ay = np.array([float(rc.toward_road[0]), float(rc.toward_road[1]), 0.0], dtype=np.float64)
+            for idx_b, b_off in enumerate((-0.92, 0.0, 0.92)):
+                c_bin = np.array([rc.xy[0] + ax[0] * b_off, rc.xy[1] + ax[1] * b_off, rc.z + 0.72])
+                mb.add_box(c_bin, ax, ay, axis_z, 0.40, 0.44, 0.76, alt_uvs[idx_b], alt_uvs[idx_b], body_mat=1, face_mat=1)
 
-    # 5. Corner Sidewalk `Poller`
-    pol_uv = sw("poller")
-    ax_default = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-    ay_default = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-    for bol in plan.bollards:
-        mb.add_box(np.array([bol.xy[0], bol.xy[1], bol.z + 0.40]), ax_default, ay_default, axis_z, 0.055, 0.055, 0.48, pol_uv, pol_uv, body_mat=1, face_mat=1)
+        # 5. Corner Sidewalk `Poller`
+        pol_uv = sw("poller")
+        ax_default = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        ay_default = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        for bol in plan.bollards:
+            mb.add_box(np.array([bol.xy[0], bol.xy[1], bol.z + 0.40]), ax_default, ay_default, axis_z, 0.055, 0.055, 0.48, pol_uv, pol_uv, body_mat=1, face_mat=1)
 
     # 6. Fuel Station Price Pylons (`Preistafel`, ~1.20 m x 0.25 m x 3.80 m)
     for fp in plan.fuel_pylons:

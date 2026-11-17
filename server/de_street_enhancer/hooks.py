@@ -69,6 +69,7 @@ def prepare_commercial_fascias(
         out_dir,
         vfs_dir,
         prefix="sh",
+        skip_render_if_cached=True,
     )
     if not mat_name or not vfs_tex:
         return None, None, set()
@@ -129,9 +130,13 @@ def build_streets_and_yards(
     vfs_dir: str | None,
 ) -> tuple[dict | None, bytes | None, list[list]]:
     """Build Feature A (street name signs `.cdae` bytes + atlas) and Feature C (residential yard props)."""
+    import furniture
+
     x0, y0, _, _ = box
     street_face = None
     street_blob = None
+    rings_arr = [rr for r in (rings or ()) if (rr := placement._finite_2d(r, min_pts=3)) is not None]
+    arms_map = furniture._arms(near_roads) if near_roads else {}
 
     if near_roads and out_dir is not None and vfs_dir is not None:
         posts = (
@@ -145,6 +150,8 @@ def build_streets_and_yards(
                 rings=rings,
                 drives=drives,
                 style_variant="blue",
+                arms_map=arms_map,
+                rings_arr=rings_arr,
             )
             if street_names
             else []
@@ -163,6 +170,8 @@ def build_streets_and_yards(
             items=items,
             tx=tx,
             ty=ty,
+            arms_map=arms_map,
+            rings_arr=rings_arr,
         )
         if furn_plan.suppressed_recycle_xy and isinstance(props, list):
             props[:] = [
@@ -206,6 +215,7 @@ def build_streets_and_yards(
                 out_dir,
                 vfs_dir,
                 prefix="st",
+                skip_render_if_cached=True,
             )
             if mat_name and vfs_tex:
                 street_blob = placement.encode_streets_and_furniture_mesh(posts, furn_plan, mat_name, uv_map, (x0, y0, 0.0))
@@ -225,6 +235,7 @@ def build_streets_and_yards(
             rings or [],
             ground,
             md=md,
+            rings_arr=rings_arr,
         )
 
     return street_face, street_blob, yard_rows

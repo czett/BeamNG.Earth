@@ -170,16 +170,25 @@ def _points_near_segments_safe(
     expanded_blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
 ) -> bool:
     """Guarded wrapper around `fast._ef.points_near_segments` rejecting empty or misshaped arrays."""
+    mask = _points_near_segments_mask(pts, expanded_blocks)
+    return bool(mask is not None and mask.any())
+
+
+def _points_near_segments_mask(
+    pts,
+    expanded_blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+) -> np.ndarray | None:
+    """Return boolean `(N,)` mask from `fast._ef.points_near_segments`, or None when invalid/empty."""
     if expanded_blocks is None:
-        return False
+        return None
     a, b, hw = expanded_blocks
     pts_arr = np.asarray(pts, dtype=np.float64)
     if pts_arr.ndim == 1:
         if pts_arr.shape[0] != 2:
-            return False
+            return None
         pts_arr = pts_arr.reshape(1, 2)
     if pts_arr.ndim != 2 or pts_arr.shape[0] == 0 or pts_arr.shape[1] != 2:
-        return False
+        return None
     if (
         a.ndim != 2
         or b.ndim != 2
@@ -189,12 +198,12 @@ def _points_near_segments_safe(
         or a.shape[1] != 2
         or hw.shape[0] != a.shape[0]
     ):
-        return False
+        return None
     pts_c = np.ascontiguousarray(pts_arr, dtype=np.float64)
     if not np.isfinite(pts_c).all():
-        return False
+        return None
     fast.require(0, "points_near_segments")
-    return bool(np.asarray(fast._ef.points_near_segments(pts_c, a, b, hw)).any())
+    return np.asarray(fast._ef.points_near_segments(pts_c, a, b, hw), dtype=bool)
 
 
 class _MeshBuilder:
@@ -339,7 +348,11 @@ class _MeshBuilder:
             raise ValueError("Invalid mesh array shapes for cdae encoding")
         return pos, tris, norms, uvs, tm
 
-    def encode(self) -> bytes:
+    def _lod_dict(self) -> dict:
+        pos, tris, _norms, uvs, tm = self._arrays()
+        return {"positions": pos, "tris": tris, "uvs": uvs, "tri_materials": tm}
+
+    def encode(self, lods=None) -> bytes:
         pos, tris, norms, uvs, tm = self._arrays()
         return cdae.encode(
             pos,
@@ -349,6 +362,7 @@ class _MeshBuilder:
             material=self.materials,
             tri_materials=tm,
             close=False,
+            lods=lods,
         )
 
     def write(self, path: str) -> int:
@@ -412,12 +426,14 @@ def plan_street_signs(
     rings: list[np.ndarray] | None = None,
     drives: list[dict] | None = None,
     style_variant: str = "blue",
+    arms_map: dict | None = None,
+    rings_arr: list[np.ndarray] | None = None,
 ) -> list[StreetSignPost]:
     """Compute collision-safe German street name sign assemblies for junctions inside `box`."""
     if not roads or not street_names:
         return []
 
-    junctions = furniture._arms(roads)
+    junctions = arms_map if arms_map is not None else furniture._arms(roads)
     if not junctions:
         return []
 
@@ -487,7 +503,8 @@ def plan_street_signs(
         return []
     in_de = germany.de_at(frame, check_xs, check_ys)
 
-    rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
+    if rings_arr is None:
+        rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
 
     for (jx, jy, jz, arms, uniq_streets), ok in zip(de_checks, in_de):
         if not ok:
@@ -655,7 +672,17 @@ def encode_streets_and_furniture_mesh(
     if has_furn:
         furniture_de.append_furniture_geometry(mb, furn_plan, uv_map)
 
-    return None if mb.empty() else mb.encode()
+    if mb.empty():
+        return None
+
+    lods = None
+    if has_furn and (furn_plan.fuel_pylons or furn_plan.bus_stops):
+        macro_mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=origin)
+        furniture_de.append_furniture_geometry(macro_mb, furn_plan, uv_map, macro_only=True)
+        if not macro_mb.empty() and len(macro_mb.tris) < len(mb.tris):
+            lods = [(300.0, macro_mb._lod_dict())]
+
+    return mb.encode(lods=lods)
 
 
 def encode_street_signs_mesh(
@@ -741,7 +768,39 @@ def encode_shop_and_housenumbers_mesh(
             face_mat=1,
         )
 
-    return None if mb.empty() else mb.encode()
+    if mb.empty():
+        return None
+
+    # Coarse LOD keeps illuminated shop fascias visible down the block while culling sub-meter
+    # house-number plaques beyond ~80-120 m.
+    lods = None
+    if targets and hn_targets:
+        macro_mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=(0.0, 0.0, 0.0))
+        for t in targets:
+            uv = uv_map.get(f"shop|{t.spec_brand.key}|{t.label}")
+            if uv is None:
+                continue
+            axis_x = np.array([float(t.d_along[0]), float(t.d_along[1]), 0.0], dtype=np.float64)
+            axis_y = np.array([float(t.out_normal[0]), float(t.out_normal[1]), 0.0], dtype=np.float64)
+            z_mid = 0.5 * (t.z_bottom + t.z_top)
+            center = np.array([float(t.center_xy[0]), float(t.center_xy[1]), z_mid], dtype=np.float64)
+            macro_mb.add_box(
+                center=center,
+                axis_x=axis_x,
+                axis_y=axis_y,
+                axis_z=axis_z,
+                hx=t.width_m * 0.5,
+                hy=FASCIA_THICK_M * 0.5,
+                hz=t.height_m * 0.5,
+                front_uv=uv,
+                back_uv=None,
+                body_mat=0,
+                face_mat=1,
+            )
+        if not macro_mb.empty() and len(macro_mb.tris) < len(mb.tris):
+            lods = [(300.0, macro_mb._lod_dict())]
+
+    return mb.encode(lods=lods)
 
 
 def encode_shop_fascias_mesh(
@@ -909,6 +968,7 @@ def place_residential_yards(
     rings: list[np.ndarray],
     ground,
     md=None,
+    rings_arr: list[np.ndarray] | None = None,
 ) -> list[list]:
     """Generate DE residential front-yard hedges & fences respecting driveways and sidewalks."""
     if not items or not near_roads:
@@ -1075,26 +1135,53 @@ def place_residential_yards(
 
     # Final spatial safety pass against all carriageways, sidewalks, driveways, and buildings.
     drive_blocks = _expand_blocker_segments(access_lines, extra_hw=0.25)
-    cleared: list[tuple] = []
-    rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
+    if rings_arr is None:
+        rings_arr = [rr for r in (rings or ()) if (rr := _finite_2d(r, min_pts=3)) is not None]
     closed_rings = [(np.vstack([rr, rr[:1]]), 0.0) for rr in rings_arr]
     hedge_wall_blocks = _expand_blocker_segments(closed_rings, extra_hw=DE_YARD_HEDGE_WALL_CLEAR_M)
     fence_wall_blocks = _expand_blocker_segments(closed_rings, extra_hw=DE_YARD_FENCE_WALL_CLEAR_M)
+
+    cand_rows: list[tuple] = []
+    cand_xy: list[tuple[float, float]] = []
     for row in pending:
-        grp, px, py = row[0], float(row[1]), float(row[2])
-        if not (math.isfinite(px) and math.isfinite(py)) or not roadsmod.box_owns(box, px, py):
+        px, py = float(row[1]), float(row[2])
+        if math.isfinite(px) and math.isfinite(py) and roadsmod.box_owns(box, px, py):
+            cand_rows.append(row)
+            cand_xy.append((px, py))
+    if not cand_rows:
+        return []
+
+    pts_all = np.asarray(cand_xy, dtype=np.float64)
+    blocked = np.zeros(len(cand_rows), dtype=bool)
+    for blk in (road_blocks, walk_blocks, drive_blocks):
+        m = _points_near_segments_mask(pts_all, blk)
+        if m is not None:
+            blocked |= m
+
+    is_hedge = np.array([r[0] == DE_HEDGE_GROUP for r in cand_rows], dtype=bool)
+    if is_hedge.any():
+        m_hw = _points_near_segments_mask(pts_all[is_hedge], hedge_wall_blocks)
+        if m_hw is not None:
+            blocked[is_hedge] |= m_hw
+    if (~is_hedge).any():
+        m_fw = _points_near_segments_mask(pts_all[~is_hedge], fence_wall_blocks)
+        if m_fw is not None:
+            blocked[~is_hedge] |= m_fw
+
+    ring_bbs = [
+        (rr, float(rr[:, 0].min()), float(rr[:, 1].min()), float(rr[:, 0].max()), float(rr[:, 1].max()))
+        for rr in rings_arr
+    ]
+    cleared: list[tuple] = []
+    for idx_r, row in enumerate(cand_rows):
+        if blocked[idx_r]:
             continue
-        pt = np.array([[px, py]], dtype=np.float64)
-        if _points_near_segments_safe(pt, road_blocks):
-            continue
-        if _points_near_segments_safe(pt, walk_blocks):
-            continue
-        if drive_blocks is not None and _points_near_segments_safe(pt, drive_blocks):
-            continue
-        if any(classifier._point_in_ring(pt[0], rr) for rr in rings_arr):
-            continue
-        wall_blocks = hedge_wall_blocks if grp == DE_HEDGE_GROUP else fence_wall_blocks
-        if _points_near_segments_safe(pt, wall_blocks):
+        px, py = cand_xy[idx_r]
+        pt_v = pts_all[idx_r]
+        if any(
+            rx0 <= px <= rx1 and ry0 <= py <= ry1 and classifier._point_in_ring(pt_v, rr)
+            for rr, rx0, ry0, rx1, ry1 in ring_bbs
+        ):
             continue
         cleared.append(row)
 

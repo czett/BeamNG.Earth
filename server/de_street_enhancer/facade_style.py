@@ -130,6 +130,27 @@ NEIGHBOR_CLEAR_M = 0.75
 SOCKEL_HEIGHT_M = 0.75
 EAVE_AO_HEIGHT_M = 0.35
 
+_EXCLUDE_MATS_CACHE: tuple[int, np.ndarray] | None = None
+
+
+def _wall_exclude_mats_arr(bld) -> np.ndarray:
+    global _EXCLUDE_MATS_CACHE
+    mats = bld.MATERIALS
+    if _EXCLUDE_MATS_CACHE is not None and _EXCLUDE_MATS_CACHE[0] == id(mats):
+        return _EXCLUDE_MATS_CACHE[1]
+    arr = np.array([
+        mats.index(m)
+        for m in (
+            bld.ROOF_FLAT, bld.ROOF_SLATE, bld.ROOF_SHINGLE, bld.ROOF_METAL,
+            bld.ROOF_TILES, bld.ROOF_SLATE_ROUND, bld.ROOF_SLATE_DARK, bld.ROOF_WOOD,
+            bld.MARBLE, bld.SKY_WALL, bld.SKY_WALL_DAY,
+            bld.LANDMARK_IRON, bld.LANDMARK_STONE, bld.LANDMARK_LAMP,
+            bld.LANDMARK_FLOODLIT, bld.LANDMARK_DIAL,
+        )
+    ], dtype=np.int64)
+    _EXCLUDE_MATS_CACHE = (id(mats), arr)
+    return arr
+
 
 def _h01(*parts) -> float:
     h = hashlib.blake2b("|".join(str(p) for p in parts).encode("utf-8"), digest_size=8).digest()
@@ -679,16 +700,7 @@ def bake_building_depth(
     if not len(T):
         return
 
-    wall_exclude_mats = {
-        bld.MATERIALS.index(m)
-        for m in (
-            bld.ROOF_FLAT, bld.ROOF_SLATE, bld.ROOF_SHINGLE, bld.ROOF_METAL,
-            bld.ROOF_TILES, bld.ROOF_SLATE_ROUND, bld.ROOF_SLATE_DARK, bld.ROOF_WOOD,
-            bld.MARBLE, bld.SKY_WALL, bld.SKY_WALL_DAY,
-            bld.LANDMARK_IRON, bld.LANDMARK_STONE, bld.LANDMARK_LAMP,
-            bld.LANDMARK_FLOODLIT, bld.LANDMARK_DIAL,
-        )
-    }
+    wall_exclude_arr = _wall_exclude_mats_arr(bld)
     white_facade_mi = mat_idx["bne_bld_fac_white"][0]
     shop_mi = mat_idx[bld.SHOP][0]
     lobby_mi = mat_idx[bld.LOBBY][0]
@@ -709,7 +721,7 @@ def bake_building_depth(
             t_odd = T[1:2 * pair_n:2]
             v0 = t_even[:, 0]
             m_even = M[0:2 * pair_n:2]
-            is_wall_mat = ~np.isin(m_even, list(wall_exclude_mats))
+            is_wall_mat = ~np.isin(m_even, wall_exclude_arr)
             if spec.wall:
                 is_wall_mat &= (m_even != white_facade_mi)
             is_seq_quad = (
@@ -812,18 +824,18 @@ def bake_building_depth(
     n_vec = np.cross(P[T[:, 1]] - v0, P[T[:, 2]] - v0)
     n_len = np.linalg.norm(n_vec, axis=1)
     nz = np.abs(n_vec[:, 2]) / np.maximum(n_len, 1e-12)
-    is_wall_tri = (nz < 0.35) & (~np.isin(M, list(wall_exclude_mats)))
+    is_wall_tri = (nz < 0.35) & (~np.isin(M, wall_exclude_arr))
     if not is_wall_tri.any():
         mesh.set_raw_arrays(P, UV, T, M, C)
         return
 
     wall_verts = np.unique(T[is_wall_tri].ravel())
+    win_mask = np.zeros(len(P), dtype=bool)
     if spec.wall:
         # Never darken laid-over white window frames in Sockel pass
         win_tris = is_wall_tri & (M == white_facade_mi)
-        win_verts = set(np.unique(T[win_tris].ravel()).tolist()) if win_tris.any() else set()
-    else:
-        win_verts = set()
+        if win_tris.any():
+            win_mask[T[win_tris]] = True
 
     # Check which vertices belong to shopfront/lobby materials (gentler base darkening)
     shop_tris = is_wall_tri & np.isin(M, [shop_mi, lobby_mi])
@@ -889,27 +901,27 @@ def bake_building_depth(
             if len(base_pts) >= 2:
                 gable_xy_segs.append((base_pts[0, :2], base_pts[1, :2]))
 
-    def _on_gable_base(xy_pt: np.ndarray) -> bool:
-        for ga, gb in gable_xy_segs:
-            ab = gb - ga
-            l2 = float(np.dot(ab, ab))
-            if l2 < 1e-4:
-                continue
-            t = float(np.dot(xy_pt - ga, ab) / l2)
-            if -0.05 <= t <= 1.05:
-                proj = ga + np.clip(t, 0.0, 1.0) * ab
-                if float(np.hypot(xy_pt[0] - proj[0], xy_pt[1] - proj[1])) < 0.25:
-                    return True
-        return False
-
     # B) Under-Eave Ambient Occlusion (top 0.35 m below z_eave) & gable rake darkening
     eave_lo = float(z_eave) - EAVE_AO_HEIGHT_M
     ao_min = 0.72 if spec.roof != "flat" else 0.78
     eave_mask = (zw >= eave_lo) & (zw <= float(z_eave) + 0.03)
     if eave_mask.any() and gable_xy_segs:
-        for idx_local in np.flatnonzero(eave_mask):
-            if _on_gable_base(pts_w[idx_local, :2]):
-                eave_mask[idx_local] = False
+        eave_idx = np.flatnonzero(eave_mask)
+        eave_xy = pts_w[eave_idx, :2]  # (K, 2)
+        ga = np.asarray([s[0] for s in gable_xy_segs], dtype=np.float64)  # (S, 2)
+        gb = np.asarray([s[1] for s in gable_xy_segs], dtype=np.float64)  # (S, 2)
+        ab = gb - ga
+        l2 = (ab * ab).sum(axis=1)
+        valid_s = l2 >= 1e-4
+        if valid_s.any():
+            ga_v, ab_v, l2_v = ga[valid_s], ab[valid_s], l2[valid_s]
+            diff = eave_xy[:, None, :] - ga_v[None, :, :]
+            t_seg = (diff * ab_v[None, :, :]).sum(axis=2) / l2_v[None, :]
+            in_span = (t_seg >= -0.05) & (t_seg <= 1.05)
+            proj = ga_v[None, :, :] + np.clip(t_seg, 0.0, 1.0)[:, :, None] * ab_v[None, :, :]
+            d2 = ((eave_xy[:, None, :] - proj) ** 2).sum(axis=2)
+            on_base = (in_span & (d2 < 0.0625)).any(axis=1)  # 0.25^2 = 0.0625
+            eave_mask[eave_idx[on_base]] = False
     if eave_mask.any():
         v_t = np.clip((zw[eave_mask] - eave_lo) / EAVE_AO_HEIGHT_M, 0.0, 1.0)
         k_eave = 1.0 - (1.0 - ao_min) * v_t
@@ -923,8 +935,8 @@ def bake_building_depth(
         k_gab = 0.98 - 0.20 * gt
         scale[gable_mask] *= k_gab[:, None]
 
-    if win_verts:
-        skip_mask = np.array([int(vi) in win_verts for vi in wall_verts], dtype=bool)
+    skip_mask = win_mask[wall_verts]
+    if skip_mask.any():
         scale[skip_mask] = 1.0
         stone_blend[skip_mask] = 0.0
 
@@ -951,8 +963,8 @@ _BALCONY_SKIP_CLS = frozenset({
 
 
 def _add_box_prism(mesh, center: np.ndarray, axis_x: np.ndarray, axis_y: np.ndarray, axis_z: np.ndarray,
-                   hx: float, hy: float, hz: float, mat_token) -> None:
-    """Append a watertight closed 6-face prism to `buildings.Mesh` (`CCW` outward normals)."""
+                   hx: float, hy: float, hz: float, mat_token, skip_bottom: bool = False) -> None:
+    """Append a watertight closed 6-face prism (or 5-face flush prism) to `buildings.Mesh` (`CCW` outward normals)."""
     ex = axis_x * hx
     ey = axis_y * hy
     ez = axis_z * hz
@@ -969,8 +981,9 @@ def _add_box_prism(mesh, center: np.ndarray, axis_x: np.ndarray, axis_y: np.ndar
     mesh.quad(lc - ey - ez, lc + ey - ez, lc + ey + ez, lc - ey + ez, *uv, mat_token)
     tc = center + ez
     mesh.quad(tc - ex + ey, tc + ex + ey, tc + ex - ey, tc - ex - ey, *uv, mat_token)
-    dc = center - ez
-    mesh.quad(dc - ex - ey, dc + ex - ey, dc + ex + ey, dc - ex + ey, *uv, mat_token)
+    if not skip_bottom:
+        dc = center - ez
+        mesh.quad(dc - ex - ey, dc + ex - ey, dc + ex + ey, dc - ex + ey, *uv, mat_token)
 
 
 def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_eave: float, mat_idx) -> None:
@@ -1034,7 +1047,15 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
 
     # 2. Residential Balconies (`Balkone`) on upper floors (2 <= floors <= 5)
     area = abs(bld._area2(ring)) / 2.0
-    if not (2 <= floors <= 5) or area < 55.0 or mesh.n > 50000:
+    if not (2 <= floors <= 5) or area < 55.0 or mesh.n > 48000:
+        return
+
+    street_edges = set(int(e) for e in (getattr(spec, "street", None) or ()))
+    if getattr(spec, "front", None) is not None:
+        street_edges.add(int(spec.front))
+    if door is not None:
+        street_edges.add(int(door[0]))
+    if not street_edges and area < 75.0:
         return
 
     floor_h = float(getattr(spec, "floor_h", 2.8) or 2.8)
@@ -1043,17 +1064,20 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
     for ei in range(n_edges):
         if eaves is not None and eaves[ei] < 0.25:
             continue
+        if street_edges and ei not in street_edges:
+            continue
         a, b = ring[ei], ring[(ei + 1) % n_edges]
         L = float(math.hypot(*(b - a)))
         if L >= 5.2:
-            # Prefer front door edge or long primary facades
+            # Prefer front door edge or long primary street-facing facades
             score = L + (4.0 if (door is not None and ei == door[0]) else 0.0)
             cand_edges.append((score, ei))
     if not cand_edges:
         return
 
     cand_edges.sort(reverse=True)
-    chosen = [ei for _sc, ei in cand_edges[:2]]
+    max_stacks = 2 if street_edges else 1
+    chosen = [ei for _sc, ei in cand_edges[:max_stacks]]
     bal_w = 2.8
     bal_d = 1.05
 
@@ -1137,7 +1161,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
         or getattr(spec, "deck", False)
         or getattr(spec, "ship", False)
         or getattr(spec, "steeple", False)
-        or mesh.n > 54000
+        or mesh.n > 50000
     ):
         return
     if spec.roof not in ("gabled", "half-hipped", "hipped"):
@@ -1173,10 +1197,12 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
     floors = int(getattr(spec, "floors", 1) or 1)
 
     # 1. Dormers (`Dachgauben`) on pitched residential roofs
+    area_roof = abs(bld._area2(ring)) / 2.0
     if (
         spec.roof in ("gabled", "half-hipped")
         and cls not in _BALCONY_SKIP_CLS
-        and hw >= 3.2
+        and area_roof >= 65.0
+        and hw >= 3.6
         and hl >= 3.5
         and 25.0 <= pitch_deg <= 55.0
         and floors <= 4
@@ -1278,4 +1304,4 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
                 continue
             p_xy = c + u * s_p + v * t_p
             p_c = np.array([p_xy[0], p_xy[1], z_p], dtype=np.float64) + sz_norm * 0.06
-            _add_box_prism(mesh, p_c, sx_axis, sy_axis, sz_norm, mod_w * 0.5, mod_h * 0.5, 0.025, pv_tok)
+            _add_box_prism(mesh, p_c, sx_axis, sy_axis, sz_norm, mod_w * 0.5, mod_h * 0.5, 0.025, pv_tok, skip_bottom=True)

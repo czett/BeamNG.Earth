@@ -147,4 +147,20 @@ T.check(deEnhancer.status().pbrActive == false, 'PBR deactivated when expDeStree
 T.check(mMetal:getField('roughnessFactor', 0) == '0.85', 'bne_bld_metalwall restored on toggle off')
 deEnhancer.clearAll()
 
+-- 9. Performance guard: idle sweep() is a 0-op no-op and active PBR does not re-flush on additional tiles
+T.check(deEnhancer.sweep() == 0, 'idle sweep returns 0')
+settings.set('expDeStreetImmersion', true)
+local flushCount = 0
+local origFlush = mFacade.flush
+mFacade.flush = function(self)
+  flushCount = flushCount + 1
+  if origFlush then return origFlush(self) end
+end
+deEnhancer.retain('0:20_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
+T.check(flushCount == 1, 'first DE tile flushes bne_bld_facade once')
+deEnhancer.retain('0:21_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
+T.check(flushCount == 1, 'second DE tile does not redundantly re-flush bne_bld_facade')
+mFacade.flush = origFlush
+deEnhancer.clearAll()
+
 T.done('test_de_enhancer')

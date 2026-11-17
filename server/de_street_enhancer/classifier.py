@@ -387,12 +387,13 @@ def classify_commercial_buildings(
     targets: list[ShopTarget] = []
     suppress_ids: set[int] = set()
     used_pois: set[int] = set()
-    rings = []
+    rings: list[tuple[np.ndarray, tuple[float, float, float, float]]] = []
     for spec, _, _ in items:
         if (spec.min_h or 0.0) <= 0.5:
             arr = np.asarray(spec.ring, dtype=np.float64)
             if arr.ndim == 2 and arr.shape[0] >= 3 and arr.shape[1] >= 2 and np.isfinite(arr[:, :2]).all():
-                rings.append(arr[:, :2])
+                r2 = arr[:, :2]
+                rings.append((r2, (float(r2[:, 0].min()), float(r2[:, 1].min()), float(r2[:, 0].max()), float(r2[:, 1].max()))))
 
     for idx, (spec, gmin, gmax) in enumerate(items):
         if (spec.min_h or 0.0) > 0.5 or getattr(spec, "portal", False) or getattr(spec, "deck", False) or getattr(spec, "ship", False):
@@ -412,7 +413,14 @@ def classify_commercial_buildings(
         ring = np.asarray(spec.ring, dtype=np.float64)
         if ring.ndim != 2 or ring.shape[0] < 3 or ring.shape[1] < 2 or not np.isfinite(ring[:, :2]).all():
             continue
-        others = [r for r in rings if r is not ring and not np.array_equal(r, ring)]
+        rx0, ry0 = float(ring[:, 0].min()), float(ring[:, 1].min())
+        rx1, ry1 = float(ring[:, 0].max()), float(ring[:, 1].max())
+        pad_c = COURTYARD_RAY_CLEAR_M + 0.5
+        others = [
+            r for r, (bx0, by0, bx1, by1) in rings
+            if bx1 >= rx0 - pad_c and bx0 <= rx1 + pad_c and by1 >= ry0 - pad_c and by0 <= ry1 + pad_c
+            and r is not ring and not np.array_equal(r, ring[:, :2])
+        ]
         edge = _pick_street_edge(spec, ring, others)
         if edge is None:
             continue
@@ -468,8 +476,13 @@ def classify_commercial_buildings(
         # 1. Try spatial match with Overture `places` POI inside building or adjacent to street facade.
         best_poi_idx = None
         best_score = MAX_POI_MATCH_M + 1.0
+        px_lo, px_hi = rx0 - MAX_POI_MATCH_M, rx1 + MAX_POI_MATCH_M
+        py_lo, py_hi = ry0 - MAX_POI_MATCH_M, ry1 + MAX_POI_MATCH_M
         for p_idx, (poi, p_xy) in enumerate(tile_pois):
             if p_idx in used_pois:
+                continue
+            px_v, py_v = float(p_xy[0]), float(p_xy[1])
+            if px_v < px_lo or px_v > px_hi or py_v < py_lo or py_v > py_hi:
                 continue
             inside = _point_in_ring(p_xy, ring)
             # Perpendicular/segment distance to street wall.
