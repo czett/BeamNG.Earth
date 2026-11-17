@@ -18,10 +18,116 @@ M.DEFAULT_GLOW_NITS = 35
 local mats = {}          -- matName -> { refs, texture, emissive, glowColor, nits }
 local byTile = {}        -- tileKey -> { matName, ... }
 local pendingDel = {}    -- matName -> true
+local savedBldPbr = {}   -- matName -> { field -> origVal_or_false }
 M.count = 0
+M.pbrActive = false
+
+M.BLD_PBR = {
+  bne_bld_facade = {
+    clearCoatMap = '/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_m.data.png',
+    clearCoatFactor = '0.95',
+    clearCoatRoughnessFactor = '0.045',
+    metallicFactor = '0.2',
+    roughnessFactor = '1',
+    normalMapStrength = '1',
+    dynamicCubemap = 'true',
+  },
+  bne_bld_shop = {
+    metallicFactor = '0.75',
+    roughnessFactor = '1',
+    dynamicCubemap = 'true',
+  },
+  bne_bld_office = {
+    metallicFactor = '0.75',
+    roughnessFactor = '1',
+    dynamicCubemap = 'true',
+  },
+  bne_bld_roof_flat = {
+    normalMap = '/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_nm.normal.png',
+    roughnessMap = '/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_r.data.png',
+    ambientOcclusionMap = '/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_ao.data.png',
+    roughnessFactor = '1',
+  },
+  bne_bld_panel = {
+    normalMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_nm.normal.png',
+    roughnessMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_r.data.png',
+    ambientOcclusionMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_ao.data.png',
+    roughnessFactor = '1',
+  },
+  bne_bld_metalwall = {
+    normalMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_nm.normal.png',
+    roughnessMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_r.data.png',
+    ambientOcclusionMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_ao.data.png',
+    metallicMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_m.data.png',
+    roughnessFactor = '1',
+    metallicFactor = '0.75',
+  },
+  bne_bld_lobby = {
+    metallicFactor = '0.65',
+    roughnessFactor = '1',
+    dynamicCubemap = 'true',
+  },
+}
 
 local function hasFile(path)
   return type(path) == 'string' and FS ~= nil and FS:fileExists(path)
+end
+
+function M.isEnabled()
+  local ok, s = pcall(require, 'beamngEarth/settings')
+  return ok and type(s) == 'table' and type(s.get) == 'function' and s.get('expDeStreetImmersion') == true
+end
+
+local function applyBldPbr()
+  if not scenetree or type(scenetree.findObject) ~= 'function' then return end
+  for matName, fields in pairs(M.BLD_PBR) do
+    local m = scenetree.findObject(matName)
+    if m then
+      local orig = savedBldPbr[matName]
+      if not orig then
+        orig = {}
+        savedBldPbr[matName] = orig
+        for k in pairs(fields) do
+          local v = m:getField(k, 0)
+          orig[k] = (v ~= nil and v ~= '') and v or false
+        end
+      end
+      for k, v in pairs(fields) do
+        m:setField(k, 0, v)
+      end
+      pcall(function() m:flush() end)
+      pcall(function() m:reload() end)
+    end
+  end
+  M.pbrActive = true
+end
+
+local function restoreBldPbr()
+  if not scenetree or type(scenetree.findObject) ~= 'function' then
+    savedBldPbr = {}
+    M.pbrActive = false
+    return
+  end
+  for matName, orig in pairs(savedBldPbr) do
+    local m = scenetree.findObject(matName)
+    if m then
+      for k, v in pairs(orig) do
+        m:setField(k, 0, v == false and '' or v)
+      end
+      pcall(function() m:flush() end)
+      pcall(function() m:reload() end)
+    end
+  end
+  savedBldPbr = {}
+  M.pbrActive = false
+end
+
+function M.syncBuildingMaterials()
+  if M.isEnabled() and next(byTile) ~= nil then
+    applyBldPbr()
+  elseif M.pbrActive or next(savedBldPbr) ~= nil then
+    restoreBldPbr()
+  end
 end
 
 local function syncNightlights(name, def, active)
@@ -114,6 +220,7 @@ function M.retain(tileKey, deFaces)
     end
   end
   if #list > 0 then byTile[tileKey] = list end
+  M.syncBuildingMaterials()
   return changed
 end
 
@@ -134,6 +241,7 @@ function M.release(tileKey)
       end
     end
   end
+  M.syncBuildingMaterials()
   return queued
 end
 
@@ -165,12 +273,13 @@ function M.clearAll()
     if m then m:delete() end
   end
   mats, byTile, pendingDel, M.count = {}, {}, {}, 0
+  restoreBldPbr()
 end
 
 function M.status()
   local active = 0
   for _ in pairs(mats) do active = active + 1 end
-  return { count = M.count, active = active }
+  return { count = M.count, active = active, pbrActive = M.pbrActive }
 end
 
 return M
