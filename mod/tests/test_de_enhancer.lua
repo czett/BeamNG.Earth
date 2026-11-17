@@ -96,4 +96,55 @@ local trees = require('beamngEarth/trees')
 T.check(trees.ONE_SPELLING.de_hedge == true, 'de_hedge uses ONE_SPELLING')
 T.check(trees.ONE_SPELLING.fr_hedge == nil, 'fr_hedge does not force ONE_SPELLING')
 
+-- 8. Runtime DE building PBR material enhancements (strictly when expDeStreetImmersion=true and DE tiles active)
+local settings = require('beamngEarth/settings')
+local function makeStockMat(name, fields)
+  local m = createObject('Material')
+  for k, v in pairs(fields or {}) do m:setField(k, 0, v) end
+  m.canSave = false
+  m:registerObject(name)
+  return m
+end
+
+local mFacade = makeStockMat('bne_bld_facade', {})
+local mShop = makeStockMat('bne_bld_shop', {})
+local mMetal = makeStockMat('bne_bld_metalwall', { roughnessFactor = '0.85', metallicFactor = '0' })
+
+-- 8a. Off-switch-no-change: expDeStreetImmersion=false leaves stock materials untouched even if retain() runs
+settings.set('expDeStreetImmersion', false)
+deEnhancer.retain('0:10_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
+T.check(deEnhancer.status().pbrActive == false, 'PBR inactive when expDeStreetImmersion is false')
+T.check(mFacade:getField('dynamicCubemap', 0) == nil, 'bne_bld_facade untouched when off')
+T.check(mMetal:getField('roughnessFactor', 0) == '0.85', 'bne_bld_metalwall roughness untouched when off')
+deEnhancer.clearAll()
+
+-- 8b. Active DE mode: expDeStreetImmersion=true + active DE tile applies PBR tuning
+settings.set('expDeStreetImmersion', true)
+deEnhancer.retain('0:10_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
+T.check(deEnhancer.status().pbrActive == true, 'PBR active when expDeStreetImmersion=true and DE tile active')
+T.check(mFacade:getField('dynamicCubemap', 0) == 'true', 'bne_bld_facade gets dynamicCubemap=true')
+T.check(mFacade:getField('clearCoatFactor', 0) == '0.95', 'bne_bld_facade gets clearCoatFactor=0.95')
+T.check(mShop:getField('metallicFactor', 0) == '0.75', 'bne_bld_shop gets metallicFactor=0.75')
+T.check(mShop:getField('dynamicCubemap', 0) == 'true', 'bne_bld_shop gets dynamicCubemap=true')
+T.check(mMetal:getField('roughnessFactor', 0) == '1', 'bne_bld_metalwall gets roughnessFactor=1')
+T.check(mMetal:getField('metallicFactor', 0) == '0.75', 'bne_bld_metalwall gets metallicFactor=0.75')
+
+-- 8c. Releasing last DE tile restores original material fields
+deEnhancer.release('0:10_0')
+deEnhancer.sweep()
+T.check(deEnhancer.status().pbrActive == false, 'PBR deactivated when last DE tile released')
+T.check(mFacade:getField('dynamicCubemap', 0) == '', 'bne_bld_facade dynamicCubemap restored to empty')
+T.check(mFacade:getField('clearCoatFactor', 0) == '', 'bne_bld_facade clearCoatFactor restored to empty')
+T.check(mMetal:getField('roughnessFactor', 0) == '0.85', 'bne_bld_metalwall roughnessFactor restored to 0.85')
+T.check(mMetal:getField('metallicFactor', 0) == '0', 'bne_bld_metalwall metallicFactor restored to 0')
+
+-- 8d. Toggling expDeStreetImmersion off while tile is retained also restores original material fields
+deEnhancer.retain('0:11_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
+T.check(deEnhancer.status().pbrActive == true, 'PBR re-enabled for new DE tile')
+settings.set('expDeStreetImmersion', false)
+deEnhancer.syncBuildingMaterials()
+T.check(deEnhancer.status().pbrActive == false, 'PBR deactivated when expDeStreetImmersion toggled off')
+T.check(mMetal:getField('roughnessFactor', 0) == '0.85', 'bne_bld_metalwall restored on toggle off')
+deEnhancer.clearAll()
+
 T.done('test_de_enhancer')
