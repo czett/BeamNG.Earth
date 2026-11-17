@@ -54,9 +54,12 @@ local function transportKey(tr)
     tostring(tr.stopIndex or ''), tostring(tr.stopCount or ''), tostring(tr.stopName or ''),
     tostring(tr.stopKind or ''), tostring(tr.stopType or ''),
     tostring(tr.distM or ''), tostring(tr.etaS or ''),
-    tostring(tr.dwellMode or ''), tostring(tr.dwellTargetS or ''),
+    tostring(tr.dwellMode or ''), tostring(tr.dwellTargetS or ''), tostring(tr.dwellLabel or ''),
+    tostring(math.floor((tr.dwellS or 0) * 10 + 0.5)),
     tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5)), tostring(tr.inBay or ''),
-    tostring(tr.score or ''), tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
+    tostring(tr.score or ''), tostring(tr.fare or ''), tostring(tr.passengerOnBoard or ''),
+    tostring(tr.cargoKg or ''), tostring(tr.trailerState or ''),
+    tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
     tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
   }, '\2')
 end

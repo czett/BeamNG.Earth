@@ -205,4 +205,117 @@ do
   T.check(cRes.ok and not tm.isActive() and tm.hudPayload() == nil and gpsCalls.cleared == 2, 'cancelJob clears active job & GPS')
 end
 
+-- 7. Phase 2: Taxi score stability (debounced collisions, NaN guards) + fare/tip + dynamic dwell
+do
+  local sNan = tm.computeScore({ mode = 'taxi', elapsedS = 0/0, harshS = 0/0, collisions = 0, damageDelta = 0 })
+  T.check(sNan == 100, 'NaN inputs do not collapse Taxi score to 0')
+
+  local meter0 = tm.computeTaxiFare({ passengerOnBoard = false, fareDrivenM = 0 })
+  T.check(meter0 == 0, 'Taxi meter is 0 before pickup')
+  local meter1, tip1, tot1, time1 = tm.computeTaxiFare({
+    passengerOnBoard = true, fareDrivenM = 2500, fareElapsedS = 180, targetLegS = 200, _scoreHint = 92,
+  })
+  T.check(meter1 > 7.5 and tip1 > 0 and tot1 > meter1 and time1 == 100, 'Taxi fare, tip, and timeliness computed cleanly')
+
+  -- Dynamic dwell target on stepBayStop
+  local stD, dwD, dmD, tgtD = tm.stepBayStop(7.6, 'bay', 2.0, 1.0, 0.5, 0.0, 0.2, tm.baySpec('logistics', 'city'), 0.5, false, 8.0)
+  T.check(stD == 'complete' and dwD == 8.0 and dmD == 'bay' and tgtD == 8.0, 'stepBayStop honors 8.0 s dynamic dwellTargetS')
+  T.check(tm.dwellStatusLabel('taxi', 'pickup', 'bay') == 'Passenger boarding', 'taxi pickup dwell label')
+  T.check(tm.dwellStatusLabel('logistics', 'delivery', 'fallback') == 'Kerbside · Unloading cargo', 'logistics fallback dwell label')
+
+  -- Collision debounce: rapid multi-frame damage spikes within 1.25 s count as 1 collision, not 5
+  fakeDamage = 0
+  local rT = tm.startJob('taxi', 'neighborhood')
+  T.check(rT.ok, 'taxi job started for collision debounce test')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true,
+    mode = 'taxi',
+    tier = 'neighborhood',
+    estimatedKm = 2.0,
+    stops = {
+      { index = 1, kind = 'pickup', name = 'Cafe', lat = 39.286, lon = -76.610, dwellTargetS = 2.0 },
+      { index = 2, kind = 'dropoff', name = 'Station', lat = 39.295, lon = -76.605, dwellTargetS = 3.0 },
+    },
+  })
+  local anchor = { geodeticToEnu = function() return 0, 500 end }
+  local pl = { x = 0, y = 0, z = 10, vx = 5, vy = 0, vz = 0, speed = 5 }
+  for k = 1, 5 do
+    fakeDamage = fakeDamage + 80
+    fakeNow = fakeNow + 0.1
+    tm.update(0.1, 0.1, anchor, pl, false, false)
+  end
+  local pDeb = tm.hudPayload()
+  T.check(pDeb.collisions == 1 and pDeb.score > 50, 'multi-frame impact debounced to 1 collision; Taxi score stays > 50')
+  tm.cancelJob()
+end
+
+-- 8. Phase 2: Vehicle classification, cargo VE script, trailer selection & cleanup invariants
+do
+  T.check(tm.classifyVehicle({ jbeam = 'vivace', massKg = 1350 }).class == 'car', 'vivace classified as car')
+  T.check(tm.classifyVehicle({ jbeam = 'van', massKg = 2600, coupler = 'towhitch' }).class == 'van', 'van classified as van')
+  T.check(tm.classifyVehicle({ jbeam = 'md_series', massKg = 5400 }).class == 'box_truck', 'md_series classified as box_truck')
+  T.check(tm.classifyVehicle({ jbeam = 'us_semi', coupler = 'fifthwheel', massKg = 8200 }).class == 'semi', 'us_semi classified as semi')
+
+  T.check(tm.pickTrailerModel('fifthwheel', 'steel', 'long', function() return true end) == 'flatbed', 'fifthwheel steel picks flatbed')
+  T.check(tm.pickTrailerModel('fifthwheel', 'dry_goods', 'long', function() return true end) == 'dryvan', 'fifthwheel dry_goods picks dryvan')
+  T.check(tm.pickTrailerModel('towhitch', 'groceries', 'local', function() return true end) == 'boxutility', 'towhitch local picks boxutility')
+
+  local cands = tm.trailerSpawnCandidates(0, 0, 10, 0, 1, 3.0, 6.0)
+  T.check(#cands == 5 and cands[1].y < -9.0, 'trailer spawn candidates placed safely behind player')
+
+  local veLoad = tm.buildCargoVeScript(4500)
+  local veReset = tm.buildCargoVeScript(0)
+  T.check(veLoad:find('bngeCargoBase') ~= nil and veLoad:find('setNodeMass') ~= nil, 'cargo VE script caches baseline and sets node mass')
+  T.check(veReset:find('local targetKg = 0.000') ~= nil, 'cargo VE reset script restores 0 kg')
+
+  -- Player-owned trailer is never deleted on cancel, while job-owned trailer is deleted
+  local deleted = {}
+  local oldScenetree, oldCv, oldBe = scenetree, core_vehicles, be
+  local playerVehObj = {
+    id = 701, JBeam = 'us_semi',
+    getID = function(self) return self.id end,
+    getJBeamFilename = function(self) return self.JBeam end,
+    getPosition = function() return vec3(0, 0, 10) end,
+    getDirectionVector = function() return vec3(0, 1, 0) end,
+    queueLuaCommand = function(_, cmd)
+      if type(cmd) == 'string' and cmd:find('_onVehicleProbe') then
+        tm._onVehicleProbe(701, { massKg = 8200, coupler = 'fifthwheel', couplerCid = 10, attached = false })
+      end
+    end,
+  }
+  local spawnedTrl = {
+    id = 801,
+    getID = function(self) return self.id end,
+    queueLuaCommand = function() end,
+    delete = function(self) deleted[#deleted + 1] = self.id end,
+  }
+  local origPlayerVeh = tm.playerVeh
+  tm.playerVeh = function() return playerVehObj end
+  scenetree = { findObjectById = function(id) return id == 801 and spawnedTrl or (id == 701 and playerVehObj or nil) end }
+  core_vehicles = { spawnNewVehicle = function() return spawnedTrl end }
+  be = { getObjectCount = function() return 0 end }
+  local rLog = tm.startJob('logistics', 'long')
+  T.check(rLog.ok, 'logistics job started with probed semi')
+  -- Flush probe immediately
+  tm.update(0.05, 0.05, { geodeticToEnu = function() return 0, 0 end }, { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }, false, false)
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true,
+    mode = 'logistics',
+    tier = 'long',
+    vehicleClass = 'semi',
+    cargo = { type = 'dry_goods', label = 'Containerized Dry Goods', massKg = 18000, vehicleClass = 'semi' },
+    stops = {
+      { index = 1, kind = 'loading', stopType = 'loading_bay', name = 'Hub A', lat = 39.286, lon = -76.610, cargoDeltaKg = 18000, dwellTargetS = 10.5 },
+      { index = 2, kind = 'delivery', stopType = 'loading_bay', name = 'Hub B', lat = 39.386, lon = -76.610, cargoDeltaKg = -18000, dwellTargetS = 9.7 },
+    },
+  })
+  T.check(tm.hudPayload().cargoKg == 18000 and tm.hudPayload().dwellTargetS == 10.5, 'logistics hudPayload exposes cargoKg and dynamic dwellTargetS')
+  tm.cancelJob()
+  T.check(#deleted == 1 and deleted[1] == 801, 'cancelJob deletes job-owned spawned trailer')
+  tm.playerVeh = origPlayerVeh
+  scenetree, core_vehicles, be = oldScenetree, oldCv, oldBe
+end
+
 T.done('test_transport_modes')

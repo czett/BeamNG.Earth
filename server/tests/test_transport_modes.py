@@ -385,5 +385,41 @@ class LogisticsModeTest(unittest.TestCase):
         net.get.assert_not_called()
 
 
+class Phase2CargoAndDwellTest(unittest.TestCase):
+    def test_vehicle_class_cargo_bounds(self):
+        md = _seed_corridor_md()
+        for vclass, lo, hi, tier in (
+            ("car", 80, 350, "long"),        # even on long/city, car never exceeds 350 kg
+            ("van", 400, 1400, "city"),
+            ("box_truck", 2500, 8000, "city"),
+            ("semi", 12000, 26000, "local"),
+        ):
+            r = tm.generate_job(
+                md, None, mode="logistics", tier=tier if tier in ("local", "city") else "city",
+                lat=39.285, lon=-76.610, heading=20.0, seed=5,
+                vehicle={"class": vclass, "coupler": "fifthwheel" if vclass == "semi" else "none", "hasTrailer": False},
+            )
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["vehicleClass"], vclass)
+            kg = r["cargo"]["massKg"]
+            self.assertGreaterEqual(kg, lo)
+            self.assertLessEqual(kg, hi)
+            deltas = [s["cargoDeltaKg"] for s in r["stops"]]
+            self.assertEqual(deltas[0], kg)
+            self.assertEqual(sum(deltas), 0)
+            for s in r["stops"]:
+                self.assertIn("dwellTargetS", s)
+                self.assertGreaterEqual(s["dwellTargetS"], 3.5)
+
+    def test_dynamic_dwell_targets_per_mode(self):
+        self.assertTrue(2.0 <= tm.compute_dwell_target_s("taxi", "neighborhood", "pickup", name="Central Cafe") <= 2.5)
+        self.assertEqual(tm.compute_dwell_target_s("taxi", "city", "dropoff", name="City Airport"), 3.0)
+        self.assertGreaterEqual(tm.compute_dwell_target_s("bus", "partial", "bus_stop", name="Union Station"), 4.5)
+        self.assertTrue(3.0 <= tm.compute_dwell_target_s("bus", "partial", "bus_stop", name="Oak & 4th") <= 3.8)
+        self.assertTrue(3.5 <= tm.compute_dwell_target_s("logistics", "local", "loading", cargo_kg=800) <= 4.5)
+        self.assertTrue(6.0 <= tm.compute_dwell_target_s("logistics", "city", "delivery", cargo_kg=5000) <= 8.0)
+        self.assertTrue(9.0 <= tm.compute_dwell_target_s("logistics", "long", "loading", cargo_kg=24000) <= 12.0)
+
+
 if __name__ == "__main__":
     unittest.main()
