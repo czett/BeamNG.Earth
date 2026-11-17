@@ -1035,6 +1035,10 @@ function M.uiMapState()
     gps = require('beamngEarth/gps').status(),
     metric = require('beamngEarth/gps').metric(),     -- (the game's length unit with no GPS route: the Players list)
     weather = localWeatherBadge(),
+    transport = (function()
+      local tm = ext('beamngEarth_transportModes')
+      return tm and tm.uiState and tm.uiState() or nil
+    end)(),
   }
 end
 
@@ -1087,6 +1091,32 @@ function M.uiNearest()
   if not f then return { error = 'BeamNG.Earth is not loaded' } end
   f.nearest()
   return { ok = true }
+end
+
+-- Transport Modes (transportModes.lua): Taxi, Bus, Logistics jobs.
+function M.uiTransportState()
+  local tm = ext('beamngEarth_transportModes')
+  return tm and tm.uiState and tm.uiState() or { error = 'Transport Modes not loaded' }
+end
+function M.uiTransportStart(mode, tier)
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.startJob then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.startJob(mode, tier)
+end
+function M.uiTransportSkip()
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.skipStop then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.skipStop()
+end
+function M.uiTransportCancel()
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.cancelJob then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.cancelJob()
+end
+function M.uiTransportDismiss()
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.dismissSummary then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.dismissSummary()
 end
 
 -- The map's search-as-you-type: send (q -> { id } or { error }) and poll (id -> nil while waiting, else

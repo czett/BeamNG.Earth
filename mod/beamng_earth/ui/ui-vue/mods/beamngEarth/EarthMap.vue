@@ -61,6 +61,7 @@
         </g>
         <polyline v-for="r in areaRoutes" :key="'rt' + r.id" class="area-route" :class="r.cls" :points="r.points"
                   :style="{ strokeWidth: r.px + 'px' }" />
+        <polyline v-if="transportPolyline" class="transport-line" :points="transportPolyline" />
         <polyline v-if="routeDone" class="route-done" :points="routeDone" />
         <polyline v-if="routeAhead" class="route-line-casing" :points="routeAhead" />
         <polyline v-if="routeAhead" class="route-line" :points="routeAhead" />
@@ -107,6 +108,20 @@
       >
         <div class="station-icon">{{ ms.ICON[m.kind] }}</div>
         <div v-if="m.showLabel" class="marker-label">{{ m.name || ms.NAMES[m.kind] }}</div>
+      </div>
+      <!-- Transport job stops (transportModes.lua) -->
+      <div
+        v-for="ts in transportMarkers"
+        :key="'tm' + ts.index"
+        class="marker transport-stop"
+        :class="{ done: ts.done, current: ts.current }"
+        :style="{ left: ts.sx + 'px', top: ts.sy + 'px' }"
+        :title="ts.name + (ts.address ? ' · ' + ts.address : '')"
+        @mousedown.stop
+        @click.stop="focusTransportStop(ts)"
+      >
+        <div class="tm-pin">{{ ts.index }}</div>
+        <div v-if="ts.current || view.z >= 13" class="marker-label">{{ ts.name }}</div>
       </div>
       <!-- the GPS destination -->
       <div v-if="gpsScreen" class="marker gps" :style="{ left: gpsScreen.x + 'px', top: gpsScreen.y + 'px' }">
@@ -203,7 +218,7 @@
       <!-- the other players of a BeamMP session, nearest first: follow one on the map, or a GPS route to them -->
       <div v-if="state.others" class="layers-wrap">
         <button class="map-btn" :class="{ on: playersPanel || typeof follow === 'string' }"
-                @click="playersPanel = !playersPanel; layersPanel = false"
+                @click="playersPanel = !playersPanel; layersPanel = false; jobsPanel = false"
                 :title="followedPlayer ? 'Following ' + followedPlayer.name + ' (drag the map to stop)' : 'The other players'">
           <span v-if="followedPlayer" class="following">Following {{ followedPlayer.name }}</span>
           <template v-else>Players ({{ otherList.length }})</template>
@@ -230,7 +245,18 @@
         </div>
       </div>
       <div class="layers-wrap">
-        <button class="map-btn" :class="{ on: layersPanel }" @click="layersPanel = !layersPanel; playersPanel = false" title="Base map and overlays">Layers</button>
+        <button class="map-btn" :class="{ on: jobsPanel || !!activeTransport }"
+                @click="jobsPanel = !jobsPanel; layersPanel = false; playersPanel = false"
+                title="Transport jobs: Taxi, Bus, Logistics">
+          Jobs<template v-if="activeTransport"> ({{ activeTransport.stopIndex }}/{{ activeTransport.stopCount }})</template>
+        </button>
+        <div v-if="jobsPanel" class="layers-panel jobs-panel" :style="{ maxHeight: `calc(${h}px - 74px - 6.5vh)` }"
+             @mousedown.stop @wheel.stop @dblclick.stop>
+          <EarthTransport compact external-poll @focus-stop="focusTransportStop" />
+        </div>
+      </div>
+      <div class="layers-wrap">
+        <button class="map-btn" :class="{ on: layersPanel }" @click="layersPanel = !layersPanel; playersPanel = false; jobsPanel = false" title="Base map and overlays">Layers</button>
         <div v-if="layersPanel" class="layers-panel" @mousedown.stop @wheel.stop @dblclick.stop>
           <div class="panel-sub">Base map</div>
           <label class="layer-opt"><input type="radio" value="sat" v-model="baseLayer" /> Satellite</label>
@@ -487,6 +513,8 @@ import * as ms from "./mapstations.js"
 import * as sm from "./mapsearch.js"
 import layerData from "./maplayers.js"
 import { BngSelect } from "@/common/components/base"
+import EarthTransport from "./EarthTransport.vue"
+import { applyTransportState } from "./earthTransportStore.js"
 
 const props = defineProps({ embedded: { type: Boolean, default: false } })
 const embedded = props.embedded
@@ -520,6 +548,7 @@ function poll() {
   engineLua("beamngEarth_settings and beamngEarth_settings.uiMapState and beamngEarth_settings.uiMapState() or nil", s => {
     if (!s) { state.value = { places: [], recent: [], missing: true }; return }
     state.value = { ...s, places: toArray(s.places), recent: toArray(s.recent) }
+    applyTransportState(s.transport)
     if (!s.others && playersPanel.value) closePlayers()   // (out of the session: not open again by itself in the next)
     if (followingPlayer()) {
       const o = followedPlayer.value
@@ -556,6 +585,7 @@ const labelsOn = ref(stored("beamngEarth.map.labels", "0") === "1")
 watch(baseLayer, v => store("beamngEarth.map.base", v))
 watch(labelsOn, on => store("beamngEarth.map.labels", on ? "1" : "0"))
 const layersPanel = ref(false)
+const jobsPanel = ref(false)
 // "Dark" is not a tile source of its own: the "map" tiles (terrain-light, already hillshaded) through a CSS
 // filter (.tile-dark below) - the usual trick for a dark map without a dark-themed tile set of its own.
 const tileBaseLayer = computed(() => (baseLayer.value === "dark" ? "map" : baseLayer.value))
@@ -1868,6 +1898,36 @@ const gpsScreen = computed(() => {
   const g = state.value.gps
   return g ? screen(g.lat, g.lon) : null
 })
+const activeTransport = computed(() => (state.value.transport && state.value.transport.active) || null)
+const transportStops = computed(() => activeTransport.value ? toArray(activeTransport.value.stops) : [])
+const transportMarkers = computed(() => {
+  view.value; w.value; h.value
+  const act = activeTransport.value
+  if (!act) return []
+  return transportStops.value
+    .map((s, idx) => {
+      const p = screen(s.lat, s.lon)
+      const num = idx + 1
+      return { ...s, index: num, sx: p.x, sy: p.y, done: num < act.stopIndex, current: num === act.stopIndex }
+    })
+    .filter(m => onScreen({ x: m.sx, y: m.sy }))
+})
+const transportPolyline = computed(() => {
+  view.value; w.value; h.value
+  const act = activeTransport.value
+  if (!act || !transportStops.value.length) return ""
+  const pts = []
+  if (state.value.player) pts.push(screen(state.value.player.lat, state.value.player.lon))
+  for (let i = Math.max(0, (act.stopIndex || 1) - 1); i < transportStops.value.length; i++) {
+    pts.push(screen(transportStops.value[i].lat, transportStops.value[i].lon))
+  }
+  return pts.length >= 2 ? pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ") : ""
+})
+function focusTransportStop(s) {
+  if (!s) return
+  follow.value = false
+  view.value = { lat: s.lat, lon: s.lon, z: Math.max(view.value.z, 14) }
+}
 // a height for the route's elevation profile, in the game's length unit (fmtMiles)
 function fmtHeight(m) {
   return state.value.gps && state.value.gps.metric ? `${Math.round(m)} m` : `${Math.round(m * 3.28084)} ft`
@@ -2155,6 +2215,7 @@ function close() {
 }
 
 function onEscape() {
+  if (jobsPanel.value) { jobsPanel.value = false; return }
   if (playersPanel.value) { closePlayers(); return }
   if (selecting.value) { cancelSelect(); return }
   if (layersPanel.value) { layersPanel.value = false; return }
@@ -2459,6 +2520,18 @@ const fmtLatLon = mm.fmtLatLon
 .layer-opt input { margin: 0 6px 0 0; vertical-align: -2px; cursor: pointer; }
 .layer-hint { font-size: 11px; color: #9aa4ae; }
 .players-panel { width: 300px; box-sizing: border-box; overflow-y: auto; }
+.jobs-panel { width: 320px; box-sizing: border-box; overflow-y: auto; padding: 10px 12px; }
+.map-grid .transport-line { fill: none; stroke: rgba(255, 198, 60, 0.72); stroke-width: 3; stroke-dasharray: 7 5; }
+.marker.transport-stop { cursor: pointer; z-index: 3; }
+.marker.transport-stop.done { opacity: 0.48; }
+.marker.transport-stop .tm-pin {
+  position: absolute; left: -11px; top: -11px; width: 22px; height: 22px; border-radius: 50%;
+  background: #202832; border: 2px solid #ffd45a; color: #fff; font-size: 11px; font-weight: 700;
+  line-height: 18px; text-align: center; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.65);
+}
+.marker.transport-stop.current .tm-pin {
+  background: #e0761c; border-color: #fff; box-shadow: 0 0 0 4px rgba(224, 118, 28, 0.35);
+}
 .map-btn .following { display: inline-block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: bottom; }
 .players-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }

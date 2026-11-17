@@ -611,6 +611,7 @@ local function commitTeleport(msg)
   st.anchorSession, st.resync = st.sessionId, false
   mpanchor.announceOwn(msg.lat, msg.lon)
   M._apiRebased(oldAnchor, 'teleport')
+  do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.onRebased then pcall(tm.onRebased, st.anchor) end end
   st.block, st.terrainPending, st.terrainErrorAt = { cx = tr.cx, cy = tr.cy }, nil, nil
   edgeguard.newFrame(st.guard)
   M._deckguard.newFrame(st.deck)
@@ -670,6 +671,7 @@ local function finishRebase()
   st.anchorSession, st.resync = st.sessionId, false
   mpanchor.announceOwn(st.anchor.lat, st.anchor.lon)
   M._apiRebased(oldAnchor, rb.purpose)
+  do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.onRebased then pcall(tm.onRebased, st.anchor) end end
   st.block, st.terrainPending, st.terrainErrorAt = tr and { cx = tr.cx, cy = tr.cy } or nil, nil, nil
   edgeguard.newFrame(st.guard)
   M._deckguard.newFrame(st.deck)
@@ -1148,7 +1150,7 @@ M._netq = { q = {}, head = 1, cost = {}, budgetMs = 4.0, busyMs = 12.0, busyN = 
   urgent = { terrain_ready = true, terrain_ready_set = true, terrain_refresh = true, terrain_error = true,
     swap_begin = true, swap_end = true, swap_abort = true,
     block_base = true, terrain_patch = true, ground_ahead = true, deck_spans = true, status = true, load_progress = true, where_result = true, geocode_result = true, stations_result = true,
-    route_result = true, random_place_result = true, runtime_profiler_pong = true } }
+    route_result = true, random_place_result = true, runtime_profiler_pong = true, transport_job_result = true } }
 -- A block's refreshed base photo (block_base) waits while the car is faster than BASE_LATER_MS, and is applied once it
 -- is slower than BASE_NOW_MS, if that block is still the one in use (a later block brings its own photo)
 M.BASE_LATER_MS, M.BASE_NOW_MS = 35, 30         -- m/s (78 / 67 mph; the server skips a block's photo wait over 89 mph)
@@ -1650,6 +1652,9 @@ local function onMessage(msg)
   elseif t == 'stations_result' then         -- the station finder's answer (finder.lua: Nearest, the prompt, the map)
     local f = rawget(_G, 'beamngEarth_finder')
     if f and f.onStations then f.onStations(msg) end
+  elseif t == 'transport_job_result' then    -- Transport Modes (transportModes.lua)
+    local tm = rawget(_G, 'beamngEarth_transportModes')
+    if tm and tm.onJobResult then tm.onJobResult(msg) end
   elseif t == 'geocode_result' then
     if msg.id then geocodeResults[msg.id] = { results = msg.results or {}, error = msg.error, text = msg.text } end
   elseif t == 'areas' then
@@ -2386,6 +2391,10 @@ local function hudTexts()
   hudInput.credits = st.active and credits.enabled and credits.text(creditsFallback) or ''
   hudInput.banner = (st.inOurLevel or st.active) and banner.enabled and banner.current() or nil
   hudInput.hidden = credits.hiddenByUi()
+  do
+    local tm = rawget(_G, 'beamngEarth_transportModes')
+    hudInput.transport = (shown and tm and tm.hudPayload) and tm.hudPayload() or nil
+  end
   return hudInput
 end
 
@@ -2488,6 +2497,15 @@ local function drawUi(dt)
   if not hudapps.mounted('banner') then banner.draw(st.inOurLevel or st.active, credits.hiddenByUi()) end
   if not hudapps.mounted('status') then
     statusbar.draw(st.inOurLevel and st.active, credits.hiddenByUi(), st.status, loadLine())
+  end
+  do
+    local tm = rawget(_G, 'beamngEarth_transportModes')
+    if tm then
+      if st.inOurLevel and st.active and not st.viewFrame and tm.drawMarker then pcall(tm.drawMarker, st.anchor, st.player) end
+      if st.inOurLevel and st.active and not hudapps.mounted('transport') and tm.drawUi then
+        pcall(tm.drawUi, credits.hiddenByUi())
+      end
+    end
   end
   hudapps.update(st.clock or 0, hudTexts)
   if st.inOurLevel then
@@ -3076,7 +3094,13 @@ local function onUpdate(dtReal, dtSim)
   updatePlayer(dtReal)
   -- Rebase commits can change the anchor after the previous frame's player sample. Route only with
   -- this frame's position, once the vehicle move has become visible in the matching world frame.
-  if st.inOurLevel and not st.lagProbe then gps.update(st.anchor, st.player) end
+  if st.inOurLevel and not st.lagProbe then
+    gps.update(st.anchor, st.player)
+    do
+      local tm = rawget(_G, 'beamngEarth_transportModes')
+      if tm and tm.update then pcall(tm.update, dtReal, dtSim, st.anchor, st.player, st.paused, st.rebasing) end
+    end
+  end
   if st.active then
     if not dropHoldFailed and (not st.paused or dropHold.active) then     -- (it runs on while it paused the game)
       local ok, err = pcall(updateDropHold, dtReal)
@@ -3347,6 +3371,7 @@ local function onClientEndMission()
   pcall(farcars.reset)
   pcall(mpsession.reset)
   gps.reset()
+  do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
   do local stg = rawget(_G, 'beamngEarth_settings') if stg and stg.redirectBigMap then stg.redirectBigMap(false) end end
   seasonlook.restore()
   -- runs before the level deletes its objects (server/server.lua:19 vs :34): delete the far tiles
@@ -3403,6 +3428,7 @@ local function onExtensionUnloaded()
   hudapps.unhookMinimapNorth()
   require('beamngEarth/minimaproads').unhook()
   levelinfo.unhookSpawnPois()
+  do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
   groundcover.enginePatch(false)
   net.close()
   farfield.clear()
@@ -3707,6 +3733,12 @@ end
 function M.requestStations(id, lat, lon, rKm, kinds, mode)
   if not net.isConnected() then return false end
   net.send({ type = 'stations', id = id, lat = lat, lon = lon, r_km = rKm, kinds = kinds, mode = mode })
+  return true
+end
+function M.requestTransportJob(id, mode, tier, lat, lon, heading, seed)
+  if not net.isConnected() then return false end
+  net.send({ type = 'transport_job', id = id, mode = mode, tier = tier, lat = lat, lon = lon,
+    heading = heading, seed = seed })
   return true
 end
 function M.requestRoute(id, lat0, lon0, lat1, lon1, bearing, via)

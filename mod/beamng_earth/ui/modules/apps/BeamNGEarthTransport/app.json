@@ -1,0 +1,21 @@
+{
+  "domElement": "<beamng-earth-transport></beamng-earth-transport>",
+  "name": "BeamNG.Earth: Transport Job",
+  "types": [
+    "ui.apps.categories.gameplay"
+  ],
+  "description": "Compact active-job HUD for Taxi, Bus, and Logistics routes: stop progress, next destination, dwell bar, and completion summary.",
+  "css": {
+    "top": "110px",
+    "right": "16px",
+    "width": "320px",
+    "height": "170px"
+  },
+  "author": "BeamNG.Earth",
+  "version": "1.0",
+  "directive": "beamngEarthTransport",
+  "appName": "beamngEarthTransport",
+  "category": "BeamNG.Earth",
+  "isAuxiliary": false,
+  "interactive": "yes"
+}

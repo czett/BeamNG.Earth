@@ -114,6 +114,7 @@ import placepreview as placepreviewmod  # noqa: E402
 import placenames as placenamesmod  # noqa: E402
 import maplabels as maplabelsmod  # noqa: E402
 import places as placesmod  # noqa: E402
+import transport_modes as transportmod  # noqa: E402
 import runtimeprofiler
 import streamleases
 import pools as poolsmod  # noqa: E402
@@ -1363,6 +1364,7 @@ class Server:
         # the modding API's places (places.py): their own thread, so an add-on asking often never holds up the status
         # bar's names or the 3D map's labels on place_pool
         self.api_pool = ThreadPoolExecutor(1, thread_name_prefix="api-places")
+        self.transport_pool = ThreadPoolExecutor(2, thread_name_prefix="transport")
         self._place_names_lock = threading.Lock()
         # (a thread per helper slot too: a far thread waits for its tile's builder, here or on a helper)
         self.cache_dir = cache_dir
@@ -8373,6 +8375,35 @@ class Connection:
         finally:
             self._places_followups = getattr(self, "_places_followups", 1) - 1
 
+    async def transport_job(self, msg):
+        """Transport Modes job generation {"id", "mode", "tier", "lat", "lon", "heading"?, "seed"?} ->
+        transport_job_result {"id", "ok", "mode", "tier", "title"?, "routeRef"?, "source"?, "estimatedKm"?,
+        "stops", "error"?} (transport_modes.py)."""
+        rid = msg.get("id")
+        req, why = transportmod.validate_request(msg)
+        if req is None:
+            self.send({"type": "transport_job_result", "id": rid, "ok": False,
+                       "mode": str(msg.get("mode") or ""), "tier": str(msg.get("tier") or ""),
+                       "stops": [], "error": why})
+            return
+        md = getattr(self.s, "mapdata", None)
+        net = getattr(self.s, "net", None)
+        pool = getattr(self.s, "transport_pool", None) or getattr(self.s, "ui_pool", None)
+        loop = asyncio.get_running_loop()
+        try:
+            res = await loop.run_in_executor(
+                pool,
+                lambda: transportmod.generate_job(
+                    md, net, mode=req["mode"], tier=req["tier"], lat=req["lat"], lon=req["lon"],
+                    heading=req["heading"], seed=req["seed"],
+                ),
+            )
+        except Exception as e:
+            log.warning("transport job: %s: %s", type(e).__name__, e)
+            res = {"ok": False, "mode": req["mode"], "tier": req["tier"], "stops": [],
+                   "error": f"{type(e).__name__}: {e}"[:160]}
+        self.send({"type": "transport_job_result", "id": rid, **res})
+
     async def _where_place_later(self, out, lat, lon, seq):
         """where()'s place parts for a region not on disk yet: fetched as a background job (netfetch "background":
         never ahead of the world's own downloads), asked again every WHERE_PLACE_RETRY_S while Overture's hosts are
@@ -9030,6 +9061,8 @@ class Connection:
             self.spawn(self.map_labels(msg))
         elif kind == "places":                  # the modding API's places round a point (places.py; api.places)
             self.spawn(self.places(msg))
+        elif kind == "transport_job":           # Transport Modes (Taxi / Bus / Logistics) job generation
+            self.spawn(self.transport_job(msg))
         elif kind == "map_focus":               # the 3D map flying: where the view will end (map3d.flyHint)
             self.on_map_focus(msg)
         elif kind == "random_place":            # the level select's "Random location" (randomplace.py)

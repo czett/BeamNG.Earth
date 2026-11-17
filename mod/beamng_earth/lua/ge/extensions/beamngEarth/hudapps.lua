@@ -10,7 +10,7 @@
 -- Pure apart from guihooks (runs under plain luajit with a stub).
 local M = {}
 
-M.NAMES = { status = true, credits = true, banner = true }
+M.NAMES = { status = true, credits = true, banner = true, transport = true }
 M.SEND_S = 0.25           -- s between updates to the apps (the status bar's fps changes every frame)
 M.STALE_S = 5.0           -- an unchanged payload is sent again this often (an app opened since)
 
@@ -33,7 +33,7 @@ end
 function M.mounted(name) return mounted[name] == true end
 function M.any() return nMounted > 0 end
 
--- Pure: the payload for the apps. t: { status, loading, credits, banner = { text, level, visible }, hidden }
+-- Pure: the payload for the apps. t: { status, loading, credits, banner = { text, level, visible }, hidden, transport }
 function M.payload(t)
   local b = t.banner or {}
   return {
@@ -43,11 +43,24 @@ function M.payload(t)
     banner = (b.visible and b.text ~= '' and b.text) or '',
     bannerLevel = b.level or 'info',
     hidden = t.hidden and true or false,
+    transport = t.transport or nil,
   }
 end
 
+local function transportKey(tr)
+  if type(tr) ~= 'table' then return '' end
+  return table.concat({
+    tostring(tr.state or ''), tostring(tr.mode or ''), tostring(tr.tier or ''),
+    tostring(tr.stopIndex or ''), tostring(tr.stopCount or ''), tostring(tr.stopName or ''),
+    tostring(tr.distM or ''), tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5)),
+    tostring(tr.score or ''), tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
+    tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
+  }, '\2')
+end
+
 local function key(p)
-  return p.status .. '\1' .. p.loading .. '\1' .. p.credits .. '\1' .. p.banner .. '\1' .. p.bannerLevel .. '\1' .. tostring(p.hidden)
+  return p.status .. '\1' .. p.loading .. '\1' .. p.credits .. '\1' .. p.banner .. '\1' .. p.bannerLevel .. '\1'
+    .. tostring(p.hidden) .. '\1' .. transportKey(p.transport)
 end
 
 -- now: core's clock (s); get(): the texts (only called when a send is due, so its cost is paid at SEND_S at most).

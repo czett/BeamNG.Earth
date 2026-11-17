@@ -259,6 +259,9 @@ MOD_TO_SERVER = {
     "random_place": {"id": F(int)},
     # the level select's place pictures (placepreview.py; additive): [{key, lat, lon}]
     "place_previews": {"places": F((list, dict))},
+    # Transport Modes (transport_modes.py; additive): Taxi / Bus / Logistics job request
+    "transport_job": {"id": F(int), "mode": F(str), "tier": F(str), "lat": F(NUM), "lon": F(NUM),
+                      "heading": F(NUM, OPT), "seed": F(int, OPT)},
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -313,6 +316,9 @@ SERVER_TO_MOD = {
     "places_result": {"id": F(int), "places": F(list), "complete": F(bool), "pending": F(bool),
                       "buildings": F(list, OPT), "next": F(str, OPT), "truncated": F(bool, OPT),
                       "error": F(str, OPT)},
+    "transport_job_result": {"id": F(int), "ok": F(bool), "mode": F(str), "tier": F(str),
+                             "title": F(str, OPT), "routeRef": F(str, OPT), "source": F(str, OPT),
+                             "estimatedKm": F(NUM, OPT), "stops": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
               "miniShape": F(str), "miniScale": F(NUM)},                     # ... and its small copy (far out)
     "random_place_result": {"id": F(int), "lat": F(NUM, OPT), "lon": F(NUM, OPT), "name": F(str, OPT)},
@@ -514,6 +520,7 @@ EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs
                        "where_result",                               # the status bar: asked by the mod while driving
                        "map_labels_result",                          # the 3D map's labels: asked in map mode
                        "places_result",                              # the modding API's places (test_places_api)
+                       "transport_job_result",                       # Transport Modes (test_transport_modes)
                        "globe",                                      # the 3D map's globe: needs EOX tiles
                        "random_place_result", "place_previews_ready",  # the level select: map data / imagery
                                                                      # (test_randomplace)
