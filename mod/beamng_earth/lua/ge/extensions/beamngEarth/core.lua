@@ -3735,10 +3735,10 @@ function M.requestStations(id, lat, lon, rKm, kinds, mode)
   net.send({ type = 'stations', id = id, lat = lat, lon = lon, r_km = rKm, kinds = kinds, mode = mode })
   return true
 end
-function M.requestTransportJob(id, mode, tier, lat, lon, heading, seed)
+function M.requestTransportJob(id, mode, tier, lat, lon, heading, seed, vehicle)
   if not net.isConnected() then return false end
   net.send({ type = 'transport_job', id = id, mode = mode, tier = tier, lat = lat, lon = lon,
-    heading = heading, seed = seed })
+    heading = heading, seed = seed, vehicle = vehicle })
   return true
 end
 function M.requestRoute(id, lat0, lon0, lat1, lon1, bearing, via)
@@ -4060,6 +4060,7 @@ M.onVehicleMapmgrUpdate = function(id) gps.onVehicleMapmgrUpdate(id) end
 M.onAiRouteDone = function(id) gps.onAiRouteDone(id) end
 M.onVehicleSwitched = function(oldId, newId, player)
   if st.inOurLevel then navgraph.onVehicleSwitched(oldId, newId, player) end
+  do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.onVehicleSwitched then pcall(tm.onVehicleSwitched, oldId, newId, player) end end
 end
 -- (vehicles spawned / removed, traffic's pooled ones shown / hidden: a slow frame's context in the anonymous summary;
 -- GitHub #594, freezes as traffic despawns)

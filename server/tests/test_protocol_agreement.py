@@ -261,7 +261,7 @@ MOD_TO_SERVER = {
     "place_previews": {"places": F((list, dict))},
     # Transport Modes (transport_modes.py; additive): Taxi / Bus / Logistics job request
     "transport_job": {"id": F(int), "mode": F(str), "tier": F(str), "lat": F(NUM), "lon": F(NUM),
-                      "heading": F(NUM, OPT), "seed": F(int, OPT)},
+                      "heading": F(NUM, OPT), "seed": F(int, OPT), "vehicle": F(dict, OPT)},
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -318,7 +318,8 @@ SERVER_TO_MOD = {
                       "error": F(str, OPT)},
     "transport_job_result": {"id": F(int), "ok": F(bool), "mode": F(str), "tier": F(str),
                              "title": F(str, OPT), "routeRef": F(str, OPT), "source": F(str, OPT),
-                             "estimatedKm": F(NUM, OPT), "stops": F(list), "error": F(str, OPT)},
+                             "estimatedKm": F(NUM, OPT), "cargo": F(dict, OPT), "vehicleClass": F(str, OPT),
+                             "stops": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
               "miniShape": F(str), "miniScale": F(NUM)},                     # ... and its small copy (far out)
     "random_place_result": {"id": F(int), "lat": F(NUM, OPT), "lon": F(NUM, OPT), "name": F(str, OPT)},

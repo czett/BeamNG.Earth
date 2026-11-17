@@ -68,6 +68,43 @@ TIERS = {
     },
 }
 
+VEHICLE_CLASSES = ("car", "van", "box_truck", "semi")
+CARGO_BANDS = {
+    "car": (80, 350),
+    "van": (400, 1400),
+    "box_truck": (2500, 8000),
+    "semi": (12000, 26000),
+}
+SEMI_BOBTAIL_BAND = (2500, 6000)
+CARGO_CATALOG = {
+    "car": [
+        ("parcels", "Courier Parcels"),
+        ("medical", "Medical Supplies"),
+        ("auto_parts", "Express Auto Parts"),
+        ("documents", "Priority Documents"),
+    ],
+    "van": [
+        ("groceries", "Fresh Produce & Dry Goods"),
+        ("hardware", "Hardware & Trade Supplies"),
+        ("appliances", "Small Appliances"),
+        ("electronics", "Retail Electronics"),
+    ],
+    "box_truck": [
+        ("pallets", "Palletized Retail Stock"),
+        ("beverages", "Beverage Pallets"),
+        ("hvac", "HVAC Equipment"),
+        ("furniture", "Commercial Furniture"),
+    ],
+    "semi": [
+        ("dry_goods", "Containerized Dry Goods"),
+        ("machinery", "Industrial Machinery"),
+        ("steel", "Structural Steel"),
+        ("bulk_food", "Bulk Foodstuffs"),
+    ],
+}
+TAXI_HUB_CATS = frozenset({"airport", "train_station", "bus_station", "subway_station", "ferry_terminal", "hotel", "hospital"})
+BUS_HUB_KEYWORDS = ("station", "terminal", "hub", "central", "bahnhof", "gare", "airport", "interchange", "transit center")
+
 TAXI_PLACE_CATS = frozenset({
     "train_station", "subway_station", "bus_station", "light_rail_station", "metro_station", "ferry_terminal",
     "airport", "hotel", "lodging", "resort", "motel", "hostel", "restaurant", "cafe", "coffee_shop", "bar", "pub",
@@ -142,6 +179,101 @@ def _clean(text):
     return " ".join(str(text or "").split()).strip()
 
 
+def _clean_vehicle(raw):
+    if not isinstance(raw, dict):
+        return None
+    coupler = str(raw.get("coupler") or "none").strip().lower()
+    if coupler not in ("none", "towhitch", "fifthwheel"):
+        coupler = "none"
+    mass_kg = raw.get("massKg")
+    try:
+        mass_kg = float(mass_kg) if mass_kg is not None else None
+        if mass_kg is not None and not (math.isfinite(mass_kg) and 100.0 <= mass_kg <= 120000.0):
+            mass_kg = None
+    except (TypeError, ValueError):
+        mass_kg = None
+    vclass = str(raw.get("class") or "").strip().lower()
+    if vclass not in VEHICLE_CLASSES:
+        if coupler == "fifthwheel" or (mass_kg is not None and mass_kg >= 7000.0):
+            vclass = "semi"
+        elif mass_kg is not None and mass_kg >= 3800.0:
+            vclass = "box_truck"
+        elif mass_kg is not None and mass_kg >= 2200.0:
+            vclass = "van"
+        else:
+            vclass = "car"
+    return {
+        "class": vclass,
+        "massKg": round(mass_kg, 1) if mass_kg is not None else None,
+        "coupler": coupler,
+        "hasTrailer": bool(raw.get("hasTrailer")),
+    }
+
+
+def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats=(), cargo_kg=0.0, seed=0, idx=1):
+    """Compute realistic job- and cargo-scaled dwell duration (seconds) for a stop."""
+    mode = str(mode or "").lower()
+    tier = str(tier or "").lower()
+    kind = str(kind or "").lower()
+    nm = str(name or "").lower()
+    cat_set = {str(c or "").lower() for c in (cats or ())}
+    if mode == "taxi":
+        is_hub = bool(cat_set & TAXI_HUB_CATS) or any(k in nm for k in ("airport", "station", "terminal", "hotel", "hospital"))
+        if kind == "pickup":
+            return 2.5 if is_hub else (2.0 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.2)
+        return 3.0 if (is_hub or tier == "regional") else (2.4 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.6)
+    if mode == "bus":
+        is_hub = bool(cat_set & {"bus_station", "station", "terminal"}) or any(k in nm for k in BUS_HUB_KEYWORDS)
+        if is_hub:
+            return round(4.5 + 0.5 * _stable_index(seed, f"bdw:{idx}", 2), 1)
+        return round(3.0 + 0.2 * _stable_index(seed, f"bdw:{idx}", 5), 1)
+    # Logistics: scale with cargo weight & stop kind
+    kg = max(0.0, float(cargo_kg or 0.0))
+    if kg <= 1400.0:
+        lo, hi = 3.5, 4.5
+        frac = min(1.0, kg / 1400.0)
+    elif kg <= 8000.0:
+        lo, hi = 6.0, 8.0
+        frac = min(1.0, (kg - 1400.0) / 6600.0)
+    else:
+        lo, hi = 9.0, 12.0
+        frac = min(1.0, (kg - 8000.0) / 18000.0)
+    base = lo + (hi - lo) * frac
+    if kind == "delivery":
+        base = max(lo, base * 0.92)
+    return round(min(hi, max(lo, base)), 1)
+
+
+def generate_cargo_manifest(vehicle, tier, seed):
+    """Select realistic cargo type and tonnage strictly matched to the player's vehicle class."""
+    v = vehicle or {"class": "van", "coupler": "none", "hasTrailer": False}
+    vclass = v.get("class") if v.get("class") in VEHICLE_CLASSES else "van"
+    coupler = v.get("coupler") or "none"
+    has_trailer = bool(v.get("hasTrailer"))
+    lo, hi = CARGO_BANDS[vclass]
+    if vclass == "semi" and coupler != "fifthwheel" and not has_trailer:
+        lo, hi = SEMI_BOBTAIL_BAND
+    tier_bands = {
+        "local": (0.05, 0.55),
+        "city": (0.30, 0.75),
+        "regional": (0.55, 0.90),
+        "long": (0.70, 1.00),
+    }
+    f_lo, f_hi = tier_bands.get(str(tier or "local").lower(), (0.25, 0.75))
+    u = _stable_index(seed, f"cargo_w:{vclass}:{tier}", 101) / 100.0
+    frac = f_lo + (f_hi - f_lo) * u
+    raw_kg = lo + (hi - lo) * frac
+    mass_kg = int(max(lo, min(hi, round(raw_kg / 10.0) * 10)))
+    catalog = CARGO_CATALOG[vclass]
+    ctype, clabel = catalog[_stable_index(seed, f"cargo_t:{vclass}:{tier}", len(catalog))]
+    return {
+        "type": ctype,
+        "label": clabel,
+        "massKg": mass_kg,
+        "vehicleClass": vclass,
+    }
+
+
 def validate_request(msg):
     """Validate incoming transport_job dict -> (cleaned_dict, None) or (None, error_str)."""
     if not isinstance(msg, dict):
@@ -173,7 +305,8 @@ def validate_request(msg):
         seed = int(seed) if seed is not None else 0
     except (TypeError, ValueError):
         seed = 0
-    return {"mode": mode, "tier": tier, "lat": lat, "lon": lon, "heading": heading, "seed": seed}, None
+    vehicle = _clean_vehicle(msg.get("vehicle"))
+    return {"mode": mode, "tier": tier, "lat": lat, "lon": lon, "heading": heading, "seed": seed, "vehicle": vehicle}, None
 
 
 # --------------------------------------------------------------------------- MapData cell helpers
@@ -860,11 +993,11 @@ def _snap_logistics_spot(md, poi_lat, poi_lon, deadline, road_cells=None, bld_ce
     return curb
 
 
-def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None):
+def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None):
     road = snapped.get("road") or ""
     addr = address or road or f"{snapped['lat']:.5f}, {snapped['lon']:.5f}"
     st = stop_type or snapped.get("stopType") or "kerbside"
-    return {
+    stop = {
         "index": int(idx),
         "kind": kind,
         "stopType": st,
@@ -876,6 +1009,9 @@ def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type
         "bearing": round(float(snapped.get("bearing") or 0.0), 1),
         "zoneRadius": float(zone_radius),
     }
+    if dwell_target_s is not None:
+        stop["dwellTargetS"] = round(float(dwell_target_s), 1)
+    return stop
 
 
 def _route_estimate_km(lat0, lon0, stops):
@@ -1036,6 +1172,8 @@ def _generate_taxi(md, req, deadline):
         do_addr = f"{do_addr}, {town_suffix}" if do_addr else town_suffix
     do_stop = _make_stop(2, "dropoff", do_name, do_snap, address=do_addr, zone_radius=12.0)
     stops = [pu_stop, do_stop]
+    for s in stops:
+        s["dwellTargetS"] = compute_dwell_target_s("taxi", tier, s["kind"], s["stopType"], s["name"], seed=seed, idx=s["index"])
     return {
         "ok": True,
         "mode": "taxi",
@@ -1292,7 +1430,10 @@ def _generate_bus(md, net, req, deadline):
                 snapped = _apply_curb_offset(snapped, s["lat"], s["lon"], snapped["lat"], snapped["lon"], bld_polys)
             else:
                 snapped = {"lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0, "stopType": "kerbside"}
-            snapped_stops.append(_make_stop(idx, "bus_stop", s["name"] or f"Stop {idx}", snapped, zone_radius=14.0, stop_type="kerbside"))
+            snapped_stops.append(_make_stop(
+                idx, "bus_stop", s["name"] or f"Stop {idx}", snapped, zone_radius=14.0, stop_type="kerbside",
+                dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
+            ))
         if len(snapped_stops) >= 4:
             return {
                 "ok": True,
@@ -1317,7 +1458,10 @@ def _generate_bus(md, net, req, deadline):
                 snapped = _apply_curb_offset(snapped, s["lat"], s["lon"], snapped["lat"], snapped["lon"], bld_polys)
             else:
                 snapped = {"lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0, "stopType": "kerbside"}
-            stops.append(_make_stop(idx, "bus_stop", s["name"], snapped, zone_radius=14.0, stop_type="kerbside"))
+            stops.append(_make_stop(
+                idx, "bus_stop", s["name"], snapped, zone_radius=14.0, stop_type="kerbside",
+                dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
+            ))
         return {
             "ok": True,
             "mode": "bus",
@@ -1347,7 +1491,10 @@ def _generate_bus(md, net, req, deadline):
             nm = f"{snapped['road']} Stop {idx}" if snapped.get("road") else f"Bus Stop {idx}"
             bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
             curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
-            stops.append(_make_stop(idx, "bus_stop", nm, curb, zone_radius=14.0, stop_type="kerbside"))
+            stops.append(_make_stop(
+                idx, "bus_stop", nm, curb, zone_radius=14.0, stop_type="kerbside",
+                dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", nm, seed=seed, idx=idx),
+            ))
             base_brg = bearing_deg(cur_lat, cur_lon, curb["lat"], curb["lon"])
             cur_lat, cur_lon = curb["lat"], curb["lon"]
         else:
@@ -1578,10 +1725,36 @@ def _generate_logistics_haul(md, req, deadline):
     }
 
 
-def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, deadline_s=DEADLINE_S):
+def _apply_logistics_cargo_and_dwell(res, req):
+    if not res.get("ok") or not res.get("stops"):
+        return res
+    cargo = generate_cargo_manifest(req.get("vehicle"), req["tier"], req["seed"])
+    mass_kg = cargo["massKg"]
+    stops = res["stops"]
+    deliveries = [s for s in stops if s.get("kind") != "loading"]
+    n_del = len(deliveries)
+    per_del = (mass_kg // n_del) if n_del > 0 else 0
+    rem = (mass_kg - per_del * n_del) if n_del > 0 else 0
+    del_i = 0
+    for s in stops:
+        if s.get("kind") == "loading":
+            s["cargoDeltaKg"] = mass_kg if n_del > 0 else 0
+        else:
+            del_i += 1
+            s["cargoDeltaKg"] = -(per_del + (rem if del_i == n_del else 0))
+        s["dwellTargetS"] = compute_dwell_target_s(
+            "logistics", req["tier"], s.get("kind"), s.get("stopType"),
+            s.get("name"), cargo_kg=mass_kg, seed=req["seed"], idx=s.get("index", 1),
+        )
+    res["cargo"] = cargo
+    res["vehicleClass"] = cargo["vehicleClass"]
+    return res
+
+
+def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, vehicle=None, deadline_s=DEADLINE_S):
     """Generate a global, deterministic Transport Mode job within deadline_s."""
     req, err = validate_request({
-        "mode": mode, "tier": tier, "lat": lat, "lon": lon, "heading": heading, "seed": seed,
+        "mode": mode, "tier": tier, "lat": lat, "lon": lon, "heading": heading, "seed": seed, "vehicle": vehicle,
     })
     if req is None:
         return {"ok": False, "mode": str(mode or ""), "tier": str(tier or ""), "stops": [], "error": err}
@@ -1599,6 +1772,7 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, de
                 res = _generate_logistics_short(md, req, deadline)
             else:
                 res = _generate_logistics_haul(md, req, deadline)
+            res = _apply_logistics_cargo_and_dwell(res, req)
     except Exception as e:
         log.warning("transport job %s/%s failed: %s: %s", req["mode"], req["tier"], type(e).__name__, e)
         res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}

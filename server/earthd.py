@@ -8395,7 +8395,7 @@ class Connection:
                 pool,
                 lambda: transportmod.generate_job(
                     md, net, mode=req["mode"], tier=req["tier"], lat=req["lat"], lon=req["lon"],
-                    heading=req["heading"], seed=req["seed"],
+                    heading=req["heading"], seed=req["seed"], vehicle=req.get("vehicle"),
                 ),
             )
         except Exception as e:

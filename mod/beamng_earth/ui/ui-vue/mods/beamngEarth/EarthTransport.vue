@@ -23,6 +23,14 @@
             <span v-if="currentStop && currentStop.kind" class="tm-kind-tag">{{ stopKindLabel(currentStop.kind) }}</span>
           </div>
           <div v-if="currentStop && currentStop.address" class="tm-stop-addr">{{ currentStop.address }}</div>
+          <div v-if="active.mode === 'taxi'" class="tm-subline">
+            <span class="tm-pill" :class="{ on: active.passengerOnBoard }">{{ active.passengerOnBoard ? 'Passenger on board' : 'En route to pickup' }}</span>
+            <span v-if="active.passengerOnBoard && active.fare != null" class="tm-num tm-fare">Meter ${{ Number(active.fare).toFixed(2) }}</span>
+          </div>
+          <div v-else-if="active.mode === 'logistics' && active.cargoKg" class="tm-subline">
+            <span>{{ active.cargoLabel || 'Cargo' }} · <b class="tm-num">{{ formatCargo(active.cargoKg) }}</b></span>
+            <span v-if="active.trailerState && active.trailerState !== 'none'" class="tm-pill on">{{ trailerLabel(active.trailerState) }}</span>
+          </div>
           <div class="tm-metrics">
             <div class="tm-metric">
               <span class="tm-metric-k">To stop</span>
@@ -103,6 +111,8 @@
           <div><span>Time</span><b class="tm-num">{{ formatDur(summary.elapsedS) }}</b></div>
           <div><span>Smoothness</span><b class="tm-num">{{ summary.smoothnessPct }}%</b></div>
           <div><span>Collisions</span><b class="tm-num">{{ summary.collisions }}</b></div>
+          <div v-if="summary.mode === 'taxi' && summary.totalFare > 0"><span>Fare + Tip</span><b class="tm-num">${{ Number(summary.totalFare).toFixed(2) }}</b></div>
+          <div v-else-if="summary.mode === 'logistics' && summary.cargoKg"><span>Cargo</span><b class="tm-num">{{ formatCargo(summary.cargoKg) }}</b></div>
           <div class="is-score"><span>Score</span><b class="tm-num">{{ summary.score }}/100</b></div>
         </div>
         <div class="tm-actions">
@@ -176,14 +186,26 @@ const currentStop = computed(() => {
 })
 const dwellLabel = computed(() => {
   if (!active.value) return "Hold in bay"
+  if (active.value.dwellLabel) return active.value.dwellLabel
   return active.value.dwellMode === "fallback" ? "Kerbside fallback" : "Hold in bay"
 })
 const dwellTimerText = computed(() => {
   if (!active.value) return ""
   const target = Number(active.value.dwellTargetS || (active.value.dwellMode === "fallback" ? 5.0 : 2.5))
   const cur = active.value.dwellS != null ? Number(active.value.dwellS) : Number(active.value.dwellFrac || 0) * target
-  return `${cur.toFixed(1)} / ${target.toFixed(1)} s`
+  const rem = Math.max(0, target - cur)
+  return `${cur.toFixed(1)} / ${target.toFixed(1)} s (${rem.toFixed(1)} s left)`
 })
+function formatCargo(kg) {
+  const v = Number(kg) || 0
+  return v >= 1000 ? `${(v / 1000).toFixed(1)} t` : `${Math.round(v)} kg`
+}
+function trailerLabel(st) {
+  if (st === "attached") return "Trailer Hitched"
+  if (st === "spawning" || st === "ready") return "Trailer Ready"
+  if (st === "tight_space_solo") return "Solo (Tight Space)"
+  return "Solo"
+}
 const activeModeDesc = computed(() => {
   const m = TRANSPORT_MODES.find(x => x.id === selectedMode.value)
   return m ? m.desc : ""
@@ -355,6 +377,27 @@ const errText = computed(() => actionError.value || st.value.error || "")
 }
 .tm-metric { display: inline-flex; align-items: baseline; gap: 5px; }
 .tm-metric-k { font-size: 11px; color: #8c99a6; }
+.tm-subline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #cdd6df;
+}
+.tm-pill {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.09);
+  color: #b8c4d0;
+}
+.tm-pill.on {
+  background: rgba(61, 220, 132, 0.18);
+  color: #6ae696;
+}
+.tm-fare { font-weight: 700; color: #ffd45a; }
 
 .tm-dwell { margin-top: 2px; }
 .tm-dwell-row {
