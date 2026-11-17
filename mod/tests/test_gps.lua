@@ -530,4 +530,31 @@ do
   nodes.b.pos.x = -1.001
   T.check(ids() == 'a,c', 'nodes beyond the stock merge radius remain invalid')
 end
+do -- Managed destinations (Transport Modes): suppress auto-arrival and strip fixed endWP near the bay
+  local savedCore, savedGet, savedGm = rawget(_G, 'beamngEarth_core'), rawget(_G, 'getPlayerVehicle'), rawget(_G, 'core_groundMarkers')
+  local check = G.CHECK_S
+  G.CHECK_S = 0
+  local clears = 0
+  local fakePath = { { pos = { x = 0, y = 0, z = 0 } }, { pos = { x = 0, y = 35, z = 0 }, fixed = true } }
+  core_groundMarkers = {
+    routePlanner = { path = fakePath },
+    setPath = function(target)
+      if target == nil then clears = clears + 1 else core_groundMarkers.routePlanner.path = fakePath end
+    end,
+  }
+  beamngEarth_core = { requestRoute = function() return true end, takeRoute = function() return nil end }
+  getPlayerVehicle = function() return nil end
+  local anchor = { geodeticToEnu = function(_, lat, lon) return lon * 1000, lat * 1000, 0 end }
+  G.clear()
+  T.check(G.setDestination(0, 0.035, 'Stop 1', { managed = true }) and G.status().managed == true, 'managed destination set')
+  -- Within ARRIVE_M (35 m < 40 m): must NOT auto-arrive or clear GPS
+  G.update(anchor, { x = 0, y = 0, lat = 0, lon = 0 })
+  T.check(G.status() ~= nil, 'managed destination suppresses 40 m auto-arrive')
+  -- Within MANAGED_ARROW_CLEAR_M (15 m <= 22 m): clears stock arrows
+  G.update(anchor, { x = 20, y = 0, lat = 0, lon = 0.020 })
+  T.check(clears >= 1, 'managed destination clears stock arrows inside bay approach')
+  G.clear()
+  G.CHECK_S = check
+  beamngEarth_core, getPlayerVehicle, core_groundMarkers = savedCore, savedGet, savedGm
+end
 T.done('test_gps')

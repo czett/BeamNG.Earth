@@ -68,7 +68,35 @@ do
   T.check(st == 'dwelling' and dw == 1.0, 'paused: holds dwell without advancing')
 
   st, dw = tm.stepStop(2.6, 4, 1.0, 0.2, 12, 0.5, false)
-  T.check(st == 'complete' and dw == tm.DWELL_S, '3.0 s inside zone at low speed: complete')
+  T.check(st == 'complete' and dw == tm.DWELL_S, '2.5 s inside zone at low speed: complete')
+end
+
+-- 2b. Rectangular bay projection & guaranteed completable fail-safe (primary 2.5 s vs 15 m fallback 5.0 s)
+do
+  local specTaxi = tm.baySpec('taxi', 'neighborhood')
+  local specBus = tm.baySpec('bus', 'full')
+  T.check(specTaxi.width == 3.4 and specTaxi.length == 8.5, 'taxi bay is 3.4 x 8.5 m')
+  T.check(specBus.width == 3.8 and specBus.length == 14.0, 'bus bay is 3.8 x 14.0 m')
+
+  local fx, fy, rx, ry = tm.bayFrame(0, 1, 90)
+  local longOff, latOff = tm.bayOffsets(4, -2, 0, 0, fx, fy, rx, ry)
+  T.check(math.abs(longOff - 4) < 1e-6 and math.abs(latOff - 2) < 1e-6, 'bayOffsets projects along east-facing bay')
+
+  -- Inside primary bay tolerances (<= 3.5 m lat, <= 5.0 m long), speed < 1.5 m/s -> 2.5 s completes
+  local st, dw, dm = tm.stepBayStop(2.1, 'bay', 3.2, 3.0, 1.0, 0.0, 1.1, specTaxi, 0.5, false)
+  T.check(st == 'complete' and dw == tm.BAY_DWELL_S and dm == 'bay', 'primary bay 2.5 s dwell completes')
+
+  -- Outside tight bay (> 5.0 m long) but within 15 m fallback radius: speed 1.0 m/s (> 0.8) does not dwell fallback
+  st, dw, dm = tm.stepBayStop(0, 'none', 11.0, 10.0, 4.5, 0.0, 1.0, specTaxi, 0.5, false)
+  T.check(st == 'approaching' and dw == 0 and dm == 'none', 'fallback requires speed < 0.8 m/s')
+
+  -- Within 15 m fallback radius and speed < 0.8 m/s -> 5.0 s completes as fallback_complete
+  st, dw, dm = tm.stepBayStop(4.6, 'fallback', 11.0, 10.0, 4.5, 0.0, 0.5, specTaxi, 0.5, false)
+  T.check(st == 'fallback_complete' and dw == tm.FALLBACK_DWELL_S and dm == 'fallback', 'fallback 5.0 s dwell completes within 15 m')
+
+  -- Bridge guard blocks fallback too
+  st, dw, dm = tm.stepBayStop(2.0, 'fallback', 8.0, 7.0, 3.0, 15.0, 0.2, specTaxi, 0.5, false)
+  T.check(st == 'approaching' and dw == 0, 'bridge |dz| > 10 m blocks fallback dwell')
 end
 
 -- 3. Pure score computation
@@ -126,9 +154,9 @@ do
   tm.update(0.5, 0.5, anchor, pl, false, false)
   T.check(tm.hudPayload().dwellFrac == 0, 'bridge height difference blocks dwell')
 
-  -- Ground level: dwell 3.0 s completes stop 1 and routes GPS to stop 2
+  -- Ground level: dwell 2.5 s completes stop 1 and routes GPS to stop 2
   pl.z = 10
-  for _ = 1, 6 do
+  for _ = 1, 5 do
     fakeNow = fakeNow + 0.5
     tm.update(0.5, 0.5, anchor, pl, false, false)
   end
@@ -142,30 +170,37 @@ do
   tm.update(0.5, 0.5, anchor, pl, false, false)
   T.check(tm.uiState().active.drivenM < 100, 'onRebased ignores anchor coordinate jump')
 
-  -- Skip final stop completes job and clears owned GPS
-  tm.skipStop()
+  -- Fallback completion inside 15 m outside primary bay (5.0 s at < 0.8 m/s) finishes job
+  pl.x, pl.y = 11, 950
+  for _ = 1, 10 do
+    fakeNow = fakeNow + 0.5
+    tm.update(0.5, 0.5, anchor, pl, false, false)
+  end
   local sum = tm.hudPayload()
-  T.check(sum.state == 'summary' and sum.stopsCompleted == 1 and sum.stopsSkipped == 1, 'summary records completed & skipped stops')
+  T.check(sum.state == 'summary' and sum.stopsCompleted == 2 and sum.fallbackCount == 1, 'fallback completion finishes job and records fallbackCount')
   T.check(gpsCalls.cleared == 1 and not tm.isActive(), 'job completion clears owned GPS and returns inactive')
 
   tm.dismissSummary()
   T.check(tm.hudPayload() == nil, 'dismissSummary clears summary')
 end
 
--- 6. Cancel job clears state and owned GPS
+-- 6. Skip stop + cancel job clears state and owned GPS
 do
-  local res = tm.startJob('bus', 'partial')
-  T.check(res.ok, 'bus job started')
+  local res = tm.startJob('logistics', 'local')
+  T.check(res.ok, 'logistics job started')
   tm.onJobResult({
     id = sentReqs[#sentReqs].id,
     ok = true,
-    mode = 'bus',
-    tier = 'partial',
+    mode = 'logistics',
+    tier = 'local',
     stops = {
-      { index = 1, kind = 'bus_stop', name = 'Stop A', lat = 39.286, lon = -76.610 },
-      { index = 2, kind = 'bus_stop', name = 'Stop B', lat = 39.289, lon = -76.610 },
+      { index = 1, kind = 'loading', stopType = 'loading_bay', name = 'Dock A', lat = 39.286, lon = -76.610 },
+      { index = 2, kind = 'delivery', stopType = 'kerbside', name = 'Shop B', lat = 39.289, lon = -76.610 },
     },
   })
+  T.check(tm.hudPayload().stopType == 'loading_bay', 'stopType exposed in hudPayload')
+  tm.skipStop()
+  T.check(tm.hudPayload().stopType == 'kerbside', 'skipStop advances to stop 2 kerbside')
   local cRes = tm.cancelJob()
   T.check(cRes.ok and not tm.isActive() and tm.hudPayload() == nil and gpsCalls.cleared == 2, 'cancelJob clears active job & GPS')
 end

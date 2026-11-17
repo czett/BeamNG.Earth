@@ -20,6 +20,8 @@ M.MAX_VIA = 10          -- (server routing.MAX_VIA)
 M.CHECK_S = 1.0
 M.ARRIVE_M = 40         -- this close (horizontally): arrived
 M.FINAL_M = 60          -- a graph node this close to the destination: the arrows end at the destination itself
+M.MANAGED_ARROW_CLEAR_M = 22  -- managed destinations (Transport Modes): hide stock arrows/markers near the bay
+M.MANAGED_ARROW_RESUME_M = 28
 M.ON_GRAPH_M = 25       -- route points may project this far onto a nearby graph edge
 M.LOOKAHEAD_M = 1500    -- how far along the route the arrows may reach
 M.SAMPLE_M = 40         -- route points tried for the arrows' target at least this far apart
@@ -211,10 +213,17 @@ function M.routePosition(xs, ys, cum, px, py, vx, vy, sPrev, i0, i1)
 end
 
 local lineKey = nil      -- (setLineArrows: the route-line arrows' key; nil while the planner's arrows are up)
+local managedHidden = false
 local function clearArrows()
   local gm = rawget(_G, 'core_groundMarkers')
   if gm and gm.setPath then pcall(gm.setPath, nil) end
   routedTo, lineKey = nil, nil
+end
+local function stripFixedTarget(gm)
+  local rp = gm and gm.routePlanner
+  if rp and type(rp.path) == 'table' then
+    for _, wp in ipairs(rp.path) do wp.fixed = nil end
+  end
 end
 
 local function core() return rawget(_G, 'beamngEarth_core') end
@@ -250,10 +259,11 @@ local function requestRoute(player)
   end
 end
 
-function M.setDestination(lat, lon, name)
+function M.setDestination(lat, lon, name, opts)
   lat, lon = tonumber(lat), tonumber(lon)
   if not lat or not lon then return false end
-  dest = { lat = lat, lon = lon, name = name }
+  dest = { lat = lat, lon = lon, name = name, managed = type(opts) == 'table' and opts.managed == true or false }
+  managedHidden = false
   autoFinished = nil
   vias = {}
   route, routeError, pendingId, enu, progress, info, progressS = nil, nil, nil, nil, 1, nil, nil
@@ -300,6 +310,7 @@ function M.clear()
   if auto then M.setAutodrive(false) end
   vias = {}
   dest, route, routeError, pendingId, enu, info = nil, nil, nil, nil, nil, nil
+  managedHidden = false
   downloadProgress = nil
   clearArrows()
 end
@@ -319,7 +330,8 @@ M.metric = metric
 
 function M.status()
   if not dest then return nil end
-  return { lat = dest.lat, lon = dest.lon, name = dest.name, dist = info and info.dist, bearing = info and info.bearing,
+  return { lat = dest.lat, lon = dest.lon, name = dest.name, managed = dest.managed or nil,
+           dist = info and info.dist, bearing = info and info.bearing,
            metric = metric(),
            remaining = info and info.remaining, eta = info and info.eta, routeVersion = route and route.version or 0,
            progress = progress, planning = pendingId ~= nil, routeError = routeError, pendingId = pendingId,
@@ -1064,6 +1076,7 @@ local function setArrows(key, target, tail, nodes, projections)
     -- (not before the route is in: the AI would set off on its own way toward the destination)
     if auto and route ~= nil and not paused then pcall(driveArrowsPath, gm, nodes, projections) end    -- before the tail: the AI drives the graph part only
     if tail then pcall(appendTail, gm, tail.e, tail.s, tail.z) end
+    if dest and dest.managed then stripFixedTarget(gm) end
     return true
   end
 end
@@ -1246,7 +1259,17 @@ function M.update(anchor, player)
     if auto then M.setAutodrive(false, true) end
     M.clear()
   end
-  if not route and not ahead and dist < M.ARRIVE_M then arrive() return end
+  local managed = dest and dest.managed
+  if managed and not ahead and not auto then
+    if dist <= M.MANAGED_ARROW_CLEAR_M then
+      if not managedHidden then clearArrows(); managedHidden = true end
+    elseif dist >= M.MANAGED_ARROW_RESUME_M then
+      managedHidden = false
+    end
+  else
+    managedHidden = false
+  end
+  if not managed and not route and not ahead and dist < M.ARRIVE_M then arrive() return end
   local m = rawget(_G, 'map') and map.getMap and map.getMap()
   local nodes = m and m.nodes
   if physicsRunning then autoKeep(nodes, now) end
@@ -1265,7 +1288,7 @@ function M.update(anchor, player)
     local remaining = e.cum[n] - (e.cum[i] + t * (e.cum[i + 1] - e.cum[i]))
     info.remaining = remaining + off
     info.off = off
-    if not ahead and M.arrived(dist, remaining, off) then arrive() return end
+    if not managed and not ahead and M.arrived(dist, remaining, off) then arrive() return end
     local speed = math.sqrt(vx * vx + vy * vy)
     local back
     back, leastRemaining = M.backtracking(leastRemaining, info.remaining, speed)
@@ -1275,6 +1298,7 @@ function M.update(anchor, player)
     end
     if route.dist and route.dist > 0 and route.dur then info.eta = route.dur * remaining / route.dist end
     if off > M.OFF_ROUTE_M and not pendingId and now - lastRequest > M.REROUTE_S then requestRoute(player) end
+    if managedHidden then return end
     local tg
     if auto then
       local differentRoadLoaded
@@ -1328,6 +1352,7 @@ function M.update(anchor, player)
     end
   end
   -- no planned route (yet, or offline), or none of it on the local graph: toward the destination
+  if managedHidden then return end
   local id, pos, nd = M.pickNode(nodes, tx, ty)
   if not id then return end
   local final = nd <= M.FINAL_M
@@ -1338,7 +1363,7 @@ end
 -- The level ended: the arrows went with it (the destination and its route stay for the next level start).
 function M.reset()
   routedTo, info, lastCheck, enu, progress, progressS = nil, nil, -math.huge, nil, 1, nil
-  lineKey = nil
+  lineKey, managedHidden = nil, false
   autoPath, autoRoadPath, autoSerial, pathWait, vehGraph = nil, nil, nil, nil, {}
   autoForce, autoBlocked = true, false
   autoFinished = nil

@@ -126,6 +126,21 @@ export function modeLabel(m) {
   return f ? f.label : String(m || "").toUpperCase()
 }
 
+export function stopTypeLabel(stopType) {
+  return stopType === "loading_bay" ? "Loading Bay" : "Kerbside Stop"
+}
+
+export function stopKindLabel(kind) {
+  const map = {
+    pickup: "Pickup",
+    dropoff: "Drop-off",
+    bus_stop: "Bus Stop",
+    loading: "Loading",
+    delivery: "Delivery",
+  }
+  return map[kind] || String(kind || "Stop")
+}
+
 export function tierLabel(m, t) {
   const list = TRANSPORT_TIERS[m] || []
   const f = list.find(x => x.id === t)

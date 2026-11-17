@@ -11,7 +11,14 @@ M.TIERS = {
 }
 
 M.STOP_SPEED_MPS = 1.5
-M.DWELL_S = 3.0
+M.DWELL_S = 2.5
+M.BAY_STOP_SPEED_MPS = 1.5
+M.BAY_DWELL_S = 2.5
+M.BAY_LAT_TOL_M = 3.5
+M.BAY_LONG_TOL_M = 5.0
+M.FALLBACK_RADIUS_M = 15.0
+M.FALLBACK_SPEED_MPS = 0.8
+M.FALLBACK_DWELL_S = 5.0
 M.DEFAULT_ZONE_RADIUS_M = 12.0
 M.HEIGHT_TOL_M = 10.0
 M.DRAW_RADIUS_M = 450.0
@@ -91,6 +98,75 @@ function M.stepStop(dwellS, distXY, dz, speed, zoneRadius, dtSim, paused)
   return 'approaching', 0
 end
 
+-- Pure: rectangular parking/loading bay dimensions & primary tolerances for mode/tier.
+function M.baySpec(mode, tier)
+  mode = type(mode) == 'string' and mode:lower() or ''
+  tier = type(tier) == 'string' and tier:lower() or ''
+  if mode == 'bus' or (mode == 'logistics' and tier ~= 'local') then
+    return { width = 3.8, length = 14.0, halfW = 1.9, halfL = 7.0, latTol = M.BAY_LAT_TOL_M, longTol = 7.75 }
+  end
+  return { width = 3.4, length = 8.5, halfW = 1.7, halfL = 4.25, latTol = M.BAY_LAT_TOL_M, longTol = M.BAY_LONG_TOL_M }
+end
+
+-- Pure: ENU forward (fx, fy) and right-hand lateral (rx, ry) unit axes for compass bearingDeg given local north (nx, ny).
+function M.bayFrame(northX, northY, bearingDeg)
+  local nx, ny = tonumber(northX) or 0, tonumber(northY) or 1
+  local nl = math.sqrt(nx * nx + ny * ny)
+  if nl < 1e-6 then nx, ny = 0, 1 else nx, ny = nx / nl, ny / nl end
+  local ex, ey = ny, -nx
+  local rad = math.rad(tonumber(bearingDeg) or 0)
+  local c, s = math.cos(rad), math.sin(rad)
+  local fx, fy = nx * c + ex * s, ny * c + ey * s
+  return fx, fy, fy, -fx
+end
+
+-- Pure: signed (longitudinal, lateral) metres from bay center (sx, sy) to (px, py).
+function M.bayOffsets(px, py, sx, sy, fx, fy, rx, ry)
+  local dx, dy = px - sx, py - sy
+  return dx * fx + dy * fy, dx * rx + dy * ry
+end
+
+-- Pure: advance dwell timer with primary bay alignment (2.5 s) + 15 m kerbside fallback fail-safe (5.0 s).
+-- Returns state ('approaching'|'dwelling'|'complete'|'fallback_complete'), nextDwellS, nextDwellMode, targetDwellS.
+function M.stepBayStop(dwellS, dwellMode, distXY, longOff, latOff, dz, speed, baySpec, dtSim, paused)
+  dwellS = tonumber(dwellS) or 0
+  dwellMode = dwellMode or 'none'
+  local heightOk = (dz == nil) or (math.abs(dz) <= M.HEIGHT_TOL_M)
+  local latTol = (baySpec and baySpec.latTol) or M.BAY_LAT_TOL_M
+  local longTol = (baySpec and baySpec.longTol) or M.BAY_LONG_TOL_M
+  local inBay = heightOk and math.abs(latOff) <= latTol and math.abs(longOff) <= longTol
+  local inFallback = heightOk and distXY <= M.FALLBACK_RADIUS_M
+
+  if paused or not dtSim or dtSim <= 0 then
+    if dwellS > 0 then
+      local mode = (dwellMode == 'fallback') and 'fallback' or 'bay'
+      local target = (mode == 'fallback') and M.FALLBACK_DWELL_S or M.BAY_DWELL_S
+      return 'dwelling', dwellS, mode, target
+    end
+    return 'approaching', 0, 'none', M.BAY_DWELL_S
+  end
+
+  if inBay and speed < M.BAY_STOP_SPEED_MPS then
+    local cur = math.min(dwellS, M.BAY_DWELL_S)
+    local nxt = cur + dtSim
+    if nxt >= M.BAY_DWELL_S then
+      return 'complete', M.BAY_DWELL_S, 'bay', M.BAY_DWELL_S
+    end
+    return 'dwelling', nxt, 'bay', M.BAY_DWELL_S
+  end
+
+  if inFallback and speed < M.FALLBACK_SPEED_MPS then
+    local cur = (dwellMode == 'fallback') and math.min(dwellS, M.FALLBACK_DWELL_S) or 0
+    local nxt = cur + dtSim
+    if nxt >= M.FALLBACK_DWELL_S then
+      return 'fallback_complete', M.FALLBACK_DWELL_S, 'fallback', M.FALLBACK_DWELL_S
+    end
+    return 'dwelling', nxt, 'fallback', M.FALLBACK_DWELL_S
+  end
+
+  return 'approaching', 0, 'none', M.BAY_DWELL_S
+end
+
 -- Pure: compute 0..100 smoothness & safety score from accumulated driving metrics.
 function M.computeScore(m)
   local elapsed = math.max(1.0, tonumber(m.elapsedS) or 0)
@@ -122,7 +198,7 @@ local function syncGpsToStop(stop, idx, total)
   local ok, g = pcall(M.gps)
   if ok and g and g.setDestination then
     local label = string.format('[%d/%d] %s', idx, total, stop.name or 'Stop')
-    if pcall(g.setDestination, stop.lat, stop.lon, label) then
+    if pcall(g.setDestination, stop.lat, stop.lon, label, { managed = true }) then
       gpsTarget = { lat = stop.lat, lon = stop.lon }
     end
   end
@@ -200,6 +276,7 @@ function M.onJobResult(msg)
       stops[#stops + 1] = {
         index = tonumber(s.index) or (#stops + 1),
         kind = tostring(s.kind or 'stop'),
+        stopType = tostring(s.stopType or 'kerbside'),
         name = tostring(s.name or ('Stop ' .. (#stops + 1))),
         address = tostring(s.address or ''),
         lat = lat,
@@ -227,7 +304,12 @@ function M.onJobResult(msg)
     stopIndex = 1,
     stopsCompleted = 0,
     stopsSkipped = 0,
+    fallbackCount = 0,
     dwellS = 0,
+    dwellMode = 'none',
+    dwellTargetS = M.BAY_DWELL_S,
+    inBay = false,
+    inFallback = false,
     distM = nil,
     etaS = nil,
     drivenM = 0,
@@ -240,14 +322,17 @@ function M.onJobResult(msg)
     sampleAcc = 0,
     lastSample = nil,
     stopZ = nil,
+    bayCornersZ = nil,
     stopZAnchorId = nil,
     stopZAt = -math.huge,
+    visGreen = 0,
+    visAt = nil,
   }
   syncGpsToStop(stops[1], 1, #stops)
   M.say(string.format('Job started: %s (%d stops)', activeJob.title ~= '' and activeJob.title or activeJob.mode, #stops), 6)
 end
 
-local function finishJob()
+local function finishJob(fallbackFinal)
   if not activeJob then return end
   local j = activeJob
   local score, smooth = M.computeScore(j)
@@ -257,6 +342,7 @@ local function finishJob()
     title = j.title,
     stopsCompleted = j.stopsCompleted,
     stopsSkipped = j.stopsSkipped,
+    fallbackCount = j.fallbackCount or 0,
     stopCount = #j.stops,
     drivenM = math.floor(j.drivenM + 0.5),
     elapsedS = math.floor(j.elapsedS + 0.5),
@@ -267,25 +353,37 @@ local function finishJob()
   }
   activeJob = nil
   clearOwnedGps()
-  M.say(string.format('Job complete! %d/%d stops · Score %d/100', summary.stopsCompleted, summary.stopCount, summary.score), 8)
+  local prefix = fallbackFinal and 'Kerbside / Fallback Dropoff · ' or ''
+  M.say(string.format('%sJob complete! %d/%d stops · Score %d/100', prefix, summary.stopsCompleted, summary.stopCount, summary.score), 8)
 end
 
-local function advanceStop(completed)
+local function advanceStop(completed, isFallback)
   if not activeJob then return end
-  if completed then activeJob.stopsCompleted = activeJob.stopsCompleted + 1
-  else activeJob.stopsSkipped = activeJob.stopsSkipped + 1 end
+  if completed then
+    activeJob.stopsCompleted = activeJob.stopsCompleted + 1
+    if isFallback then activeJob.fallbackCount = (activeJob.fallbackCount or 0) + 1 end
+  else
+    activeJob.stopsSkipped = activeJob.stopsSkipped + 1
+  end
   activeJob.dwellS = 0
+  activeJob.dwellMode = 'none'
+  activeJob.dwellTargetS = M.BAY_DWELL_S
+  activeJob.inBay = false
+  activeJob.inFallback = false
   activeJob.stopZ = nil
+  activeJob.bayCornersZ = nil
   activeJob.stopZAnchorId = nil
   activeJob.stopZAt = -math.huge
+  activeJob.visGreen = 0
   if activeJob.stopIndex >= #activeJob.stops then
-    finishJob()
+    finishJob(isFallback)
     return
   end
   activeJob.stopIndex = activeJob.stopIndex + 1
   local nxt = activeJob.stops[activeJob.stopIndex]
   syncGpsToStop(nxt, activeJob.stopIndex, #activeJob.stops)
-  M.say(string.format('Stop %d/%d: %s', activeJob.stopIndex, #activeJob.stops, nxt.name), 5)
+  local note = isFallback and 'Kerbside / Fallback Dropoff · ' or ''
+  M.say(string.format('%sStop %d/%d: %s', note, activeJob.stopIndex, #activeJob.stops, nxt.name), 5)
 end
 
 function M.skipStop()
@@ -313,6 +411,7 @@ function M.onRebased()
   activeJob.lastTrack = nil
   activeJob.lastSample = nil
   activeJob.stopZ = nil
+  activeJob.bayCornersZ = nil
   activeJob.stopZAnchorId = nil
   activeJob.stopZAt = -math.huge
 end
@@ -402,29 +501,62 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
     updateMetrics(j, dtSim, player)
   end
 
-  -- Ground height near stop for bridge/overpass protection
+  local spec = M.baySpec(j.mode, j.tier)
+  local nx, ny = 0, 1
+  if anchor.northAt then
+    local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
+    if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
+  end
+  local fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
+
+  -- Ground height near stop & bay corners for bridge/overpass protection + slope-hugging marker
   local now = M.now()
   if distXY <= M.DRAW_RADIUS_M and (j.stopZ == nil or now - j.stopZAt >= 0.75) then
-    local gz = M.castRay(sx, sy, (player.z or 0) + 40, 120)
+    local zTop = (player.z or 0) + 40
+    local gz = M.castRay(sx, sy, zTop, 120)
     if gz then
       j.stopZ = gz
       j.stopZAt = now
+      local hl, hw = spec.halfL, spec.halfW
+      local function rayC(al, ac)
+        return M.castRay(sx + al * fx + ac * rx, sy + al * fy + ac * ry, gz + 12, 36) or gz
+      end
+      j.bayCornersZ = {
+        fl = rayC(hl, hw),
+        fr = rayC(hl, -hw),
+        bl = rayC(-hl, hw),
+        br = rayC(-hl, -hw),
+      }
     end
   end
   local dz = j.stopZ and ((player.z or 0) - j.stopZ) or nil
-  local state, nextDwell = M.stepStop(j.dwellS, distXY, dz, player.speed or 0, stop.zoneRadius, dtSim, paused)
+  local longOff, latOff = M.bayOffsets(player.x, player.y, sx, sy, fx, fy, rx, ry)
+  local heightOk = (dz == nil) or (math.abs(dz) <= M.HEIGHT_TOL_M)
+  j.inBay = heightOk and math.abs(latOff) <= spec.latTol and math.abs(longOff) <= spec.longTol
+  j.inFallback = (not j.inBay) and heightOk and distXY <= M.FALLBACK_RADIUS_M
+
+  local state, nextDwell, nextMode, targetS = M.stepBayStop(
+    j.dwellS, j.dwellMode, distXY, longOff, latOff, dz, player.speed or 0, spec, dtSim, paused
+  )
   j.dwellS = nextDwell
+  j.dwellMode = nextMode
+  j.dwellTargetS = targetS
   if state == 'complete' then
-    advanceStop(true)
+    advanceStop(true, false)
+  elseif state == 'fallback_complete' then
+    advanceStop(true, true)
   end
 end
 
 local MODE_RGBA = {
-  taxi = { 1.0, 0.78, 0.12, 0.9 },
-  bus = { 0.22, 0.68, 1.0, 0.9 },
-  logistics = { 0.95, 0.48, 0.18, 0.9 },
+  taxi = { 1.0, 0.76, 0.14 },
+  bus = { 0.16, 0.76, 1.0 },
+  logistics = { 0.96, 0.56, 0.16 },
 }
-local DWELL_RGBA = { 0.24, 0.86, 0.48, 0.95 }
+local BAY_GREEN = { 0.18, 0.92, 0.48 }
+local FALLBACK_AMBER = { 0.58, 0.88, 0.34 }
+
+local function lerp(a, b, t) return a + (b - a) * t end
 
 function M.drawMarker(anchor, player)
   if not activeJob or not anchor or not player then return end
@@ -437,26 +569,91 @@ function M.drawMarker(anchor, player)
   local distXY = hypot(sx - player.x, sy - player.y)
   if distXY > M.DRAW_RADIUS_M then return end
 
-  local z = j.stopZ or player.z or 0
-  local c = j.dwellS > 0 and DWELL_RGBA or (MODE_RGBA[j.mode] or MODE_RGBA.taxi)
-  local col = ColorF(c[1], c[2], c[3], c[4])
-  local r = stop.zoneRadius or M.DEFAULT_ZONE_RADIUS_M
-  local segs = 20
-  local zRing = z + 0.18
-  for i = 0, segs - 1 do
-    local a0 = (i / segs) * math.pi * 2
-    local a1 = ((i + 1) / segs) * math.pi * 2
-    dd:drawLineInstance(
-      vec3(sx + r * math.cos(a0), sy + r * math.sin(a0), zRing),
-      vec3(sx + r * math.cos(a1), sy + r * math.sin(a1), zRing),
-      4, col
-    )
+  local spec = M.baySpec(j.mode, j.tier)
+  local nx, ny = 0, 1
+  if anchor.northAt then
+    local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
+    if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
   end
-  if dd.drawCylinder and dd.drawSphere then
-    local base = vec3(sx, sy, z)
-    local h = 4.0 + 2.0 * (j.dwellS / M.DWELL_S)
-    dd:drawCylinder(base, base + vec3(0, 0, h), 0.18, col)
-    dd:drawSphere(base + vec3(0, 0, h), 0.55, col)
+  local fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
+
+  local zCenter = j.stopZ or player.z or 0
+  local cz = j.bayCornersZ
+  local zfl = (cz and cz.fl) or zCenter
+  local zfr = (cz and cz.fr) or zCenter
+  local zbl = (cz and cz.bl) or zCenter
+  local zbr = (cz and cz.br) or zCenter
+  local hl, hw = spec.halfL, spec.halfW
+
+  local function bayPt(along, across)
+    local u = math.max(0, math.min(1, (along + hl) / (2 * hl)))
+    local v = math.max(0, math.min(1, (across + hw) / (2 * hw)))
+    local zB = lerp(zbr, zbl, v)
+    local zF = lerp(zfr, zfl, v)
+    local z = math.max(lerp(zB, zF, u), zCenter - 0.15) + 0.08
+    return vec3(sx + along * fx + across * rx, sy + along * fy + across * ry, z)
+  end
+
+  local now = M.now()
+  local dtVis = j.visAt and math.max(0, math.min(0.25, now - j.visAt)) or 0.05
+  j.visAt = now
+  local dwellFrac = (j.dwellTargetS and j.dwellTargetS > 0) and math.min(1, math.max(0, j.dwellS / j.dwellTargetS)) or 0
+  local targetGreen = 0
+  if j.inBay or j.dwellMode == 'bay' then
+    targetGreen = 0.45 + 0.55 * dwellFrac
+  elseif j.dwellMode == 'fallback' then
+    targetGreen = 0.35 * dwellFrac
+  end
+  j.visGreen = lerp(j.visGreen or 0, targetGreen, math.min(1, dtVis * 8.0))
+
+  local base = MODE_RGBA[j.mode] or MODE_RGBA.taxi
+  local tgt = (j.dwellMode == 'fallback') and FALLBACK_AMBER or BAY_GREEN
+  local g = j.visGreen
+  local rCol = lerp(base[1], tgt[1], g)
+  local gCol = lerp(base[2], tgt[2], g)
+  local bCol = lerp(base[3], tgt[3], g)
+
+  local colBorder = ColorF(rCol, gCol, bCol, 0.72)
+  local colBracket = ColorF(rCol, gCol, bCol, 0.96)
+  local colChevron = ColorF(rCol, gCol, bCol, 0.55 + 0.40 * g)
+
+  -- Solid front stop-bar (+hl)
+  dd:drawLineInstance(bayPt(hl, -hw), bayPt(hl, hw), 4, colBracket)
+
+  -- Dashed left/right bay side borders
+  local dashLen, gapLen = 1.25, 0.85
+  local stepLen = dashLen + gapLen
+  local cur = -hl + 0.9
+  while cur < hl - 0.9 do
+    local segEnd = math.min(cur + dashLen, hl - 0.9)
+    dd:drawLineInstance(bayPt(cur, -hw), bayPt(segEnd, -hw), 3, colBorder)
+    dd:drawLineInstance(bayPt(cur, hw), bayPt(segEnd, hw), 3, colBorder)
+    cur = cur + stepLen
+  end
+
+  -- Subtle rear entry dashes (-hl)
+  dd:drawLineInstance(bayPt(-hl, -hw * 0.65), bayPt(-hl, -hw * 0.2), 2.5, colBorder)
+  dd:drawLineInstance(bayPt(-hl, hw * 0.2), bayPt(-hl, hw * 0.65), 2.5, colBorder)
+
+  -- Crisp L-shaped corner brackets
+  local armL, armW = math.min(1.3, hl * 0.3), math.min(0.85, hw * 0.45)
+  for _, sl in ipairs({ -1, 1 }) do
+    for _, sw in ipairs({ -1, 1 }) do
+      local cPt = bayPt(sl * hl, sw * hw)
+      dd:drawLineInstance(cPt, bayPt(sl * (hl - armL), sw * hw), 6, colBracket)
+      dd:drawLineInstance(cPt, bayPt(sl * hl, sw * (hw - armW)), 6, colBracket)
+    end
+  end
+
+  -- Directional entry chevrons pointing forward along stop.bearing
+  local chevSpan = hw * 0.48
+  local chevDepth = math.min(1.0, hl * 0.18)
+  for _, frac in ipairs({ -0.58, -0.18, 0.22 }) do
+    local tipAlong = hl * frac + chevDepth * 0.5
+    local wingAlong = tipAlong - chevDepth
+    local tip = bayPt(tipAlong, 0)
+    dd:drawLineInstance(bayPt(wingAlong, -chevSpan), tip, 4, colChevron)
+    dd:drawLineInstance(bayPt(wingAlong, chevSpan), tip, 4, colChevron)
   end
 end
 
@@ -473,12 +670,15 @@ function M.drawUi(hiddenByUi)
   if im.Begin('Transport Job##beamngEarthTransport', nil, flags) then
     if activeJob then
       local stop = activeJob.stops[activeJob.stopIndex]
-      im.TextUnformatted(string.format('%s | Stop %d/%d', activeJob.mode:upper(), activeJob.stopIndex, #activeJob.stops))
+      local stype = (stop and stop.stopType == 'loading_bay') and 'Loading Bay' or 'Kerbside Stop'
+      im.TextUnformatted(string.format('%s · %s | Stop %d/%d', activeJob.mode:upper(), stype, activeJob.stopIndex, #activeJob.stops))
       im.TextUnformatted(stop and stop.name or '')
       if stop and stop.address ~= '' then im.TextUnformatted(stop.address) end
       if activeJob.distM then im.TextUnformatted(string.format('Distance: %.0f m', activeJob.distM)) end
       if activeJob.dwellS > 0 then
-        im.TextUnformatted(string.format('Hold stop: %.1f / %.1f s', activeJob.dwellS, M.DWELL_S))
+        local targetS = activeJob.dwellTargetS or M.BAY_DWELL_S
+        local lbl = (activeJob.dwellMode == 'fallback') and 'Kerbside fallback' or 'Hold in bay'
+        im.TextUnformatted(string.format('%s: %.1f / %.1f s', lbl, activeJob.dwellS, targetS))
       end
       if im.Button('Skip Stop') then M.skipStop() end
       im.SameLine()
@@ -504,6 +704,7 @@ function M.hudPayload()
   if activeJob then
     local stop = activeJob.stops[activeJob.stopIndex]
     local score = M.computeScore(activeJob)
+    local targetS = activeJob.dwellTargetS or M.BAY_DWELL_S
     return {
       state = 'active',
       mode = activeJob.mode,
@@ -514,9 +715,15 @@ function M.hudPayload()
       stopName = stop and stop.name or '',
       stopAddress = stop and stop.address or '',
       stopKind = stop and stop.kind or '',
+      stopType = stop and stop.stopType or 'kerbside',
       distM = activeJob.distM and math.floor(activeJob.distM + 0.5) or nil,
       etaS = activeJob.etaS and math.floor(activeJob.etaS + 0.5) or nil,
-      dwellFrac = math.min(1, math.max(0, activeJob.dwellS / M.DWELL_S)),
+      dwellS = activeJob.dwellS,
+      dwellTargetS = targetS,
+      dwellMode = activeJob.dwellMode or 'none',
+      dwellFrac = math.min(1, math.max(0, activeJob.dwellS / targetS)),
+      inBay = activeJob.inBay == true,
+      inFallback = activeJob.inFallback == true,
       score = score,
       collisions = activeJob.collisions,
       metric = metric,
@@ -529,6 +736,7 @@ function M.hudPayload()
       title = summary.title,
       stopsCompleted = summary.stopsCompleted,
       stopsSkipped = summary.stopsSkipped,
+      fallbackCount = summary.fallbackCount or 0,
       stopCount = summary.stopCount,
       drivenM = summary.drivenM,
       elapsedS = summary.elapsedS,
@@ -549,6 +757,7 @@ end
 function M.uiState()
   local c = M.core()
   local st = c and c._state and c._state()
+  local activeTarget = activeJob and (activeJob.dwellTargetS or M.BAY_DWELL_S) or M.BAY_DWELL_S
   return {
     pending = pending and { mode = pending.mode, tier = pending.tier } or nil,
     active = activeJob and {
@@ -563,7 +772,12 @@ function M.uiState()
       stops = activeJob.stops,
       distM = activeJob.distM and math.floor(activeJob.distM + 0.5) or nil,
       etaS = activeJob.etaS and math.floor(activeJob.etaS + 0.5) or nil,
-      dwellFrac = math.min(1, math.max(0, activeJob.dwellS / M.DWELL_S)),
+      dwellS = activeJob.dwellS,
+      dwellTargetS = activeTarget,
+      dwellMode = activeJob.dwellMode or 'none',
+      dwellFrac = math.min(1, math.max(0, activeJob.dwellS / activeTarget)),
+      inBay = activeJob.inBay == true,
+      inFallback = activeJob.inFallback == true,
       drivenM = math.floor(activeJob.drivenM + 0.5),
       elapsedS = math.floor(activeJob.elapsedS + 0.5),
       score = select(1, M.computeScore(activeJob)),

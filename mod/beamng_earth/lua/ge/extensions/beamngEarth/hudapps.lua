@@ -52,7 +52,10 @@ local function transportKey(tr)
   return table.concat({
     tostring(tr.state or ''), tostring(tr.mode or ''), tostring(tr.tier or ''),
     tostring(tr.stopIndex or ''), tostring(tr.stopCount or ''), tostring(tr.stopName or ''),
-    tostring(tr.distM or ''), tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5)),
+    tostring(tr.stopKind or ''), tostring(tr.stopType or ''),
+    tostring(tr.distM or ''), tostring(tr.etaS or ''),
+    tostring(tr.dwellMode or ''), tostring(tr.dwellTargetS or ''),
+    tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5)), tostring(tr.inBay or ''),
     tostring(tr.score or ''), tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
     tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
   }, '\2')

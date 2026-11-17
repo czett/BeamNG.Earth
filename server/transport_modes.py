@@ -39,6 +39,15 @@ DRIVABLE_CLASSES = frozenset({
 })
 LOGISTICS_FALLBACK_CLASSES = DRIVABLE_CLASSES | frozenset({"service"})
 SKIP_SUBCLASSES = frozenset({"driveway", "parking_aisle", "sidewalk", "crosswalk", "cycle_crossing", "alley"})
+LOGISTICS_SITE_SUBCLASSES = frozenset({"parking_aisle", "driveway", "alley", ""})
+NON_VEHICLE_SUBCLASSES = frozenset({"sidewalk", "crosswalk", "cycle_crossing", "footway", "steps", "path", "pedestrian"})
+_ROAD_HALF_W = {
+    "motorway": 5.5, "trunk": 4.5, "primary": 4.0, "secondary": 3.75,
+    "tertiary": 3.25, "residential": 3.0, "unclassified": 2.75,
+    "living_street": 2.5, "service": 2.0, "unknown": 2.5,
+}
+SITE_SEARCH_M = 60.0
+BLD_CLEAR_M = 2.5
 
 MODES = ("taxi", "bus", "logistics")
 TIERS = {
@@ -487,12 +496,378 @@ def _collect_pois_in_cells(md, keys, layers, deadline):
     return places_out, bld_out, land_out
 
 
-def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0):
+def _point_in_ring(px, py, ring_xy):
+    """Ray-casting point-in-polygon test on (k, 2) local ENU ring."""
+    if len(ring_xy) < 3:
+        return False
+    x = ring_xy[:, 0]
+    y = ring_xy[:, 1]
+    x2 = np.roll(x, -1)
+    y2 = np.roll(y, -1)
+    cond = (y > py) != (y2 > py)
+    if not cond.any():
+        return False
+    dy = np.where(cond, y2 - y, 1.0)
+    x_int = x[cond] + (py - y[cond]) * (x2[cond] - x[cond]) / dy[cond]
+    return bool(np.count_nonzero(px < x_int) & 1)
+
+
+def _min_dist_ring_m(px, py, ring_xy):
+    """Minimum Euclidean distance in metres from (px, py) to closed polygon boundary segments."""
+    if len(ring_xy) < 2:
+        return float("inf")
+    if len(ring_xy) >= 3 and not np.allclose(ring_xy[0], ring_xy[-1]):
+        pts = np.vstack([ring_xy, ring_xy[:1]])
+    else:
+        pts = ring_xy
+    a, b = pts[:-1], pts[1:]
+    ab = b - a
+    L2 = np.maximum((ab * ab).sum(1), 1e-12)
+    t = np.clip(((px - a[:, 0]) * ab[:, 0] + (py - a[:, 1]) * ab[:, 1]) / L2, 0.0, 1.0)
+    dx = a[:, 0] + t * ab[:, 0] - px
+    dy = a[:, 1] + t * ab[:, 1] - py
+    return float(np.sqrt((dx * dx + dy * dy).min()))
+
+
+def _building_polys(md, lat, lon, radius_m=140.0, deadline=None, bld_cells=None):
+    """Collect nearby building footprints as (bbox, outer_xy, hole_xys) in local ENU metres around (lat, lon)."""
+    if md is None:
+        return []
+    if deadline is None:
+        deadline = time.monotonic() + DEADLINE_S
+    if bld_cells is None:
+        keys = _cells_around(lat, lon, radius_m, max_cells=4)
+        bld_cells = [_cell_layer(md, key, "buildings", deadline) for key in keys]
+    k = _cos_lat(lat)
+    out = []
+    seen = set()
+    for f in bld_cells:
+        if f is None or not len(f.ids):
+            continue
+        for i in range(len(f.ids)):
+            fid = str(f.ids[i])
+            if fid in seen:
+                continue
+            seen.add(fid)
+            parts = f.parts(i) if hasattr(f, "parts") else None
+            if not parts:
+                continue
+            for part in parts:
+                if not part or len(part[0]) < 3:
+                    continue
+                outer = np.asarray(part[0], np.float64)
+                oxy = np.stack([(outer[:, 0] - lon) * M_LAT * k, (outer[:, 1] - lat) * M_LAT], axis=1)
+                bx0, by0 = float(oxy[:, 0].min()), float(oxy[:, 1].min())
+                bx1, by1 = float(oxy[:, 0].max()), float(oxy[:, 1].max())
+                if bx1 < -radius_m or bx0 > radius_m or by1 < -radius_m or by0 > radius_m:
+                    continue
+                holes = []
+                for hring in part[1:]:
+                    if len(hring) >= 3:
+                        ha = np.asarray(hring, np.float64)
+                        holes.append(np.stack([(ha[:, 0] - lon) * M_LAT * k, (ha[:, 1] - lat) * M_LAT], axis=1))
+                out.append(((bx0, by0, bx1, by1), oxy, holes))
+    return out
+
+
+def _point_clear_of_buildings_xy(px, py, bld_polys, min_clear_m=BLD_CLEAR_M):
+    """True when (px, py) in local ENU metres is >= min_clear_m outside every building footprint."""
+    for (bx0, by0, bx1, by1), outer, holes in bld_polys:
+        if px < bx0 - min_clear_m or px > bx1 + min_clear_m or py < by0 - min_clear_m or py > by1 + min_clear_m:
+            continue
+        inside = _point_in_ring(px, py, outer) and not any(_point_in_ring(px, py, h) for h in holes)
+        if inside:
+            return False
+        if _min_dist_ring_m(px, py, outer) < min_clear_m:
+            return False
+    return True
+
+
+def _clear_of_buildings(clat, clon, ref_lat, ref_lon, bld_polys, min_clear_m=BLD_CLEAR_M,
+                        bearing=None, half_l=0.0, half_w=0.0):
+    """Verify (clat, clon) is >= min_clear_m outside all building polygons (and bay corners clear of walls)."""
+    if not bld_polys:
+        return True
+    k = _cos_lat(ref_lat)
+    px = (clon - ref_lon) * M_LAT * k
+    py = (clat - ref_lat) * M_LAT
+    if not _point_clear_of_buildings_xy(px, py, bld_polys, min_clear_m):
+        return False
+    if bearing is not None and half_l > 0.0 and half_w > 0.0:
+        rad = math.radians(float(bearing))
+        fx, fy = dmath.sin(rad), dmath.cos(rad)
+        rx, ry = fy, -fx
+        for sl in (-1.0, 1.0):
+            for sw in (-1.0, 1.0):
+                cx = px + sl * half_l * fx + sw * half_w * rx
+                cy = py + sl * half_l * fy + sw * half_w * ry
+                if not _point_clear_of_buildings_xy(cx, cy, bld_polys, 0.5):
+                    return False
+    return True
+
+
+def _apply_curb_offset(snapped, poi_lat=None, poi_lon=None, ref_lat=None, ref_lon=None, bld_polys=None):
+    """Offset a road-snapped stop to the right-hand curb/bay edge along road bearing, clear of buildings."""
+    if not snapped:
+        return None
+    brg = float(snapped.get("bearing") or 0.0) % 360.0
+    slat, slon = float(snapped["lat"]), float(snapped["lon"])
+    # On two-way roads, orient bearing so the right-hand curb (+90 deg) faces the POI/platform side
+    if poi_lat is not None and poi_lon is not None and not snapped.get("oneway"):
+        if dist_m(slat, slon, poi_lat, poi_lon) >= 1.5:
+            to_poi = bearing_deg(slat, slon, poi_lat, poi_lon)
+            right_brg = (brg + 90.0) % 360.0
+            if _heading_diff(right_brg, to_poi) > 90.0:
+                brg = (brg + 180.0) % 360.0
+    half_w = _ROAD_HALF_W.get(str(snapped.get("roadClass") or "").lower(), 2.75)
+    target_off = max(1.6, min(3.5, half_w - 0.7))
+    right_brg = (brg + 90.0) % 360.0
+    rlat, rlon = (ref_lat, ref_lon) if (ref_lat is not None and ref_lon is not None) else (slat, slon)
+
+    chosen_lat, chosen_lon = slat, slon
+    for frac in (1.0, 0.7, 0.4, 0.0):
+        off = target_off * frac
+        clat, clon = offset_latlon(slat, slon, off, right_brg) if off > 0.0 else (slat, slon)
+        if not bld_polys or _clear_of_buildings(clat, clon, rlat, rlon, bld_polys, BLD_CLEAR_M):
+            chosen_lat, chosen_lon = clat, clon
+            break
+    return {
+        **snapped,
+        "lat": round(float(chosen_lat), 6),
+        "lon": round(float(chosen_lon), 6),
+        "bearing": round(brg, 1),
+        "stopType": snapped.get("stopType") or "kerbside",
+    }
+
+
+def _snap_site_aisle(md, poi_lat, poi_lon, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M):
+    """Snap to a drivable on-site service / parking_aisle / driveway segment within max_dist_m, clear of buildings."""
+    k = _cos_lat(poi_lat)
+    best = None
+    for f in road_cells:
+        if f is None or not len(f.ids):
+            continue
+        attrs = getattr(f, "attrs", {}) or {}
+        cls_col = _col(attrs, "class", len(f.ids))
+        name_col = _col(attrs, "name", len(f.ids))
+        sub_col = _col(attrs, "subtype", len(f.ids))
+        for i in range(len(f.ids)):
+            sub = str(sub_col[i] or "road").strip().lower()
+            if sub and sub != "road":
+                continue
+            c = str(cls_col[i] or "").strip().lower()
+            sc = _road_subclass(f, i)
+            if sc in NON_VEHICLE_SUBCLASSES:
+                continue
+            if not (c == "service" or sc in ("parking_aisle", "driveway")):
+                continue
+            for ring in _ground_rings(f, i):
+                arr = np.asarray(ring, np.float64)
+                if len(arr) < 2:
+                    continue
+                xy = np.stack([(arr[:, 0] - poi_lon) * M_LAT * k, (arr[:, 1] - poi_lat) * M_LAT], axis=1)
+                diffs = np.diff(xy, axis=0)
+                seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+                s = np.r_[0.0, np.cumsum(seg_lens)]
+                if s[-1] < 5.0:
+                    continue
+                d, j, t = _seg_nearest(xy, np.zeros(2))
+                if d > max_dist_m:
+                    continue
+                end_clr = min(6.0, s[-1] * 0.2)
+                at0 = min(max(s[j] + t * (s[j + 1] - s[j]), end_clr), s[-1] - end_clr)
+                cand_s = [at0, s[-1] * 0.5, end_clr, s[-1] - end_clr]
+                for at in cand_s:
+                    qx = float(np.interp(at, s, xy[:, 0]))
+                    qy = float(np.interp(at, s, xy[:, 1]))
+                    cd = math.hypot(qx, qy)
+                    if cd > max_dist_m:
+                        continue
+                    sj = max(0, min(len(diffs) - 1, int(np.searchsorted(s, at) - 1)))
+                    seg_dx, seg_dy = float(diffs[sj, 0]), float(diffs[sj, 1])
+                    brg = (math.degrees(math.atan2(seg_dx, seg_dy)) + 360.0) % 360.0 if (seg_dx * seg_dx + seg_dy * seg_dy) > 1e-6 else 0.0
+                    slat = float(poi_lat + qy / M_LAT)
+                    slon = float(poi_lon + qx / (M_LAT * k))
+                    if not _clear_of_buildings(slat, slon, poi_lat, poi_lon, bld_polys, BLD_CLEAR_M, brg, 3.5, 1.5):
+                        continue
+                    prio_pen = 0.0 if sc in ("parking_aisle", "driveway") else 6.0
+                    score = cd + prio_pen
+                    if best is None or score < best[0]:
+                        rname = _clean(name_col[i]) or ("Loading Bay" if sc == "driveway" else "Service Bay")
+                        best = (score, {
+                            "lat": round(slat, 6), "lon": round(slon, 6),
+                            "road": rname, "roadClass": c or "service",
+                            "bearing": round(brg, 1), "snapDistM": round(cd, 1),
+                            "stopType": "loading_bay",
+                        })
+                    break
+    return best[1] if best else None
+
+
+def _snap_parking_lot(md, poi_lat, poi_lon, infra_cells, land_cells, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M):
+    """Find a clear loading/parking bay inside a mapped parking lot polygon within max_dist_m."""
+    k = _cos_lat(poi_lat)
+    best = None
+    for cells in (infra_cells, land_cells):
+        for f in cells:
+            if f is None or not len(f.ids):
+                continue
+            attrs = getattr(f, "attrs", {}) or {}
+            n = len(f.ids)
+            cls_col = _col(attrs, "class", n)
+            surf_col = _col(attrs, "surface", n)
+            name_col = _col(attrs, "name", n)
+            for i in range(n):
+                cls = str(cls_col[i] or "").strip().lower()
+                tags = _tags_dict(attrs, i)
+                if cls not in ("parking", "parking_space") and tags.get("amenity") != "parking":
+                    continue
+                if str(surf_col[i] or "").strip().lower() in ("grass", "dirt", "mud", "sand"):
+                    continue
+                parts = f.parts(i) if hasattr(f, "parts") else None
+                if not parts or not parts[0] or len(parts[0][0]) < 3:
+                    continue
+                outer = np.asarray(parts[0][0], np.float64)
+                oxy = np.stack([(outer[:, 0] - poi_lon) * M_LAT * k, (outer[:, 1] - poi_lat) * M_LAT], axis=1)
+                if oxy[:, 0].max() < -max_dist_m or oxy[:, 0].min() > max_dist_m or oxy[:, 1].max() < -max_dist_m or oxy[:, 1].min() > max_dist_m:
+                    continue
+                pts = np.vstack([oxy, oxy[:1]]) if not np.allclose(oxy[0], oxy[-1]) else oxy
+                edges = np.diff(pts, axis=0)
+                elens = np.hypot(edges[:, 0], edges[:, 1])
+                if not len(elens) or elens.max() < 3.0:
+                    continue
+                li = int(elens.argmax())
+                brg = (math.degrees(math.atan2(float(edges[li, 0]), float(edges[li, 1]))) + 360.0) % 360.0
+                cx, cy = float(oxy[:, 0].mean()), float(oxy[:, 1].mean())
+                cands = [(0.0, 0.0)]
+                _, nj, nt = _seg_nearest(pts, np.zeros(2))
+                ex = float(pts[nj, 0] + nt * edges[nj, 0])
+                ey = float(pts[nj, 1] + nt * edges[nj, 1])
+                in_dx, in_dy = cx - ex, cy - ey
+                in_len = math.hypot(in_dx, in_dy)
+                if in_len > 1.0:
+                    cands.append((ex + (in_dx / in_len) * min(4.0, in_len * 0.5), ey + (in_dy / in_len) * min(4.0, in_len * 0.5)))
+                cands.extend([(cx * 0.5, cy * 0.5), (cx, cy)])
+                for px, py in cands:
+                    d = math.hypot(px, py)
+                    if d > max_dist_m:
+                        continue
+                    if not _point_in_ring(px, py, oxy):
+                        continue
+                    slat = float(poi_lat + py / M_LAT)
+                    slon = float(poi_lon + px / (M_LAT * k))
+                    if not _clear_of_buildings(slat, slon, poi_lat, poi_lon, bld_polys, BLD_CLEAR_M, brg, 3.5, 1.5):
+                        continue
+                    near_road = snap_to_road(md, slat, slon, radius_m=85.0, classes=LOGISTICS_FALLBACK_CLASSES, road_cells=road_cells)
+                    if not near_road:
+                        continue
+                    if best is None or d < best[0]:
+                        nm = _clean(name_col[i]) or near_road.get("road") or "Loading Lot"
+                        best = (d, {
+                            "lat": round(slat, 6), "lon": round(slon, 6),
+                            "road": nm, "roadClass": "service",
+                            "bearing": round(brg, 1), "snapDistM": round(d, 1),
+                            "stopType": "loading_bay",
+                        })
+                    break
+    return best[1] if best else None
+
+
+def _snap_building_perimeter_bay(md, poi_lat, poi_lon, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M):
+    """Place a loading bay outside the road-facing perimeter of a nearby building (>= 2.5 m clear of all walls)."""
+    if not bld_polys:
+        return None
+    road_ref = snap_to_road(md, poi_lat, poi_lon, radius_m=120.0, classes=LOGISTICS_FALLBACK_CLASSES, road_cells=road_cells)
+    if not road_ref:
+        return None
+    k = _cos_lat(poi_lat)
+    rx = (road_ref["lon"] - poi_lon) * M_LAT * k
+    ry = (road_ref["lat"] - poi_lat) * M_LAT
+
+    best = None
+    for (bx0, by0, bx1, by1), outer, _ in bld_polys:
+        if bx1 < -max_dist_m or bx0 > max_dist_m or by1 < -max_dist_m or by0 > max_dist_m:
+            continue
+        pts = np.vstack([outer, outer[:1]]) if not np.allclose(outer[0], outer[-1]) else outer
+        for j in range(len(pts) - 1):
+            ax, ay = float(pts[j, 0]), float(pts[j, 1])
+            bx, by = float(pts[j + 1, 0]), float(pts[j + 1, 1])
+            ex, ey = bx - ax, by - ay
+            elen = math.hypot(ex, ey)
+            if elen < 6.0:
+                continue
+            mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
+            nx, ny = -ey / elen, ex / elen
+            if _point_in_ring(mx + nx * 1.0, my + ny * 1.0, outer):
+                nx, ny = -nx, -ny
+            if _point_in_ring(mx + nx * 1.0, my + ny * 1.0, outer):
+                continue
+            px, py = mx + nx * 4.5, my + ny * 4.5
+            d_poi = math.hypot(px, py)
+            if d_poi > max_dist_m:
+                continue
+            if math.hypot(px - rx, py - ry) < 4.5:
+                continue
+            brg = (math.degrees(math.atan2(ex, ey)) + 360.0) % 360.0
+            slat = float(poi_lat + py / M_LAT)
+            slon = float(poi_lon + px / (M_LAT * k))
+            if not _clear_of_buildings(slat, slon, poi_lat, poi_lon, bld_polys, BLD_CLEAR_M, brg, 3.5, 1.5):
+                continue
+            to_road = math.hypot(rx - px, ry - py)
+            score = d_poi + 0.35 * to_road
+            if best is None or score < best[0]:
+                best = (score, {
+                    "lat": round(slat, 6), "lon": round(slon, 6),
+                    "road": road_ref.get("road") or "Loading Bay",
+                    "roadClass": road_ref.get("roadClass") or "service",
+                    "bearing": round(brg, 1), "snapDistM": round(d_poi, 1),
+                    "stopType": "loading_bay",
+                })
+    return best[1] if best else None
+
+
+def _snap_logistics_spot(md, poi_lat, poi_lon, deadline, road_cells=None, bld_cells=None, infra_cells=None, land_cells=None):
+    """Resolve Logistics stop: prefer on-site aisle/driveway -> parking lot -> building perimeter -> kerbside."""
+    keys = _cells_around(poi_lat, poi_lon, 180.0, max_cells=4)
+    if road_cells is None:
+        road_cells = [_cell_layer(md, key, "roads", deadline) for key in keys]
+    if bld_cells is None:
+        bld_cells = [_cell_layer(md, key, "buildings", deadline) for key in keys]
+    bld_polys = _building_polys(md, poi_lat, poi_lon, radius_m=140.0, deadline=deadline, bld_cells=bld_cells)
+
+    site = _snap_site_aisle(md, poi_lat, poi_lon, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M)
+    if site:
+        return site
+
+    if infra_cells is None:
+        infra_cells = [_cell_layer(md, key, "infrastructure", deadline) for key in keys]
+    if land_cells is None:
+        land_cells = [_cell_layer(md, key, "land_use", deadline) for key in keys]
+    lot = _snap_parking_lot(md, poi_lat, poi_lon, infra_cells, land_cells, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M)
+    if lot:
+        return lot
+
+    perim = _snap_building_perimeter_bay(md, poi_lat, poi_lon, road_cells, bld_polys, max_dist_m=SITE_SEARCH_M)
+    if perim:
+        return perim
+
+    snapped = snap_to_road(md, poi_lat, poi_lon, radius_m=300.0, classes=LOGISTICS_FALLBACK_CLASSES,
+                           deadline=deadline, road_cells=road_cells)
+    if not snapped:
+        return None
+    curb = _apply_curb_offset(snapped, poi_lat, poi_lon, poi_lat, poi_lon, bld_polys)
+    curb["stopType"] = "kerbside"
+    return curb
+
+
+def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None):
     road = snapped.get("road") or ""
     addr = address or road or f"{snapped['lat']:.5f}, {snapped['lon']:.5f}"
+    st = stop_type or snapped.get("stopType") or "kerbside"
     return {
         "index": int(idx),
         "kind": kind,
+        "stopType": st,
         "name": _clean(name) or road or f"Stop {idx}",
         "address": addr,
         "lat": round(float(snapped["lat"]), 6),
@@ -517,6 +892,7 @@ def _route_estimate_km(lat0, lon0, stops):
 def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, seed, tag, deadline, fallback_name):
     keys = _cells_around(anchor_lat, anchor_lon, 1800.0, max_cells=9)
     road_cells = [_cell_layer(md, k, "roads", deadline) for k in keys]
+    bld_cells = [_cell_layer(md, k, "buildings", deadline) for k in keys]
     places_out, bld_out, _ = _collect_pois_in_cells(md, keys, ("places", "buildings"), deadline)
 
     candidates = []
@@ -539,18 +915,21 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
             pick = pool[(_stable_index(seed, tag, len(pool)) + attempt) % len(pool)]
             snapped = snap_to_road(md, pick[3], pick[4], radius_m=280.0, deadline=deadline, road_cells=road_cells)
             if snapped and min_m <= dist_m(ref_lat, ref_lon, snapped["lat"], snapped["lon"]) <= max_m * 1.25:
-                return pick[5], snapped
+                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
+                return pick[5], _apply_curb_offset(snapped, pick[3], pick[4], snapped["lat"], snapped["lon"], bld_polys)
 
     # Fallback directly onto drivable ground roads inside the target box
     rc = _road_candidates(md, ref_lat, ref_lon, min_m, max_m, deadline=deadline) if anchor_lat == ref_lat and anchor_lon == ref_lon else []
     if rc:
         pick = rc[_stable_index(seed, tag + ":rc", len(rc))]
-        return pick["name"], pick
+        bld_polys = _building_polys(md, pick["lat"], pick["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
+        return pick["name"], _apply_curb_offset(pick, ref_lat, ref_lon, pick["lat"], pick["lon"], bld_polys)
     snapped = snap_to_road(md, anchor_lat, anchor_lon, radius_m=1500.0, deadline=deadline, road_cells=road_cells)
     if snapped:
         d = dist_m(ref_lat, ref_lon, snapped["lat"], snapped["lon"])
         if d >= max(150.0, min_m * 0.6):
-            return (snapped["road"] or fallback_name), snapped
+            bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
+            return (snapped["road"] or fallback_name), _apply_curb_offset(snapped, anchor_lat, anchor_lon, snapped["lat"], snapped["lon"], bld_polys)
     return None
 
 
@@ -588,7 +967,8 @@ def _generate_taxi(md, req, deadline):
         snapped = snap_to_road(md, lat, lon, radius_m=1500.0, deadline=deadline)
         if not snapped:
             return {"ok": False, "error": "No drivable roads found near your location"}
-        pickup = (snapped["road"] or "Roadside Pickup", snapped)
+        bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+        pickup = (snapped["road"] or "Roadside Pickup", _apply_curb_offset(snapped, lat, lon, snapped["lat"], snapped["lon"], bld_polys))
     pu_name, pu_snap = pickup
     pu_stop = _make_stop(1, "pickup", pu_name, pu_snap, zone_radius=12.0)
 
@@ -810,7 +1190,7 @@ def _slice_partial_bus(stops, lat, lon, heading):
 
 def _infra_bus_stops(md, lat, lon, deadline):
     keys = _cells_around(lat, lon, 3000.0, max_cells=9)
-    out, seen = [], set()
+    out = []
     for key in keys:
         f = _cell_layer(md, key, "infrastructure", deadline)
         if f is None or not len(f.ids):
@@ -831,9 +1211,8 @@ def _infra_bus_stops(md, lat, lon, deadline):
                 continue
             la, lo = pt
             # Deduplicate co-located platforms/stop_positions within 45 m
-            if any(dist_m(la, lo, o["lat"], o["lon"]) <= 45.0 for o in seen):
+            if any(dist_m(la, lo, o["lat"], o["lon"]) <= 45.0 for o in out):
                 continue
-            seen.add((la, lo))
             nm = _clean(names[i]) or _clean(tags.get("name") or "") or f"Bus Stop {len(out) + 1}"
             out.append({"lat": la, "lon": lo, "name": nm})
     return out
@@ -892,15 +1271,28 @@ def _generate_bus(md, net, req, deadline):
         chosen_route = ranked[_stable_index(seed, f"bus_rel:{tier}", min(3, len(ranked)))]
         raw_stops = _slice_partial_bus(chosen_route["stops"], lat, lon, heading) if tier == "partial" else chosen_route["stops"]
         road_cache = {}
+        bld_cache = {}
         snapped_stops = []
         for idx, s in enumerate(raw_stops, 1):
-            ckey = mapcells.cell_of(s["lat"], s["lon"])
-            if ckey not in road_cache:
-                road_cache[ckey] = [_cell_layer(md, ckey, "roads", deadline)] if time.monotonic() <= deadline else []
-            snapped = snap_to_road(md, s["lat"], s["lon"], radius_m=150.0, deadline=deadline, road_cells=road_cache[ckey])
-            if not snapped:
-                snapped = {"lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0}
-            snapped_stops.append(_make_stop(idx, "bus_stop", s["name"] or f"Stop {idx}", snapped, zone_radius=14.0))
+            ckeys = _cells_around(s["lat"], s["lon"], 150.0, max_cells=4)
+            rcells = []
+            bcells = []
+            for ckey in ckeys:
+                if ckey not in road_cache and time.monotonic() <= deadline:
+                    road_cache[ckey] = _cell_layer(md, ckey, "roads", deadline)
+                if ckey not in bld_cache and time.monotonic() <= deadline:
+                    bld_cache[ckey] = _cell_layer(md, ckey, "buildings", deadline)
+                if road_cache.get(ckey) is not None:
+                    rcells.append(road_cache[ckey])
+                if bld_cache.get(ckey) is not None:
+                    bcells.append(bld_cache[ckey])
+            snapped = snap_to_road(md, s["lat"], s["lon"], radius_m=150.0, deadline=deadline, road_cells=rcells)
+            if snapped:
+                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bcells)
+                snapped = _apply_curb_offset(snapped, s["lat"], s["lon"], snapped["lat"], snapped["lon"], bld_polys)
+            else:
+                snapped = {"lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0, "stopType": "kerbside"}
+            snapped_stops.append(_make_stop(idx, "bus_stop", s["name"] or f"Stop {idx}", snapped, zone_radius=14.0, stop_type="kerbside"))
         if len(snapped_stops) >= 4:
             return {
                 "ok": True,
@@ -919,10 +1311,13 @@ def _generate_bus(md, net, req, deadline):
     if len(chain) >= target_min:
         stops = []
         for idx, s in enumerate(chain, 1):
-            snapped = snap_to_road(md, s["lat"], s["lon"], radius_m=150.0, deadline=deadline) or {
-                "lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0,
-            }
-            stops.append(_make_stop(idx, "bus_stop", s["name"], snapped, zone_radius=14.0))
+            snapped = snap_to_road(md, s["lat"], s["lon"], radius_m=150.0, deadline=deadline)
+            if snapped:
+                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+                snapped = _apply_curb_offset(snapped, s["lat"], s["lon"], snapped["lat"], snapped["lon"], bld_polys)
+            else:
+                snapped = {"lat": s["lat"], "lon": s["lon"], "road": "", "bearing": 0.0, "stopType": "kerbside"}
+            stops.append(_make_stop(idx, "bus_stop", s["name"], snapped, zone_radius=14.0, stop_type="kerbside"))
         return {
             "ok": True,
             "mode": "bus",
@@ -950,9 +1345,11 @@ def _generate_bus(md, net, req, deadline):
         if snapped and (not stops or dist_m(stops[-1]["lat"], stops[-1]["lon"], snapped["lat"], snapped["lon"]) >= 250.0):
             idx = len(stops) + 1
             nm = f"{snapped['road']} Stop {idx}" if snapped.get("road") else f"Bus Stop {idx}"
-            stops.append(_make_stop(idx, "bus_stop", nm, snapped, zone_radius=14.0))
-            base_brg = bearing_deg(cur_lat, cur_lon, snapped["lat"], snapped["lon"])
-            cur_lat, cur_lon = snapped["lat"], snapped["lon"]
+            bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+            curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
+            stops.append(_make_stop(idx, "bus_stop", nm, curb, zone_radius=14.0, stop_type="kerbside"))
+            base_brg = bearing_deg(cur_lat, cur_lon, curb["lat"], curb["lon"])
+            cur_lat, cur_lon = curb["lat"], curb["lon"]
         else:
             cur_lat, cur_lon = alat, alon
 
@@ -1031,7 +1428,7 @@ def _generate_logistics_short(md, req, deadline):
                 break
         if nxt is None:
             break
-        snapped = snap_to_road(md, nxt[2], nxt[3], radius_m=250.0, classes=LOGISTICS_FALLBACK_CLASSES, deadline=deadline)
+        snapped = _snap_logistics_spot(md, nxt[2], nxt[3], deadline)
         if snapped:
             stop_idx = len(picked) + 1
             kind = "loading" if stop_idx == 1 else "delivery"
@@ -1049,8 +1446,10 @@ def _generate_logistics_short(md, req, deadline):
             if snapped and all(dist_m(snapped["lat"], snapped["lon"], prev["lat"], prev["lon"]) >= 250.0 for prev in picked):
                 stop_idx = len(picked) + 1
                 nm = f"{snapped['road']} Drop-off {stop_idx}" if snapped.get("road") else f"Delivery Point {stop_idx}"
-                picked.append(_make_stop(stop_idx, "loading" if stop_idx == 1 else "delivery", nm, snapped, zone_radius=13.0))
-                cur_lat, cur_lon = snapped["lat"], snapped["lon"]
+                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+                curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
+                picked.append(_make_stop(stop_idx, "loading" if stop_idx == 1 else "delivery", nm, curb, zone_radius=13.0, stop_type="kerbside"))
+                cur_lat, cur_lon = curb["lat"], curb["lon"]
 
     if not picked:
         return {"ok": False, "error": "No drivable delivery locations found nearby"}
@@ -1069,6 +1468,9 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
     """Search a small targeted 2x2 cell box around (alat, alon) for industrial/warehouse/commercial hub."""
     keys = _cells_around(alat, alon, 1600.0, max_cells=4)
     road_cells = [_cell_layer(md, k, "roads", deadline) for k in keys]
+    bld_cells = [_cell_layer(md, k, "buildings", deadline) for k in keys]
+    infra_cells = [_cell_layer(md, k, "infrastructure", deadline) for k in keys]
+    land_cells = [_cell_layer(md, k, "land_use", deadline) for k in keys]
     places_out, bld_out, land_out = _collect_pois_in_cells(md, keys, ("places", "buildings", "land_use"), deadline)
 
     candidates = []
@@ -1092,14 +1494,20 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
         top = candidates[:min(6, len(candidates))]
         for off in range(len(top)):
             pick = top[(_stable_index(seed, tag, len(top)) + off) % len(top)]
-            snapped = snap_to_road(md, pick[1], pick[2], radius_m=350.0, classes=LOGISTICS_FALLBACK_CLASSES,
-                                   deadline=deadline, road_cells=road_cells)
+            snapped = _snap_logistics_spot(
+                md, pick[1], pick[2], deadline,
+                road_cells=road_cells, bld_cells=bld_cells,
+                infra_cells=infra_cells, land_cells=land_cells,
+            )
             if snapped:
                 return pick[3], snapped
     snapped = snap_to_road(md, alat, alon, radius_m=1500.0, classes=LOGISTICS_FALLBACK_CLASSES,
                            deadline=deadline, road_cells=road_cells)
     if snapped:
-        return (snapped["road"] or f"{fallback_label} Depot"), snapped
+        bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
+        curb = _apply_curb_offset(snapped, alat, alon, snapped["lat"], snapped["lon"], bld_polys)
+        curb["stopType"] = "kerbside"
+        return (curb["road"] or f"{fallback_label} Depot"), curb
     return None
 
 
