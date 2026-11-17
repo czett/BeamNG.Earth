@@ -147,6 +147,17 @@
         "width": "560px",
         "height": "64px"
       }
+    },
+    {
+      "appName": "beamngEarthTransport",
+      "appVersion": 1,
+      "placement": {
+        "top": "110px",
+        "right": "16px",
+        "position": "absolute",
+        "width": "320px",
+        "height": "170px"
+      }
     }
   ],
   "removedApps": {

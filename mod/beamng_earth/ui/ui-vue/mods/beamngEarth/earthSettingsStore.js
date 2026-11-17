@@ -191,6 +191,13 @@ export const settingsSchema = [
     ],
   },
   {
+    // Transport Modes (EarthTransport.vue, earthTransportStore.js): Taxi, Bus, Logistics jobs
+    name: "Transport",
+    intro: "Drive Taxi, Bus or Logistics jobs anywhere on Earth. Pick a mode and distance scale, then follow the GPS to each kerbside stop.",
+    transport: true,
+    items: [],
+  },
+  {
     // third-party add-ons (EarthAddons.vue, earthAddonsStore.js): the page is the add-ons' own view, no settings rows
     name: "Add-ons",
     addons: true,
@@ -245,7 +252,7 @@ export const settingsSchema = [
 // Each page's icon (the pause menu's side buttons take the icon's name, LayoutMenu's tabs the icon) and its button id
 // (the first keeps the old Mods-tab button's id: settings.lua M.BUTTON_ID, pageExists)
 export const PAGE_ICONS = { Graphics: "eyeOutlineOpened", World: "globe", Experimental: "test", Interface: "cogOutline",
-  Multiplayer: "peopleOutline", Storage: "floppyDisk", "Add-ons": "puzzleModule", Feedback: "bug", About: "info",
+  Multiplayer: "peopleOutline", Storage: "floppyDisk", Transport: "globe", "Add-ons": "puzzleModule", Feedback: "bug", About: "info",
   Developer: "code" }
 export const pageId = (name, i) => i === 0 ? "beamngEarth-settings" : "beamngEarth-settings-" + name.toLowerCase()
 

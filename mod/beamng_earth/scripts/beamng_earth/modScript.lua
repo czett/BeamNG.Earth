@@ -26,3 +26,5 @@ setExtensionUnloadMode('beamngEarth_map3d', 'manual')
 setExtensionUnloadMode('beamngEarth_api', 'manual')
 -- The station finder (finder.lua: Nearest station from the radial menu, a key or the map; the low fuel prompt).
 setExtensionUnloadMode('beamngEarth_finder', 'manual')
+-- Transport Modes (transportModes.lua: Taxi, Bus, Logistics jobs).
+setExtensionUnloadMode('beamngEarth_transportModes', 'manual')
