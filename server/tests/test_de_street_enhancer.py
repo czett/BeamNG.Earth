@@ -321,7 +321,7 @@ class GeometrySafetyAndPipelineTest(unittest.TestCase):
             self.assertGreaterEqual(row[2], 106.2 + placement.DE_YARD_WALK_OFFSET_M - 0.01, f"wide-sidewalk boundary failed to clear outer edge: {row}")
         for row in rows:
             self.assertNotEqual(row[0], "fence", "never emits default US wood fence")
-            self.assertTrue(row[0] == "fr_hedge" or str(row[0]).startswith("fr_fence_"))
+            self.assertTrue(row[0] == "de_hedge" or str(row[0]).startswith("fr_fence_"))
             # Verify no hedge/fence landed inside doorway (x ~ 96) or driveway gap (x ~ 104)
             self.assertFalse(102.6 <= row[1] <= 105.4, f"row inside driveway gap: {row}")
             self.assertGreaterEqual(row[2], 103.8, f"row encroaches on road/sidewalk: {row}")
@@ -840,7 +840,7 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
             ring=apt_ring, floors=5, floor_h=2.8, height=14.0, roof="flat", shop=False,
             cls="apartments", seed=0.05, door=(0, 20.0), min_h=0.0,
         )
-        # 3) Neighboring zero-setback wing protruding to y=105.3 near x=[72..78] to verify fr_hedge never spawns within 0.85 m of ANY ring.
+        # 3) Neighboring zero-setback wing protruding to y=105.3 near x=[72..78] to verify de_hedge never spawns within 0.85 m of ANY ring.
         wing_ring = np.array([[72.0, 105.3], [78.0, 105.3], [78.0, 107.0], [72.0, 107.0]], dtype=np.float64)
         # 4) Excluded shop & inner-city zero-setback perimeter block (wall at y=105.1 -> c=0.10 < 0.35).
         shop_spec = buildings.Spec(
@@ -868,10 +868,10 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         self.assertGreater(len(narrow_rows), 0, "narrow front yard should fall back to slim fence")
         self.assertTrue(
             all(str(r[0]).startswith("fr_fence_") for r in narrow_rows),
-            f"narrow yard (<1.05 m) must not emit fr_hedge: {narrow_rows}",
+            f"narrow yard (<1.05 m) must not emit de_hedge: {narrow_rows}",
         )
         apt_rows = [r for r in rows if 59.0 <= float(r[1]) <= 101.0]
-        self.assertTrue(any(r[0] == "fr_hedge" for r in apt_rows), "roomy 5-floor apartment yard should emit fr_hedge")
+        self.assertTrue(any(r[0] == "de_hedge" for r in apt_rows), "roomy 5-floor apartment yard should emit de_hedge")
         zero_rows = [r for r in rows if 149.0 <= float(r[1]) <= 167.0]
         self.assertEqual(zero_rows, [], f"zero-setback perimeter block should emit no yard rows: {zero_rows}")
 
@@ -881,8 +881,8 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         fence_blocks = placement._expand_blocker_segments(closed, extra_hw=0.25 - 1e-6)
         for r in rows:
             pt = np.array([[float(r[1]), float(r[2])]], dtype=np.float64)
-            if r[0] == "fr_hedge":
-                self.assertFalse(placement._points_near_segments_safe(pt, hedge_blocks), f"fr_hedge within 0.85 m of wall: {r}")
+            if r[0] == "de_hedge":
+                self.assertFalse(placement._points_near_segments_safe(pt, hedge_blocks), f"de_hedge within 0.85 m of wall: {r}")
             else:
                 self.assertFalse(placement._points_near_segments_safe(pt, fence_blocks), f"fr_fence within 0.25 m of wall: {r}")
 
@@ -1078,7 +1078,7 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         # 4-floor apartment yard gets full-length tall hedge/fence rows
         self.assertGreater(len(yard_rows), 0)
         for r in yard_rows:
-            if r[0] == "fr_hedge":
+            if r[0] == "de_hedge":
                 self.assertGreaterEqual(float(r[6]), 1.15)
 
         # House number plaque size 0.42 m x 0.30 m at z = door_g + 1.95 m

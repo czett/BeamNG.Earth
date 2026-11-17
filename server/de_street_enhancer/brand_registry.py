@@ -358,14 +358,35 @@ def match_poi(
     return None, ""
 
 
-def fallback_brand(seed: float, lat: float | None, cls: str = "") -> tuple[BrandSpec, str]:
-    """Deterministically select an authentic regional German brand for an unnamed storefront."""
+LOCAL_INDEPENDENT_SHOPS: tuple[tuple[str, str], ...] = (
+    ("baeckerei", "Bäckerei"),
+    ("local_shop", "Metzgerei"),
+    ("local_shop", "Friseur"),
+    ("local_shop", "Blumen"),
+    ("local_shop", "Buchhandlung"),
+    ("local_shop", "Optiker"),
+    ("local_shop", "Eiscafé"),
+    ("local_shop", "Kiosk"),
+    ("local_shop", "Schneider"),
+    ("local_shop", "Schuhhaus"),
+    ("local_shop", "Weinhandlung"),
+    ("local_shop", "Uhren & Schmuck"),
+)
+
+
+def fallback_brand(seed: float, lat: float | None, cls: str = "", local_seed: float | None = None) -> tuple[BrandSpec, str]:
+    """Deterministically select an authentic regional German brand or local storefront for an unnamed facade."""
     low_cls = (cls or "").lower()
     if low_cls == "supermarket":
         pool = [BY_KEY["rewe"], BY_KEY["edeka"], _regional_aldi(lat), BY_KEY["lidl"], BY_KEY["penny"], BY_KEY["netto"]]
     elif low_cls in ("restaurant", "cafe", "fast_food"):
         pool = [BY_KEY["baeckerei"], BY_KEY["backwerk"], BY_KEY["kamps"], BY_KEY["doener"]]
     else:
+        ls = float(seed if local_seed is None else local_seed)
+        if ls < 0.42:
+            idx = int(max(0.0, min(0.999999, ls / 0.42)) * len(LOCAL_INDEPENDENT_SHOPS))
+            b_key, b_lbl = LOCAL_INDEPENDENT_SHOPS[idx]
+            return BY_KEY[b_key], b_lbl
         pool = [
             b
             for b in BRANDS

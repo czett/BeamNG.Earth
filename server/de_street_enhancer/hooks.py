@@ -184,6 +184,11 @@ def build_streets_and_yards(
                 entries.append((furniture_de.FURNITURE_SWATCH_KEY, ("swatch", None, None)))
                 for stop in furn_plan.bus_stops:
                     entries.append((f"busstop|{stop.name}", ("busstop", stop.name, None)))
+                for fp in furn_plan.fuel_pylons:
+                    entries.append((
+                        f"fuel|{fp.brand_key}|{fp.e10}|{fp.e5}|{fp.diesel}",
+                        ("fuel", fp, None),
+                    ))
 
             def _render_street_slot(item):
                 kind, a, b = item
@@ -191,6 +196,8 @@ def build_streets_and_yards(
                     return texture_atlas.render_furniture_swatch()
                 if kind == "busstop":
                     return texture_atlas.render_bus_stop_panel(a)
+                if kind == "fuel":
+                    return texture_atlas.render_fuel_pylon(a.brand_key, a.brand_label, a.e10, a.e5, a.diesel)
                 return texture_atlas.render_street_plate(a, variant=b)
 
             mat_name, _dds, vfs_tex, uv_map, _img = texture_atlas.pack_atlas(

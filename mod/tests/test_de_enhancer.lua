@@ -91,8 +91,9 @@ local seenWhats = {}
 for _, w in ipairs(roads.CONTENT_WHATS) do seenWhats[w] = true end
 T.check(seenWhats.destreets == true and seenWhats.deshops == true, 'roads.CONTENT_WHATS includes destreets and deshops')
 
--- 7. Verify fr_hedge ONE_SPELLING
+-- 7. Verify de_hedge ONE_SPELLING and fr_hedge untouched parity
 local trees = require('beamngEarth/trees')
-T.check(trees.ONE_SPELLING.fr_hedge == true, 'fr_hedge uses ONE_SPELLING')
+T.check(trees.ONE_SPELLING.de_hedge == true, 'de_hedge uses ONE_SPELLING')
+T.check(trees.ONE_SPELLING.fr_hedge == nil, 'fr_hedge does not force ONE_SPELLING')
 
 T.done('test_de_enhancer')

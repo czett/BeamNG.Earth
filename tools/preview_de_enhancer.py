@@ -25,7 +25,7 @@ import buildings  # noqa: E402
 import geodesy  # noqa: E402
 import mapgeom  # noqa: E402
 import roads  # noqa: E402
-from de_street_enhancer import brand_registry, classifier, facade_style, furniture_de, parking_de, placement, texture_atlas  # noqa: E402
+from de_street_enhancer import brand_registry, classifier, facade_style, furniture_de, placement, texture_atlas  # noqa: E402
 
 
 OUT_DIR = Path("/tmp/de_enhancer_preview")
@@ -193,8 +193,8 @@ def generate_topdown_layout_preview():
     # Yard hedges & fences
     for r in yard_rows:
         cx, cy = px((r[1], r[2]))
-        col = (34, 139, 34) if r[0] == "fr_hedge" else (139, 90, 43)
-        rad = 4.5 if r[0] == "fr_hedge" else 3.5
+        col = (34, 139, 34) if r[0] == "de_hedge" else (139, 90, 43)
+        rad = 4.5 if r[0] == "de_hedge" else 3.5
         d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=col, outline=(20, 50, 20))
 
     # Shop fascias
@@ -508,7 +508,7 @@ def generate_urban_life_topdown_preview():
         posts = placement.plan_street_signs(frame, near_roads, box, street_names, [], _flat_ground, rings=[b.ring for b in b_list], drives=drives)
         yard_rows = placement.place_residential_yards(frame, box, items, near_roads, walks, drives, None, [b.ring for b in b_list], _flat_ground, md=fake_md)
         furn = furniture_de.plan_de_street_furniture(fake_md, frame, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], _flat_ground, items=items, tx=0, ty=0)
-        park_rows = parking_de.refine_parking_spots(fake_md, frame, 0, 0, box, near_roads, walks, [], drives, [], [b.ring for b in b_list], [], _flat_ground)
+        park_rows = []
         hn_targets = classifier.collect_housenumbers(items)
 
     S = 4.0
@@ -543,8 +543,8 @@ def generate_urban_life_topdown_preview():
     # Front-yard hedges & fences
     for r in yard_rows:
         cx, cy = px((r[1], r[2]))
-        col = (30, 142, 38) if r[0] == "fr_hedge" else (139, 90, 43)
-        rad = 4.2 if r[0] == "fr_hedge" else 3.2
+        col = (30, 142, 38) if r[0] == "de_hedge" else (139, 90, 43)
+        rad = 4.2 if r[0] == "de_hedge" else 3.2
         d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=col, outline=(18, 52, 20))
 
     # Furniture (Bus stop, Stromkästen, Packstation, Altglas, Poller)
@@ -576,7 +576,7 @@ def generate_urban_life_topdown_preview():
         d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(14, 52, 108), outline=(255, 255, 255), width=2)
 
     d.rectangle([10, 10, 440, 118], fill=(250, 250, 250), outline=(120, 120, 120))
-    d.text((20, 18), f"Dortmund Urban Life Preview (Hedges: {sum(1 for r in yard_rows if r[0]=='fr_hedge')}/{len(yard_rows)})", fill=(20, 25, 30), font=font_sm)
+    d.text((20, 18), f"Dortmund Urban Life Preview (Hedges: {sum(1 for r in yard_rows if r[0]=='de_hedge')}/{len(yard_rows)})", fill=(20, 25, 30), font=font_sm)
     d.text((20, 38), f"Parked Car Clusters: {len(park_rows)} (10m junction, 12m H-stop clear)", fill=(50, 90, 150), font=font_sm)
     d.text((20, 58), f"Bus Stops: {len(furn.bus_stops)} | Cabinets: {len(furn.cabinets)} | Bollards: {len(furn.bollards)}", fill=(12, 108, 52), font=font_sm)
     d.text((20, 78), f"3D House Numbers: {len(hn_targets)} (blue/white enamel plaques)", fill=(14, 54, 114), font=font_sm)

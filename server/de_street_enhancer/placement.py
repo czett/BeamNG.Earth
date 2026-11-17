@@ -64,6 +64,7 @@ DE_YARD_MAX_DEPTH_M = 18.0
 DE_YARD_MAX_LEN_M = 32.0
 DE_YARD_GAP_HALF_M = 1.40
 DE_DOOR_GAP_HALF_M = 0.70
+DE_HEDGE_GROUP = "de_hedge"
 DE_HEDGE_STEP_M = 0.75
 DE_YARD_MIN_SPAN_M = 0.50
 DE_HEDGE_Z_SEAT_M = -0.04
@@ -1058,7 +1059,7 @@ def place_residential_yards(
                     t_pos = 0.5 if n_seg == 1 else (inset + usable * (k / (n_seg - 1))) / max(span, 1e-6)
                     p = line[0] + (line[1] - line[0]) * t_pos
                     h_val = 1.15 + 0.25 * _hash01(spec.seed, "de_h", k)
-                    pending.append((fences.G_HEDGE, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, DE_HEDGE_Z_SEAT_M))
+                    pending.append((DE_HEDGE_GROUP, float(p[0]), float(p[1]), fences._yaw(*tangent), h_val, DE_HEDGE_Z_SEAT_M))
             else:
                 if span < 0.66:
                     mid_p = 0.5 * (line[0] + line[1])
@@ -1092,7 +1093,7 @@ def place_residential_yards(
             continue
         if any(classifier._point_in_ring(pt[0], rr) for rr in rings_arr):
             continue
-        wall_blocks = hedge_wall_blocks if grp == fences.G_HEDGE else fence_wall_blocks
+        wall_blocks = hedge_wall_blocks if grp == DE_HEDGE_GROUP else fence_wall_blocks
         if _points_near_segments_safe(pt, wall_blocks):
             continue
         cleared.append(row)

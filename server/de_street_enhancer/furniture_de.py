@@ -78,6 +78,19 @@ class BollardItem:
 
 
 @dataclass(frozen=True)
+class FuelPylonItem:
+    xy: np.ndarray
+    z: float
+    along: np.ndarray
+    toward_road: np.ndarray
+    brand_key: str
+    brand_label: str
+    e10: str
+    e5: str
+    diesel: str
+
+
+@dataclass(frozen=True)
 class FurniturePlan:
     bus_stops: tuple[BusStopItem, ...]
     cabinets: tuple[BoxPropItem, ...]
@@ -85,10 +98,18 @@ class FurniturePlan:
     recyclers: tuple[BoxPropItem, ...]
     bollards: tuple[BollardItem, ...]
     suppressed_recycle_xy: tuple[tuple[float, float], ...]
+    fuel_pylons: tuple[FuelPylonItem, ...] = ()
 
     @property
     def has_any(self) -> bool:
-        return bool(self.bus_stops or self.cabinets or self.lockers or self.recyclers or self.bollards)
+        return bool(
+            self.bus_stops
+            or self.cabinets
+            or self.lockers
+            or self.recyclers
+            or self.bollards
+            or self.fuel_pylons
+        )
 
 
 def _hash01(*parts) -> float:
@@ -357,6 +378,35 @@ def _snap_to_outer_sidewalk(
     return best_res
 
 
+_FUEL_BRAND_MAP = {
+    "aral": ("aral", "ARAL"),
+    "shell": ("shell", "SHELL"),
+    "esso": ("esso", "ESSO"),
+    "jet": ("jet", "JET"),
+    "total": ("totalenergies", "TOTAL"),
+    "totalenergies": ("totalenergies", "TOTAL"),
+    "avia": ("avia", "AVIA"),
+    "bft": ("bft", "bft"),
+    "star": ("star", "STAR"),
+}
+
+
+def _match_fuel_brand(name_str: str) -> tuple[str, str]:
+    low = (name_str or "").strip().lower()
+    for token, pair in _FUEL_BRAND_MAP.items():
+        if token in low:
+            return pair
+    return ("fuel_generic", "TANKSTELLE")
+
+
+def _fuel_prices_for(seed_parts: tuple) -> tuple[str, str, str]:
+    step = int(_hash01(*seed_parts, "fuel_e10") * 12)
+    e10_c = 171 + step
+    e5_c = e10_c + 6
+    diesel_c = e10_c - 8
+    return f"{e10_c / 100.0:.2f}9", f"{e5_c / 100.0:.2f}9", f"{diesel_c / 100.0:.2f}9"
+
+
 def plan_de_street_furniture(
     md,
     frame,
@@ -399,6 +449,7 @@ def plan_de_street_furniture(
     cab_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     lock_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     rec_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    fuel_cands: list[tuple[np.ndarray, str, str]] = []
     sup_rec_xy: list[tuple[float, float]] = []
 
     if md is not None:
@@ -437,7 +488,8 @@ def plan_de_street_furniture(
                 is_cab = mm == "street_cabinet" or cls_v == "street_cabinet"
                 is_locker = am == "parcel_locker" or cls_v == "parcel_locker"
                 is_recycle = (am == "recycling" or cls_v == "recycling") and str(tags.get("recycling_type", "")).lower() != "centre"
-                if not (is_bus or is_cab or is_locker or is_recycle):
+                is_fuel = am == "fuel" or cls_v == "fuel"
+                if not (is_bus or is_cab or is_locker or is_recycle or is_fuel):
                     continue
                 seen.add(fid)
                 parts = feats.parts(i)
@@ -450,7 +502,14 @@ def plan_de_street_furniture(
                 if not roadsmod.box_owns(box, float(pt[0]), float(pt[1])):
                     continue
 
-                if is_bus:
+                if is_fuel:
+                    f_name = ""
+                    if name_arr is not None and name_arr[i]:
+                        f_name = str(name_arr[i])
+                    if not f_name:
+                        f_name = str(tags.get("brand") or tags.get("name") or "")
+                    fuel_cands.append((pt, fid, f_name))
+                elif is_bus:
                     no_shelter = str(tags.get("shelter", "")).lower() in ("no", "none", "false", "0") or (
                         pt_tag == "stop_position" and str(tags.get("shelter", "")).lower() != "yes"
                     )
@@ -499,6 +558,49 @@ def plan_de_street_furniture(
                     if snapped is not None:
                         rec_raw.append(snapped)
                         sup_rec_xy.append((float(pt[0]), float(pt[1])))
+
+        # Also scan Overture `places` for fuel stations when `infrastructure` had none at that site.
+        for cell_key in mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon):
+            try:
+                cd = md.cell(cell_key, layers=("places",), kind="demand")
+                p_feats = cd.layers.get("places")
+            except Exception:
+                continue
+            if p_feats is None or len(p_feats) == 0:
+                continue
+            for cand, xy_local in classifier.load_tile_pois(md, frame, [(cell_key, p_feats)], 0.0, 0.0):
+                cat = (cand.category or "").lower()
+                if cat not in ("gas_station", "fueling_station"):
+                    continue
+                if not roadsmod.box_owns(box, float(xy_local[0]), float(xy_local[1])):
+                    continue
+                if any(math.hypot(float(xy_local[0]) - float(fp[0]), float(xy_local[1]) - float(fp[1])) < 35.0 for fp, _, _ in fuel_cands):
+                    continue
+                fuel_cands.append((xy_local, cand.fid, cand.brand or cand.name or ""))
+
+    fuel_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray, str, str, str, str, str]] = []
+    placed_fuel_xy: list[tuple[float, float]] = []
+    for f_pt, f_id, f_name in fuel_cands:
+        if any(math.hypot(float(f_pt[0]) - px, float(f_pt[1]) - py) < 35.0 for px, py in placed_fuel_xy):
+            continue
+        snapped = _snap_to_outer_sidewalk(
+            f_pt, near_roads, all_road_bands, tram_lines, walk_polys, rings_arr,
+            min_front_clear_m=0.55, hx=0.62, hy=0.18,
+        )
+        if snapped is None:
+            continue
+        pos, along, toward = snapped
+        px, py = float(pos[0]), float(pos[1])
+        if not roadsmod.box_owns(box, px, py):
+            continue
+        if any(math.hypot(px - dx, py - dy) < 1.50 for dx, dy in drive_pts):
+            continue
+        if any(math.hypot(px - dx, py - dy) < 1.50 for dx, dy in door_pts):
+            continue
+        b_key, b_lbl = _match_fuel_brand(f_name)
+        e10, e5, diesel = _fuel_prices_for((f_id, round(px, 1), round(py, 1)))
+        fuel_raw.append((pos, along, toward, b_key, b_lbl, e10, e5, diesel))
+        placed_fuel_xy.append((px, py))
 
     # Procedural deterministic Stromkästen (max 1-2 per 256m tile at street corners, flush on outer walk back edge).
     occupied_xy: list[tuple[float, float]] = [(float(p[0]), float(p[1])) for p, _, _, _, _ in bus_raw]
@@ -641,6 +743,7 @@ def plan_de_street_furniture(
         + [x[0] for x in cab_raw]
         + [x[0] for x in lock_raw]
         + [x[0] for x in rec_raw]
+        + [x[0] for x in fuel_raw]
         + bollard_raw
     )
     if not all_pts:
@@ -671,6 +774,11 @@ def plan_de_street_furniture(
         if in_de[cur] and np.isfinite(zs[cur]):
             rec_out.append(BoxPropItem("altglas", pos, float(zs[cur]), along, toward))
         cur += 1
+    fuel_out: list[FuelPylonItem] = []
+    for pos, along, toward, b_key, b_lbl, e10, e5, diesel in fuel_raw:
+        if in_de[cur] and np.isfinite(zs[cur]):
+            fuel_out.append(FuelPylonItem(pos, float(zs[cur]), along, toward, b_key, b_lbl, e10, e5, diesel))
+        cur += 1
     bollard_out: list[BollardItem] = []
     for pos in bollard_raw:
         if in_de[cur] and np.isfinite(zs[cur]):
@@ -684,6 +792,7 @@ def plan_de_street_furniture(
         recyclers=tuple(rec_out),
         bollards=tuple(bollard_out),
         suppressed_recycle_xy=tuple(sup_rec_xy),
+        fuel_pylons=tuple(fuel_out),
     )
 
 
@@ -776,3 +885,15 @@ def append_furniture_geometry(mb, plan: FurniturePlan, uv_map: dict[str, tuple[f
     ay_default = np.array([0.0, 1.0, 0.0], dtype=np.float64)
     for bol in plan.bollards:
         mb.add_box(np.array([bol.xy[0], bol.xy[1], bol.z + 0.40]), ax_default, ay_default, axis_z, 0.055, 0.055, 0.48, pol_uv, pol_uv, body_mat=1, face_mat=1)
+
+    # 6. Fuel Station Price Pylons (`Preistafel`, ~1.20 m x 0.25 m x 3.80 m)
+    for fp in plan.fuel_pylons:
+        fp_key = f"fuel|{fp.brand_key}|{fp.e10}|{fp.e5}|{fp.diesel}"
+        fp_uv = uv_map.get(fp_key)
+        if fp_uv is None:
+            continue
+        ax = np.array([float(fp.along[0]), float(fp.along[1]), 0.0], dtype=np.float64)
+        ay = np.array([float(fp.toward_road[0]), float(fp.toward_road[1]), 0.0], dtype=np.float64)
+        # Concrete footing plinth + main price totem
+        mb.add_box(np.array([fp.xy[0], fp.xy[1], fp.z + 0.02]), ax, ay, axis_z, 0.64, 0.16, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1)
+        mb.add_box(np.array([fp.xy[0], fp.xy[1], fp.z + 1.90]), ax, ay, axis_z, 0.60, 0.125, 1.90, fp_uv, fp_uv, body_mat=0, face_mat=1)

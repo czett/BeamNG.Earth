@@ -415,8 +415,9 @@ for group, asset in pairs(require('beamngEarth/frFenceAssets')) do
   M.GROUP_MAX_M[group] = 320
   M.ONE_SPELLING[group] = true
 end
-M.CATALOG.fr_hedge = { { ECA .. 'trees/ECA_coast_bush/generibush', 1.35 } } -- Stock ECA broadleaf bush, Z-boosted to manicured hedge height.
+M.CATALOG.fr_hedge = { M.CATALOG.shrub[1] } -- Stock East Coast USA broadleaf shrub.
 M.CATALOG.fr_fence_hedge = M.CATALOG.fr_hedge -- Older server rows still use the same stock bush.
+M.CATALOG.de_hedge = { { ECA .. 'trees/ECA_coast_bush/generibush', 1.35 } } -- Stock ECA broadleaf bush, Z-boosted to manicured DE hedge height.
 M.HEDGE_SXY = 0.75
 M.HEDGE_Z_BOOST = 1.65
 function M.hedgeScale(h, refH)
@@ -425,10 +426,11 @@ function M.hedgeScale(h, refH)
 end
 M.GROUP_MAX_M.fr_hedge = 350
 M.GROUP_MAX_M.fr_fence_hedge = 350
-M.ONE_SPELLING.fr_hedge = true
-M.ONE_SPELLING.fr_fence_hedge = true
+M.GROUP_MAX_M.de_hedge = 350
+M.ONE_SPELLING.de_hedge = true
 M.NO_COLLIDE.fr_hedge = true
 M.NO_COLLIDE.fr_fence_hedge = true
+M.NO_COLLIDE.de_hedge = true
 for group, asset in pairs(require('beamngEarth/frRadarAssets')) do
   M.CATALOG[group] = { { asset[1], asset[2] } }
   M.GROUP_MAX_M[group] = asset[3]
@@ -1053,10 +1055,10 @@ local function makeItem(fd, t, i, shape, sc, solid, group, variant)
       itemVec:set(vx, vy, vz); m:setColumn(c, itemVec)
     end
     m:setPosition(itemPos)
-  elseif (group == 'fr_hedge' or group == 'fr_fence_hedge') and m.setColumn then
+  elseif group == 'de_hedge' and m.setColumn then
     -- Non-uniform XYZ scale via MatrixF columns (PF3 probe) so generibush renders as a tight, upright 1.15-1.40 m hedge.
     local yaw = -math.rad(f[b + F_YAW] + yawAdd)
-    local sxy, sz = M.hedgeScale(f[b + F_HEIGHT], M.CATALOG.fr_hedge[1][2])
+    local sxy, sz = M.hedgeScale(f[b + F_HEIGHT], M.CATALOG.de_hedge[1][2])
     local c, s = math.cos(yaw), math.sin(yaw)
     itemVec:set(c * sxy, s * sxy, 0); m:setColumn(0, itemVec)
     itemVec:set(-s * sxy, c * sxy, 0); m:setColumn(1, itemVec)

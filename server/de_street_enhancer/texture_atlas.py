@@ -357,6 +357,62 @@ def render_furniture_swatch(w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     return img
 
 
+FUEL_PYLON_PALETTES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int], str]] = {
+    "aral": ((0, 72, 154), (255, 255, 255), "ARAL"),
+    "shell": ((251, 206, 7), (218, 22, 28), "SHELL"),
+    "esso": ((12, 54, 128), (255, 255, 255), "ESSO"),
+    "jet": ((252, 208, 10), (16, 48, 124), "JET"),
+    "totalenergies": ((228, 30, 36), (255, 255, 255), "TOTAL"),
+    "avia": ((212, 22, 32), (255, 255, 255), "AVIA"),
+    "bft": ((18, 86, 152), (255, 255, 255), "bft"),
+    "star": ((228, 28, 36), (255, 255, 255), "STAR"),
+    "fuel_generic": ((24, 62, 118), (255, 255, 255), "TANKSTELLE"),
+}
+
+
+def render_fuel_pylon(
+    brand_key: str,
+    brand_label: str,
+    e10: str,
+    e5: str,
+    diesel: str,
+    w: int = SLOT_W,
+    h: int = SLOT_H,
+) -> Image.Image:
+    """Render a German fuel-station price totem (`Preistafel`) into a 512x64 atlas slot."""
+    bg_hdr, fg_hdr, def_lbl = FUEL_PYLON_PALETTES.get(brand_key, FUEL_PYLON_PALETTES["fuel_generic"])
+    img = Image.new("RGB", (w, h), (22, 26, 32))
+    draw = ImageDraw.Draw(img)
+
+    # Top brand header bar
+    hdr_h = 19
+    draw.rectangle([2, 2, w - 3, hdr_h], fill=bg_hdr)
+    lbl = " ".join(str(brand_label or def_lbl).split()) or def_lbl
+    fitted, font_hdr, bx_h = _fit_text(draw, lbl, w - 24, hdr_h - 3, sizes=(16, 14, 12))
+    tx = (w - (bx_h[2] - bx_h[0])) / 2.0 - bx_h[0]
+    ty = 2 + (hdr_h - 2 - (bx_h[3] - bx_h[1])) / 2.0 - bx_h[1]
+    draw.text((tx, ty), fitted, font=font_hdr, fill=fg_hdr)
+
+    # 3 crisp LED fuel-price rows
+    font_row = _load_font(12, condensed=True)
+    font_price = _load_font(13, condensed=False)
+    rows = (
+        ("Super E10", str(e10), (255, 198, 48)),
+        ("Super E5", str(e5), (255, 198, 48)),
+        ("Diesel", str(diesel), (236, 240, 244)),
+    )
+    row_h = (h - hdr_h - 4) // 3
+    for idx, (fuel_name, price_str, p_col) in enumerate(rows):
+        ry0 = hdr_h + 2 + idx * row_h
+        if idx > 0:
+            draw.line([(8, ry0), (w - 9, ry0)], fill=(44, 50, 58), width=1)
+        bx_f = draw.textbbox((0, 0), fuel_name, font=font_row)
+        draw.text((16 - bx_f[0], ry0 + (row_h - (bx_f[3] - bx_f[1])) / 2.0 - bx_f[1]), fuel_name, font=font_row, fill=(210, 214, 220))
+        bx_p = draw.textbbox((0, 0), price_str, font=font_price)
+        draw.text((w - 16 - (bx_p[2] - bx_p[0]) - bx_p[0], ry0 + (row_h - (bx_p[3] - bx_p[1])) / 2.0 - bx_p[1]), price_str, font=font_price, fill=p_col)
+    return img
+
+
 def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     """Pack up to 4 German royal-blue/white enamel house number plaques (4x1 grid, 128x64 each) into one 512x64 slot."""
     img = Image.new("RGB", (w, h), (16, 48, 96))

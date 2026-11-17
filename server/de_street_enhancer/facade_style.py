@@ -940,6 +940,7 @@ def bake_building_depth(
     mesh.set_raw_arrays(P, UV, T, M, C)
     if not lite:
         _add_entrance_canopy_and_balconies(mesh, spec, gmin, gmax, z_eave, mat_idx)
+        _add_de_roof_details(mesh, spec, z_eave, mat_idx)
 
 
 _BALCONY_SKIP_CLS = frozenset({
@@ -1011,7 +1012,7 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
     floors = int(getattr(spec, "floors", 1) or 1)
     if door is not None and not getattr(spec, "porch", False) and floors <= 5:
         edge_i, along_d = int(door[0]), float(door[1])
-        if 0 <= edge_i < n_edges and (eaves is None or eaves[edge_i] > 0.12):
+        if 0 <= edge_i < n_edges and (eaves is None or eaves[edge_i] > 0.15):
             a, b = ring[edge_i], ring[(edge_i + 1) % n_edges]
             L = float(math.hypot(*(b - a)))
             if L >= 3.2:
@@ -1022,7 +1023,7 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
                 door_g = bld.door_ground(spec, edge_i, along_d, gmax)
                 z_can = door_g + 2.46
                 if z_can + 0.25 < z_eave:
-                    c_xy = a + d_u * float(np.clip(along_d, 1.1, L - 1.1))
+                    c_xy = a + d_u * float(np.clip(along_d, 1.2, L - 1.2))
                     # Glass canopy pane (1.80 m wide x 0.90 m deep)
                     c_pane = np.array([c_xy[0] + ay[0] * 0.46, c_xy[1] + ay[1] * 0.46, z_can], dtype=np.float64)
                     _add_box_prism(mesh, c_pane, ax, ay, axis_z, 0.90, 0.45, 0.024, glass_tok)
@@ -1096,3 +1097,185 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
                     rail_z,
                 ], dtype=np.float64)
                 _add_box_prism(mesh, c_post, ax, ay, axis_z, 0.025, 0.025, 0.50, steel_tok)
+
+
+_ROOF_DETAIL_SKIP_CLS = frozenset({
+    "church", "chapel", "cathedral", "greenhouse", "hangar", "garage", "garages", "shed", "mast", "tank",
+})
+
+
+def _chimney_spot_for(spec, hl: float, hw: float) -> tuple[float, float] | None:
+    """Mirror `buildings._chimney` placement so dormers/PV panels stay clear."""
+    import buildings as bld
+
+    ridge_half = hl if spec.roof == "gabled" else max(hl - hw, 0.0)
+    if (
+        spec.cls in bld.SHED_CLASSES
+        or spec.cls in bld.BARN_CLASSES
+        or (spec.floors or 1) > 3
+        or ridge_half < 1.2
+        or hw < 2.0
+        or 4.0 * (ridge_half + hw) * hw > bld.CHIMNEY_MAX_M2
+        or bld._hash01(spec.seed, "chimney") >= bld.CHIMNEY_SHARE
+    ):
+        return None
+    half = bld.CHIMNEY_HALF_M[0] + (bld.CHIMNEY_HALF_M[1] - bld.CHIMNEY_HALF_M[0]) * bld._hash01(spec.seed, "chimney size")
+    along = (2.0 * bld._hash01(spec.seed, "chimney at") - 1.0) * 0.7 * (ridge_half - half)
+    side = (0.6 if bld._hash01(spec.seed, "chimney side") < 0.5 else -0.6) * min(1.0, 0.25 * hw)
+    return float(along), float(side)
+
+
+def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
+    """Add deterministic German dormers (`Dachgauben`) and south-facing PV solar panels (`0` extra draw calls)."""
+    import buildings as bld
+
+    if (
+        getattr(spec, "plain", False)
+        or getattr(spec, "holes", None)
+        or getattr(spec, "skel", False)
+        or getattr(spec, "hf", False)
+        or getattr(spec, "deck", False)
+        or getattr(spec, "ship", False)
+        or getattr(spec, "steeple", False)
+        or mesh.n > 54000
+    ):
+        return
+    if spec.roof not in ("gabled", "half-hipped", "hipped"):
+        return
+    cls = (getattr(spec, "cls", None) or "").lower()
+    if cls in _ROOF_DETAIL_SKIP_CLS:
+        return
+
+    ring = bld.drawn_ring(spec)
+    if ring is None or len(ring) < 3:
+        return
+
+    c, u, hl, hw = bld.oriented_box(ring)
+    if getattr(spec, "across", False):
+        u, hl, hw = np.array([-u[1], u[0]], dtype=np.float64), hw, hl
+    else:
+        u = np.asarray(u, dtype=np.float64)
+    v = np.array([-u[1], u[0]], dtype=np.float64)
+
+    pitch_deg = float(bld.roof_pitch(spec))
+    if pitch_deg < 18.0 or hw < 2.6 or hl < 3.2:
+        return
+    rad = math.radians(pitch_deg)
+    tan_p = math.tan(rad)
+    cos_p = math.cos(rad)
+    sin_p = math.sin(rad)
+
+    chim_spot = _chimney_spot_for(spec, hl, hw)
+    axis_u = np.array([u[0], u[1], 0.0], dtype=np.float64)
+    axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+    placed_dormers: list[tuple[float, float]] = []
+    floors = int(getattr(spec, "floors", 1) or 1)
+
+    # 1. Dormers (`Dachgauben`) on pitched residential roofs
+    if (
+        spec.roof in ("gabled", "half-hipped")
+        and cls not in _BALCONY_SKIP_CLS
+        and hw >= 3.2
+        and hl >= 3.5
+        and 25.0 <= pitch_deg <= 55.0
+        and floors <= 4
+        and _h01(spec.seed, "de_dormer") < 0.35
+    ):
+        try:
+            fac_tok = mat_idx[spec.facade]
+            roof_tok = mat_idx[spec.roof_mat]
+            win_tok = mat_idx[bld.OFFICE]
+        except KeyError:
+            fac_tok = roof_tok = win_tok = None
+
+        if fac_tok is not None and mesh.n + 160 <= 58000:
+            # Prefer slope facing spec.door if available, else deterministic side
+            sgn = 1.0 if _h01(spec.seed, "de_dormer_side") < 0.5 else -1.0
+            door = getattr(spec, "door", None)
+            if door is not None and 0 <= int(door[0]) < len(ring):
+                da = ring[int(door[0])]
+                db = ring[(int(door[0]) + 1) % len(ring)]
+                d_mid = 0.5 * (da + db) - c
+                proj_v = float(np.dot(d_mid, v))
+                if abs(proj_v) > 0.5:
+                    sgn = 1.0 if proj_v > 0.0 else -1.0
+
+            n_dorm = 2 if (hl >= 6.0 and _h01(spec.seed, "de_dormer_n") < 0.55) else 1
+            s_offsets = (0.0,) if n_dorm == 1 else (-0.42 * hl, 0.42 * hl)
+            t_d = sgn * 0.52 * hw
+            z_d_base = float(z_eave) + (hw - abs(t_d)) * tan_p - 0.12
+            ay_out = np.array([sgn * v[0], sgn * v[1], 0.0], dtype=np.float64)
+
+            for s_d in s_offsets:
+                if chim_spot is not None and (chim_spot[1] * sgn > -0.2) and abs(s_d - chim_spot[0]) < 1.35:
+                    continue
+                if mesh.n + 80 > 58000:
+                    break
+                c_xy = c + u * s_d + v * t_d
+                # Dormer body
+                _add_box_prism(mesh, np.array([c_xy[0], c_xy[1], z_d_base + 0.56]), axis_u, ay_out, axis_z, 0.68, 0.72, 0.56, fac_tok)
+                # Dormer window face
+                _add_box_prism(mesh, np.array([c_xy[0] + ay_out[0] * 0.73, c_xy[1] + ay_out[1] * 0.73, z_d_base + 0.58]), axis_u, ay_out, axis_z, 0.46, 0.03, 0.36, win_tok)
+                # Dormer roof cap
+                _add_box_prism(mesh, np.array([c_xy[0] + ay_out[0] * 0.05, c_xy[1] + ay_out[1] * 0.05, z_d_base + 1.15]), axis_u, ay_out, axis_z, 0.78, 0.84, 0.06, roof_tok)
+                placed_dormers.append((s_d, sgn))
+
+    # 2. South-facing rooftop PV solar panels (`Photovoltaik`)
+    if _h01(spec.seed, "de_pv") >= 0.26 or mesh.n + 120 > 58000:
+        return
+    # ENU +Y is North; outward slope normal Y = (sgn * v[1]) * sin(pitch)
+    best_sgn = None
+    best_ny = 0.0
+    for sgn in (-1.0, 1.0):
+        ny = float(sgn * v[1]) * sin_p
+        if ny < -0.35 and ny < best_ny:
+            best_ny = ny
+            best_sgn = sgn
+    if best_sgn is None:
+        return
+
+    try:
+        pv_tok = (bld.MATERIALS.index(bld.METALWALL), (22, 34, 54, 255))
+    except ValueError:
+        return
+
+    # Orthonormal basis on the chosen slope plane:
+    # sx_axis = u (along ridge), sy_axis = up-slope vector, sz_norm = outward 3D slope normal
+    out_2d = best_sgn * v
+    sx_axis = axis_u
+    sy_axis = np.array([-out_2d[0] * cos_p, -out_2d[1] * cos_p, sin_p], dtype=np.float64)
+    sz_norm = np.array([out_2d[0] * sin_p, out_2d[1] * sin_p, cos_p], dtype=np.float64)
+
+    usable_s = (hl - 0.70) * 2.0
+    slope_len = hw / max(cos_p, 0.3)
+    usable_up = slope_len - 1.30
+    if spec.roof == "hipped":
+        usable_s = max(0.0, usable_s - hw * 1.4)
+    if usable_s < 1.8 or usable_up < 1.6:
+        return
+
+    mod_w = 1.65
+    mod_h = 1.05
+    gap = 0.14
+    n_cols = min(4, max(1, int((usable_s + gap) // (mod_w + gap))))
+    n_rows = min(2, max(1, int((usable_up + gap) // (mod_h + gap))))
+    span_s = n_cols * mod_w + (n_cols - 1) * gap
+    span_up = n_rows * mod_h + (n_rows - 1) * gap
+
+    for ri in range(n_rows):
+        up_d = 0.65 + 0.5 * mod_h + ri * (mod_h + gap) + 0.5 * max(0.0, usable_up - span_up)
+        # Convert up-slope distance from eave to (t, z)
+        t_p = best_sgn * (hw - up_d * cos_p)
+        z_p = float(z_eave) + up_d * sin_p
+        for ci in range(n_cols):
+            if mesh.n + 24 > 58000:
+                return
+            s_p = -0.5 * span_s + 0.5 * mod_w + ci * (mod_w + gap)
+            if chim_spot is not None and (chim_spot[1] * best_sgn > -0.2) and abs(s_p - chim_spot[0]) < 1.25:
+                continue
+            if any(d_sgn == best_sgn and abs(s_p - d_s) < 1.35 for d_s, d_sgn in placed_dormers):
+                continue
+            p_xy = c + u * s_p + v * t_p
+            p_c = np.array([p_xy[0], p_xy[1], z_p], dtype=np.float64) + sz_norm * 0.06
+            _add_box_prism(mesh, p_c, sx_axis, sy_axis, sz_norm, mod_w * 0.5, mod_h * 0.5, 0.025, pv_tok)

@@ -493,12 +493,18 @@ def classify_commercial_buildings(
                 if bmatch is not None and blabel:
                     spec_brand, label = bmatch, blabel
                 else:
-                    spec_brand, label = brand_registry.fallback_brand(_hash01(spec.seed, "de_brand"), lat_f, cls)
+                    spec_brand, label = brand_registry.fallback_brand(
+                        _hash01(spec.seed, "de_brand"), lat_f, cls,
+                        local_seed=_hash01(spec.seed, round(float(mid[0]), 1), round(float(mid[1]), 1), "de_local_shop"),
+                    )
             else:
                 # Deterministic branded coverage (~78%) so commercial streets keep natural variety.
                 if _hash01(spec.seed, "de_shop_on") >= COMMERCIAL_SHOP_ASSIGN_SHARE:
                     continue
-                spec_brand, label = brand_registry.fallback_brand(_hash01(spec.seed, "de_brand"), lat_f, cls)
+                spec_brand, label = brand_registry.fallback_brand(
+                    _hash01(spec.seed, "de_brand"), lat_f, cls,
+                    local_seed=_hash01(spec.seed, round(float(mid[0]), 1), round(float(mid[1]), 1), "de_local_shop"),
+                )
 
         center = mid + out * 0.15  # Push outward (+0.04 m) past flat cornices/window frames without z-fighting
         targets.append(
@@ -621,7 +627,10 @@ def collect_housenumbers(items: list, suppress_ids: set[int] | frozenset[int] = 
         s_pos = float(np.clip(along_d + shift, 0.35, L - 0.35))
         pos_xy = a + d_along * s_pos + out_normal * 0.03
         door_g = buildings.door_ground(spec, edge_i, along_d, gmax)
-        z_mid = float(door_g) + 1.95
+        z_eave = buildings.base_z(spec, _gmin, gmax) + float(getattr(spec, "min_h", 0.0) or 0.0) + float(getattr(spec, "height", 3.0) or 3.0)
+        z_mid = min(float(door_g) + 1.95, float(z_eave) - 0.25)
+        if z_mid < float(door_g) + 0.80:
+            continue
 
         explicit = getattr(spec, "de_hn", None)
         if explicit:
