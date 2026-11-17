@@ -244,6 +244,108 @@ class BusModeTest(unittest.TestCase):
         self.assertIn(rb["source"], ("overture", "road_chain"))
         self.assertGreaterEqual(len(rb["stops"]), 4)
 
+    def test_infra_bus_stops_dedups_without_tuple_str_typeerror(self):
+        # Regression test: Overture infrastructure fallback previously indexed (lat, lon) tuples in `seen` with o["lat"]
+        base_lat, base_lon = 48.135, 11.582
+        md = FakeMapData()
+        infra_items = []
+        road_items = []
+        for idx, dist_step in enumerate((300.0, 320.0, 720.0, 1150.0, 1600.0, 2050.0)):
+            sla, slo = tm.offset_latlon(base_lat, base_lon, dist_step, 90.0)
+            infra_items.append({
+                "id": f"bus_{idx}",
+                "attrs": {"class": "bus_stop", "name": f"Platform {idx}", "tags": "{}"},
+                "parts": [[np.array([[slo, sla]], np.float64)]],
+            })
+            road_items.append(_make_road(f"br_{idx}", sla, slo - 0.001, sla, slo + 0.001, cls="secondary", name="Bus Ave"))
+        # Distribute into cell buckets
+        by_cell_i, by_cell_r = {}, {}
+        for it in infra_items:
+            pt = it["parts"][0][0][0]
+            by_cell_i.setdefault(mapcells.cell_of(pt[1], pt[0]), []).append(it)
+        for r in road_items:
+            pt = r["parts"][0][0][0]
+            by_cell_r.setdefault(mapcells.cell_of(pt[1], pt[0]), []).append(r)
+        for k, items in by_cell_i.items():
+            md.put(k, "infrastructure", FakeFeatures(items))
+        for k, items in by_cell_r.items():
+            md.put(k, "roads", FakeFeatures(items))
+
+        tm._bus_cache.clear()
+        empty_net = SimpleNamespace(get=lambda url, kind="demand": SimpleNamespace(body=json.dumps({"elements": []}).encode()))
+        rb = tm.generate_job(md, empty_net, mode="bus", tier="partial", lat=base_lat, lon=base_lon, heading=90.0, seed=1)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(rb["source"], "overture")
+        self.assertGreaterEqual(len(rb["stops"]), 4)
+        # Paired 300 m and 320 m stops (< 45 m) must deduplicate into one stop
+        names = [s["name"] for s in rb["stops"]]
+        self.assertNotIn("Platform 1", names)
+
+
+class CurbAndLoadingBayTest(unittest.TestCase):
+    def test_taxi_and_bus_offset_to_right_hand_curb(self):
+        # Northbound road (bearing 0 deg) along lon=base_lon: right-hand curb is east (+90 deg)
+        base_lat, base_lon = 40.75, -73.98
+        k = mapcells.cell_of(base_lat, base_lon)
+        md = FakeMapData()
+        md.put(k, "roads", FakeFeatures([
+            _make_road("r_nb", base_lat - 0.002, base_lon, base_lat + 0.002, base_lon, cls="secondary", name="5th Ave"),
+        ]))
+        poi_lat, poi_lon = tm.offset_latlon(base_lat, base_lon, 8.0, 90.0)
+        snapped = tm.snap_to_road(md, poi_lat, poi_lon, radius_m=100.0)
+        curb = tm._apply_curb_offset(snapped, poi_lat, poi_lon, snapped["lat"], snapped["lon"], [])
+        self.assertIsNotNone(curb)
+        self.assertGreater(curb["lon"], base_lon)
+        off_m = tm.dist_m(snapped["lat"], snapped["lon"], curb["lat"], curb["lon"])
+        self.assertGreaterEqual(off_m, 1.5)
+        self.assertLessEqual(off_m, 4.0)
+
+    def test_logistics_prefers_onsite_aisle_and_clears_building_footprints(self):
+        base_lat, base_lon = 41.88, -87.63
+        # Warehouse polygon centered at (poi_lat, poi_lon) ~30x30 m
+        poi_lat, poi_lon = tm.offset_latlon(base_lat, base_lon, 50.0, 0.0)
+        dlat = 15.0 / tm.M_LAT
+        dlon = 15.0 / (tm.M_LAT * tm._cos_lat(poi_lat))
+        bld = {
+            "id": "b_wh",
+            "attrs": {"name": "North Dock", "class": "warehouse", "cx": poi_lon, "cy": poi_lat},
+            "parts": [[np.array([
+                [poi_lon - dlon, poi_lat - dlat],
+                [poi_lon + dlon, poi_lat - dlat],
+                [poi_lon + dlon, poi_lat + dlat],
+                [poi_lon - dlon, poi_lat + dlat],
+                [poi_lon - dlon, poi_lat - dlat],
+            ], np.float64)]],
+        }
+        # Main arterial road 50 m south, plus an on-site parking_aisle 24 m east of warehouse center (9 m outside east wall)
+        aisle_lon = poi_lon + (24.0 / (tm.M_LAT * tm._cos_lat(poi_lat)))
+        md = FakeMapData()
+        k = mapcells.cell_of(poi_lat, poi_lon)
+        md.put(k, "buildings", FakeFeatures([bld]))
+        md.put(k, "roads", FakeFeatures([
+            _make_road("r_art", base_lat, base_lon - 0.002, base_lat, base_lon + 0.002, cls="primary", name="Outer Blvd"),
+            _make_road("r_aisle", poi_lat - 0.0004, aisle_lon, poi_lat + 0.0004, aisle_lon, cls="service", subclass="parking_aisle", name="Dock Lane"),
+        ]))
+
+        bay = tm._snap_logistics_spot(md, poi_lat, poi_lon, tm.time.monotonic() + 2.0)
+        self.assertIsNotNone(bay)
+        self.assertEqual(bay["stopType"], "loading_bay")
+        self.assertEqual(bay["road"], "Dock Lane")
+        polys = tm._building_polys(md, poi_lat, poi_lon)
+        self.assertTrue(tm._clear_of_buildings(bay["lat"], bay["lon"], poi_lat, poi_lon, polys, 2.5))
+
+        # Without service aisle -> building-perimeter loading bay >= 2.5 m outside wall
+        md2 = FakeMapData()
+        md2.put(k, "buildings", FakeFeatures([bld]))
+        md2.put(k, "roads", FakeFeatures([
+            _make_road("r_art", base_lat, base_lon - 0.002, base_lat, base_lon + 0.002, cls="primary", name="Outer Blvd"),
+        ]))
+        perim = tm._snap_logistics_spot(md2, poi_lat, poi_lon, tm.time.monotonic() + 2.0)
+        self.assertIsNotNone(perim)
+        self.assertEqual(perim["stopType"], "loading_bay")
+        polys2 = tm._building_polys(md2, poi_lat, poi_lon)
+        self.assertTrue(tm._clear_of_buildings(perim["lat"], perim["lon"], poi_lat, poi_lon, polys2, 2.5))
+
 
 class LogisticsModeTest(unittest.TestCase):
     def test_local_and_city_delivery(self):
