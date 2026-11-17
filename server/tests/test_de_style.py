@@ -252,6 +252,68 @@ class TestDeStyleContract(unittest.TestCase):
         z_eave = buildings.base_z(spec, 0.0, 0.6) + 2.7
         self.assertLessEqual(hn[0].z_mid, z_eave - 0.25 + 1e-6)
 
+    def test_perf_optimizations_lods_cache_and_balcony_budget(self):
+        import cdae
+
+        # 1. Atlas caching: skip_render_if_cached=True skips render_fn on cache hit
+        calls = {"n": 0}
+
+        def _render(val):
+            calls["n"] += 1
+            return texture_atlas.render_street_plate(val, variant="blue")
+
+        entries = [("street|blue|Hauptstraße", "Hauptstraße")]
+        with tempfile.TemporaryDirectory() as tmp:
+            m1, p1, v1, uv1, img1 = texture_atlas.pack_atlas(entries, _render, tmp, "/v", "st", skip_render_if_cached=True)
+            self.assertEqual(calls["n"], 1)
+            self.assertIsNotNone(img1)
+            self.assertTrue(os.path.exists(p1))
+
+            m2, p2, v2, uv2, img2 = texture_atlas.pack_atlas(entries, _render, tmp, "/v", "st", skip_render_if_cached=True)
+            self.assertEqual(calls["n"], 1, "cache-hit atlas must skip Pillow rendering")
+            self.assertIsNone(img2)
+            self.assertEqual((m1, p1, v1, uv1), (m2, p2, v2, uv2))
+
+        # 2. Micro-prop distance culling via native cdae LODs
+        shop_t = classifier.ShopTarget(
+            building_idx=0,
+            center_xy=np.array([10.0, 10.0], dtype=np.float64),
+            d_along=np.array([1.0, 0.0], dtype=np.float64),
+            out_normal=np.array([0.0, -1.0], dtype=np.float64),
+            width_m=4.0,
+            height_m=0.7,
+            z_bottom=3.0,
+            z_top=3.7,
+            spec_brand=brand_registry.BY_KEY["rewe"],
+            label="REWE",
+        )
+        hn_t = classifier.HouseNumberTarget(
+            center_xy=np.array([20.0, 20.0], dtype=np.float64),
+            d_along=np.array([1.0, 0.0], dtype=np.float64),
+            out_normal=np.array([0.0, -1.0], dtype=np.float64),
+            z_mid=1.9,
+            number="42",
+        )
+        uv_map = {"shop|rewe|REWE": (0.0, 0.0, 0.5, 0.5), "hn|42": (0.5, 0.0, 1.0, 0.5)}
+        shop_blob = placement.encode_shop_and_housenumbers_mesh([shop_t], [hn_t], "bne_de_sh_test", uv_map)
+        self.assertIsNotNone(shop_blob)
+        parsed = cdae.decode(shop_blob)
+        self.assertEqual(parsed["details"][0], 2, "deshops.cdae should include coarse LOD culling house numbers")
+
+        # 3. Balconies skip rear-courtyard edges when street edges are known
+        ring = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]], dtype=np.float64)
+        spec_st = buildings.Spec(
+            ring=ring, floors=3, floor_h=2.8, height=8.4, min_h=0.0,
+            roof="gabled", cls="apartments", seed=0.42, door=(0, 5.0),
+            street=(0,), front=0, de_in=True,
+        )
+        mat_idx = {m: (i, (255, 255, 255, 255)) for i, m in enumerate(buildings.MATERIALS)}
+        mat_idx["bne_bld_fac_white"] = mat_idx[buildings.FACADE]
+        m_bal = buildings.Mesh()
+        facade_style._add_entrance_canopy_and_balconies(m_bal, spec_st, 0.0, 0.0, 8.4, mat_idx)
+        # Only 1 street-facing edge (edge 0): 2 upper floors * 7 boxes * 24 verts + canopy (3 * 24) = 408 verts (vs 744 with rear edge)
+        self.assertEqual(m_bal.n, 408, "balconies should only be placed on street-facing edge 0, not rear edge 2")
+
 
 def math_hypot(dx, dy):
     return float(np.hypot(dx, dy))

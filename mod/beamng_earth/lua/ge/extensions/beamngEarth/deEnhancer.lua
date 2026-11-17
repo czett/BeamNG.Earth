@@ -19,6 +19,8 @@ local mats = {}          -- matName -> { refs, texture, emissive, glowColor, nit
 local byTile = {}        -- tileKey -> { matName, ... }
 local pendingDel = {}    -- matName -> true
 local savedBldPbr = {}   -- matName -> { field -> origVal_or_false }
+local settingsMod = nil
+local nightlightsMod = nil
 M.count = 0
 M.pbrActive = false
 
@@ -74,11 +76,15 @@ local function hasFile(path)
 end
 
 function M.isEnabled()
-  local ok, s = pcall(require, 'beamngEarth/settings')
-  return ok and type(s) == 'table' and type(s.get) == 'function' and s.get('expDeStreetImmersion') == true
+  if settingsMod == nil then
+    local ok, s = pcall(require, 'beamngEarth/settings')
+    settingsMod = (ok and type(s) == 'table') and s or false
+  end
+  return settingsMod ~= false and type(settingsMod.get) == 'function' and settingsMod.get('expDeStreetImmersion') == true
 end
 
 local function applyBldPbr()
+  if M.pbrActive then return end
   if not scenetree or type(scenetree.findObject) ~= 'function' then return end
   for matName, fields in pairs(M.BLD_PBR) do
     local m = scenetree.findObject(matName)
@@ -95,14 +101,15 @@ local function applyBldPbr()
       for k, v in pairs(fields) do
         m:setField(k, 0, v)
       end
-      pcall(function() m:flush() end)
-      pcall(function() m:reload() end)
+      pcall(m.flush, m)
+      pcall(m.reload, m)
     end
   end
   M.pbrActive = true
 end
 
 local function restoreBldPbr()
+  if not M.pbrActive and next(savedBldPbr) == nil then return end
   if not scenetree or type(scenetree.findObject) ~= 'function' then
     savedBldPbr = {}
     M.pbrActive = false
@@ -114,8 +121,8 @@ local function restoreBldPbr()
       for k, v in pairs(orig) do
         m:setField(k, 0, v == false and '' or v)
       end
-      pcall(function() m:flush() end)
-      pcall(function() m:reload() end)
+      pcall(m.flush, m)
+      pcall(m.reload, m)
     end
   end
   savedBldPbr = {}
@@ -131,8 +138,12 @@ function M.syncBuildingMaterials()
 end
 
 local function syncNightlights(name, def, active)
-  local ok, nl = pcall(require, 'beamngEarth/nightlights')
-  if not ok or type(nl) ~= 'table' then return end
+  if nightlightsMod == nil then
+    local ok, nl = pcall(require, 'beamngEarth/nightlights')
+    nightlightsMod = (ok and type(nl) == 'table') and nl or false
+  end
+  local nl = nightlightsMod
+  if not nl then return end
   if active and def and def.emissive == true then
     if type(nl.addDynamic) == 'function' then
       nl.addDynamic(name, def.glowColor or M.DEFAULT_GLOW_COLOR, tonumber(def.nits) or M.DEFAULT_GLOW_NITS)
@@ -156,8 +167,8 @@ local function makeMaterial(name, def)
       if def.emissive == true then
         m:setField('emissiveMap', 0, tex)
       end
-      pcall(function() m:flush() end)
-      pcall(function() m:reload() end)
+      pcall(m.flush, m)
+      pcall(m.reload, m)
     end
     syncNightlights(name, def, exists)
     return
@@ -247,6 +258,7 @@ end
 
 -- Delete materials whose tiles & TSStatic objects are gone.
 function M.sweep()
+  if next(pendingDel) == nil then return 0 end
   local deleted = 0
   local done = {}
   for name in pairs(pendingDel) do done[#done + 1] = name end

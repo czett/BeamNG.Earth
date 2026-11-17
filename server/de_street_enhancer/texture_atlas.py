@@ -121,6 +121,7 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int, size
     return clean, f, draw.textbbox((0, 0), clean, font=f)
 
 
+@functools.lru_cache(maxsize=256)
 def render_street_plate(name: str, variant: str = "blue", w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     """Render a crisp `w x h` German street name plate (RAL 5010 blue or white municipal style)."""
     pal = STREET_PALETTE_WHITE if variant == "white" else STREET_PALETTE_BLUE
@@ -229,8 +230,29 @@ def _draw_emblem(draw: ImageDraw.ImageDraw, spec, x0: int, y0: int, size: int) -
     return False
 
 
-def render_shop_fascia(spec, label: str, w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
-    """Render an illuminated commercial fascia banner into a `w x h` RGB image."""
+@functools.lru_cache(maxsize=256)
+def _render_shop_fascia_cached(
+    brand_key: str,
+    emblem: str,
+    bg_rgb: tuple[int, int, int],
+    fg_rgb: tuple[int, int, int],
+    border_rgb: tuple[int, int, int] | None,
+    accent_rgb: tuple[int, int, int] | None,
+    label: str,
+    w: int,
+    h: int,
+) -> Image.Image:
+    """Render an illuminated commercial fascia banner into a `w x h` RGB image (cached)."""
+    from types import SimpleNamespace
+
+    spec = SimpleNamespace(
+        key=brand_key,
+        emblem=emblem,
+        bg_rgb=bg_rgb,
+        fg_rgb=fg_rgb,
+        border_rgb=border_rgb,
+        accent_rgb=accent_rgb,
+    )
     img = Image.new("RGB", (w, h), spec.bg_rgb)
     draw = ImageDraw.Draw(img)
 
@@ -254,6 +276,21 @@ def render_shop_fascia(spec, label: str, w: int = SLOT_W, h: int = SLOT_H) -> Im
     ty = (h - th) / 2.0 - bx[1]
     draw.text((tx, ty), fitted, font=font, fill=spec.fg_rgb)
     return img
+
+
+def render_shop_fascia(spec, label: str, w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    """Render an illuminated commercial fascia banner into a `w x h` RGB image."""
+    return _render_shop_fascia_cached(
+        getattr(spec, "key", ""),
+        getattr(spec, "emblem", ""),
+        tuple(spec.bg_rgb),
+        tuple(spec.fg_rgb),
+        tuple(spec.border_rgb) if spec.border_rgb is not None else None,
+        tuple(spec.accent_rgb) if spec.accent_rgb is not None else None,
+        str(label),
+        w,
+        h,
+    )
 
 
 def uv_subrect(uv: tuple[float, float, float, float], rx0: float, ry0: float, rx1: float, ry1: float) -> tuple[float, float, float, float]:
@@ -303,6 +340,7 @@ def render_bus_stop_panel(stop_name: str, w: int = SLOT_W, h: int = SLOT_H) -> I
     return img
 
 
+@functools.lru_cache(maxsize=4)
 def render_furniture_swatch(w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     """Render 8x 64x64 micro-prop material swatches inside one 512x64 atlas slot."""
     img = Image.new("RGB", (w, h), (46, 52, 58))
@@ -444,6 +482,7 @@ def pack_atlas(
     out_dir: str | None,
     vfs_dir: str | None,
     prefix: str,
+    skip_render_if_cached: bool = False,
 ) -> tuple[str | None, str | None, str | None, dict[str, tuple[float, float, float, float]], Image.Image | None]:
     """Pack unique items into one DXT1 DDS atlas and compute Collada UV rects.
 
@@ -481,10 +520,30 @@ def pack_atlas(
     mat_name = f"bne_de_{prefix}_{h}"
     filename = f"de_{prefix}_{h}.dds"
 
-    atlas = Image.new("RGB", (atlas_w, atlas_h), (24, 30, 40))
+    disk_path = os.path.join(out_dir, filename) if out_dir else None
+    vfs_path = f"{vfs_dir}/{filename}" if vfs_dir else None
     uv_map: dict[str, tuple[float, float, float, float]] = {}
 
-    for idx, (key, payload) in enumerate(unique):
+    # Compute deterministic UVs up-front; if the exact hash-named DDS already exists on disk
+    # and the caller doesn't need the PIL Image, skip all Pillow rendering and DDS compression.
+    for idx, (key, _payload) in enumerate(unique):
+        col = idx % cols
+        row = idx // cols
+        px0 = col * SLOT_W
+        py0 = row * SLOT_H
+        # Inset 3px inside the 4px padding margin to avoid bilinear bleed across slots;
+        # convert top-down pixel Y into Collada bottom-up V (`v_dae = 1 - y / H`).
+        u0 = (px0 + 3.0) / float(atlas_w)
+        u1 = (px0 + SLOT_W - 3.0) / float(atlas_w)
+        v_top_dae = 1.0 - (py0 + 3.0) / float(atlas_h)
+        v_bot_dae = 1.0 - (py0 + SLOT_H - 3.0) / float(atlas_h)
+        uv_map[key] = (u0, v_bot_dae, u1, v_top_dae)
+
+    if skip_render_if_cached and disk_path and os.path.exists(disk_path):
+        return mat_name, disk_path, vfs_path, uv_map, None
+
+    atlas = Image.new("RGB", (atlas_w, atlas_h), (24, 30, 40))
+    for idx, (_key, payload) in enumerate(unique):
         col = idx % cols
         row = idx // cols
         px0 = col * SLOT_W
@@ -494,16 +553,6 @@ def pack_atlas(
             tile_img = tile_img.resize((SLOT_W, SLOT_H), Image.Resampling.LANCZOS)
         atlas.paste(tile_img, (px0, py0))
 
-        # Inset 3px inside the 4px padding margin to avoid bilinear bleed across slots;
-        # convert top-down pixel Y into Collada bottom-up V (`v_dae = 1 - y / H`).
-        u0 = (px0 + 3.0) / float(atlas_w)
-        u1 = (px0 + SLOT_W - 3.0) / float(atlas_w)
-        v_top_dae = 1.0 - (py0 + 3.0) / float(atlas_h)
-        v_bot_dae = 1.0 - (py0 + SLOT_H - 3.0) / float(atlas_h)
-        uv_map[key] = (u0, v_bot_dae, u1, v_top_dae)
-
-    disk_path = os.path.join(out_dir, filename) if out_dir else None
-    vfs_path = f"{vfs_dir}/{filename}" if vfs_dir else None
     if disk_path and not os.path.exists(disk_path):
         os.makedirs(out_dir, exist_ok=True)
         imagery.write_dds(disk_path, np.asarray(atlas, dtype=np.uint8))
