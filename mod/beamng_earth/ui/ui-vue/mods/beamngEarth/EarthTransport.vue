@@ -24,12 +24,24 @@
           </div>
           <div v-if="currentStop && currentStop.address" class="tm-stop-addr">{{ currentStop.address }}</div>
           <div v-if="active.mode === 'taxi'" class="tm-subline">
-            <span class="tm-pill" :class="{ on: active.passengerOnBoard }">{{ active.passengerOnBoard ? 'Passenger on board' : 'En route to pickup' }}</span>
+            <span class="tm-pill" :class="{ on: active.passengerOnBoard }">
+              {{ active.passengerOnBoard ? (active.paxCount || 1) + ' pax on board' : 'En route to pickup (' + (active.paxCount || 1) + ' pax)' }}
+            </span>
+            <span v-if="active.rideArchetype && active.rideArchetype !== 'standard'" class="tm-pill on">
+              {{ active.rideArchetype === 'express' ? 'Express +40%' : 'VIP +35% tip' }}
+            </span>
             <span v-if="active.passengerOnBoard && active.fare != null" class="tm-num tm-fare">Meter ${{ Number(active.fare).toFixed(2) }}</span>
+          </div>
+          <div v-else-if="active.mode === 'bus'" class="tm-subline">
+            <span class="tm-num"><b>{{ active.paxCount ?? 0 }}/{{ active.paxCapacity || 40 }}</b> pax</span>
+            <span class="tm-pill" :class="{ on: !active.scheduleText || active.scheduleText === 'On Time' }">{{ active.scheduleText || 'On Time' }}</span>
           </div>
           <div v-else-if="active.mode === 'logistics' && active.cargoKg" class="tm-subline">
             <span>{{ active.cargoLabel || 'Cargo' }} · <b class="tm-num">{{ formatCargo(active.cargoKg) }}</b></span>
             <span v-if="active.trailerState && active.trailerState !== 'none'" class="tm-pill on">{{ trailerLabel(active.trailerState) }}</span>
+          </div>
+          <div v-if="active.mode === 'bus' && active.nextStopName" class="tm-stop-addr">
+            Next Stop after this: {{ active.nextStopName }}
           </div>
           <div class="tm-metrics">
             <div class="tm-metric">
@@ -116,7 +128,8 @@
           <div class="is-score"><span>Score</span><b class="tm-num">{{ summary.score }}/100</b></div>
         </div>
         <div class="tm-actions">
-          <button class="tm-btn primary" @click="dismissSummary">New Job</button>
+          <button v-if="summary.mode === 'taxi'" class="tm-btn primary" @click="nextPassenger">Next Passenger</button>
+          <button class="tm-btn" :class="{ primary: summary.mode !== 'taxi' }" @click="dismissSummary">New Job</button>
         </div>
       </div>
     </template>
@@ -160,7 +173,7 @@ import { computed, onMounted, onUnmounted } from "vue"
 import {
   TRANSPORT_MODES, selectedMode, selectedTier, currentTiers,
   transportState, busy, actionError,
-  setMode, setTier, startJob, skipStop, cancelJob, dismissSummary,
+  setMode, setTier, startJob, skipStop, cancelJob, dismissSummary, nextPassenger,
   modeLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, toArray, start, stop,
 } from "./earthTransportStore.js"
 

@@ -23,13 +23,16 @@ M.DEFAULT_ZONE_RADIUS_M = 12.0
 M.HEIGHT_TOL_M = 10.0
 M.DRAW_RADIUS_M = 450.0
 M.REQUEST_TIMEOUT_S = 15.0
-M.PROBE_TIMEOUT_S = 0.25
+M.PROBE_TIMEOUT_S = 0.6
 M.SAMPLE_S = 0.2
 M.HARSH_ACCEL_MPS2 = 5.5
-M.HARSH_VERT_MPS2 = 10.0
-M.HARSH_JERK_MPS3 = 18.0
+M.HARSH_VERT_MPS2 = 16.5
+M.HARSH_VERT_SPIKE_MPS2 = 22.0
+M.HARSH_VERT_SUSTAIN_MPS2 = 14.5
+M.HARSH_JERK_MPS3 = 22.0
 M.DAMAGE_COLLISION_DELTA = 50
 M.COLLISION_COOLDOWN_S = 1.25
+M.COLLISION_PEN_CAP = 65
 M.JUMP_RESET_M = 200.0
 M.RADIAL_LEVEL = '/root/sandbox/other/'
 
@@ -38,17 +41,42 @@ M.TAXI_BASE_FARE = 3.50
 M.TAXI_PER_KM = 1.85
 M.TAXI_MIN_FARE = 5.00
 
+-- Bus capacity & passenger load constants
+M.BUS_CAPACITY = 40
+M.BUS_PAX_MASS_KG = 75
+
 -- Trailer spawning & hitching constants
 M.HITCH_ATTEMPTS = { 0.15, 0.35, 0.70, 1.20 }
+M.SEMI_TRAILER_MODELS = {
+  'dryvan', 'reefer', 'tanker', 'flatbed', 'container', 'frameless_dump', 'log_trailer', 'lowboy', 'boxtrailer',
+}
+M.TOWHITCH_TRAILER_MODELS = { 'boxutility', 'boxutility_large', 'cargotrailer', 'tsfb' }
 M.TRAILER_CANDIDATES = {
   fifthwheel = {
+    fuel = { 'tanker', 'dryvan', 'container' },
+    fuel_drums = { 'dryvan', 'flatbed', 'container' },
+    food = { 'reefer', 'dryvan', 'container' },
+    groceries = { 'reefer', 'dryvan', 'container' },
+    chilled_food = { 'reefer', 'dryvan', 'container' },
+    bulk_food = { 'reefer', 'dryvan', 'container' },
+    beverages = { 'dryvan', 'reefer', 'container' },
+    medical = { 'reefer', 'dryvan', 'container' },
+    pharma = { 'reefer', 'dryvan', 'container' },
+    hardware = { 'flatbed', 'container', 'dryvan' },
+    timber = { 'flatbed', 'log_trailer', 'container' },
     steel = { 'flatbed', 'dryvan', 'container' },
-    machinery = { 'flatbed', 'dryvan', 'container' },
-    default = { 'dryvan', 'flatbed', 'container', 'frameless_dump' },
+    machinery = { 'flatbed', 'lowboy', 'dryvan', 'container' },
+    industrial = { 'flatbed', 'container', 'dryvan', 'frameless_dump' },
+    aggregates = { 'frameless_dump', 'flatbed', 'container' },
+    retail = { 'dryvan', 'container', 'reefer', 'flatbed' },
+    dry_goods = { 'dryvan', 'container', 'reefer', 'flatbed' },
+    pallets = { 'dryvan', 'container', 'flatbed', 'reefer' },
+    general = { 'dryvan', 'container', 'flatbed', 'reefer' },
+    default = { 'dryvan', 'flatbed', 'container', 'reefer', 'frameless_dump', 'tanker' },
   },
   towhitch = {
     heavy = { 'boxutility_large', 'cargotrailer', 'boxutility', 'tsfb' },
-    light = { 'boxutility', 'boxutility_large', 'tsfb' },
+    light = { 'boxutility', 'boxutility_large', 'tsfb', 'cargotrailer' },
   },
 }
 M.SOLO_CARGO_CAP_KG = {
@@ -253,6 +281,42 @@ function M.bayOffsets(px, py, sx, sy, fx, fy, rx, ry)
   return dx * fx + dy * fy, dx * rx + dy * ry
 end
 
+-- Pure: entry direction (+1 forward, -1 reverse) and alignment check (bidirectional bays allow 0° and 180°).
+function M.bayEntryDir(playerHeadingDeg, bayBearingDeg, bidirectional)
+  if type(playerHeadingDeg) ~= 'number' or type(bayBearingDeg) ~= 'number' then
+    return 1, true
+  end
+  local diff = math.abs((playerHeadingDeg - bayBearingDeg + 180) % 360 - 180)
+  if bidirectional and diff > 90 then
+    return -1, (180 - diff) <= 70
+  end
+  return 1, bidirectional and (diff <= 70) or true
+end
+
+-- Pure: format bus schedule delta in seconds -> 'On Time' | '+1m 10s' | '-25s'.
+function M.formatScheduleDelta(deltaS)
+  local d = math.floor((tonumber(deltaS) or 0) + 0.5)
+  if math.abs(d) <= 15 then return 'On Time' end
+  local sign = d > 0 and '+' or '-'
+  local a = math.abs(d)
+  local m = math.floor(a / 60)
+  local s = a % 60
+  if m > 0 then
+    return string.format('%s%dm %02ds', sign, m, s)
+  end
+  return string.format('%s%ds', sign, s)
+end
+
+-- Pure: classify whether a 0.2s telemetry sample is harsh (rural-bump tolerant, VIP-strict).
+function M.isHarshSample(ah, az, jerk, prevVertSpike, isVip)
+  local scale = isVip and 0.80 or 1.0
+  local horizHarsh = (ah > M.HARSH_ACCEL_MPS2 * scale) or (jerk > M.HARSH_JERK_MPS3 * scale)
+  local absAz = math.abs(az or 0)
+  local vertSustain = absAz > M.HARSH_VERT_SUSTAIN_MPS2
+  local vertHarsh = (absAz > M.HARSH_VERT_SPIKE_MPS2) or (prevVertSpike == true and absAz > M.HARSH_VERT_MPS2 * scale)
+  return (horizHarsh or vertHarsh), vertSustain
+end
+
 -- Pure: advance dwell timer with dynamic primary bay target + kerbside fallback fail-safe.
 -- Returns state ('approaching'|'dwelling'|'complete'|'fallback_complete'), nextDwellS, nextDwellMode, targetDwellS.
 function M.stepBayStop(dwellS, dwellMode, distXY, longOff, latOff, dz, speed, baySpec, dtSim, paused, targetDwellS)
@@ -305,7 +369,10 @@ function M.computeTaxiFare(m)
   end
   local fareKm = math.max(0, (tonumber(m.fareDrivenM) or 0) / 1000.0)
   if not isFinite(fareKm) then fareKm = 0 end
-  local meter = math.max(M.TAXI_MIN_FARE, M.TAXI_BASE_FARE + fareKm * M.TAXI_PER_KM)
+  local fareMult = tonumber(m.fareMult) or (m.taxi and tonumber(m.taxi.fareMult)) or 1.0
+  local tipMult = tonumber(m.tipMult) or (m.taxi and tonumber(m.taxi.tipMult)) or 1.0
+  local baseMeter = math.max(M.TAXI_MIN_FARE, M.TAXI_BASE_FARE + fareKm * M.TAXI_PER_KM)
+  local meter = baseMeter * fareMult
   local fareElapsed = math.max(0, tonumber(m.fareElapsedS) or 0)
   local targetS = tonumber(m.targetLegS) or 0
   local timeliness = 100
@@ -317,7 +384,7 @@ function M.computeTaxiFare(m)
   local tip = 0
   local scoreHint = tonumber(m._scoreHint)
   if scoreHint and scoreHint > 60 then
-    tip = math.floor(meter * ((scoreHint - 60) / 40.0) * 0.25 * 100 + 0.5) / 100
+    tip = math.floor(meter * ((scoreHint - 60) / 40.0) * 0.25 * tipMult * 100 + 0.5) / 100
   end
   local total = math.floor((meter + tip) * 100 + 0.5) / 100
   return meter, tip, total, timeliness
@@ -339,7 +406,7 @@ function M.computeScore(m)
 
   local harshRatio = math.min(1.0, harshTime / math.max(5.0, elapsed * 0.35))
   local smoothness = math.max(0, math.min(100, math.floor(100 - harshRatio * 45 + 0.5)))
-  local collisionPen = collisions * 8 + math.min(45, dmg / 400.0)
+  local collisionPen = math.min(M.COLLISION_PEN_CAP, collisions * 8 + math.min(45, dmg / 400.0))
   local skipPen = skipped * 20
 
   local mode = type(m.mode) == 'string' and m.mode:lower() or ''
@@ -347,8 +414,10 @@ function M.computeScore(m)
     local fElapsed = math.max(1.0, tonumber(m.fareElapsedS) or elapsed)
     local fHarsh = math.max(0, tonumber(m.fareHarshS) or 0)
     if not isFinite(fHarsh) then fHarsh = 0 end
+    local isVip = (m.rideArchetype == 'vip') or (m.taxi and m.taxi.archetype == 'vip')
     local fRatio = math.min(1.0, fHarsh / math.max(5.0, fElapsed * 0.35))
-    local paxComfort = math.max(0, math.min(100, math.floor(100 - fRatio * 50 + 0.5)))
+    local comfortDrop = isVip and 62 or 50
+    local paxComfort = math.max(0, math.min(100, math.floor(100 - fRatio * comfortDrop + 0.5)))
     local _, _, _, timeliness = M.computeTaxiFare(m)
     local blended = paxComfort * 0.65 + smoothness * 0.10 + timeliness * 0.25
     local score = math.max(0, math.min(100, math.floor(blended - collisionPen - skipPen + 0.5)))
@@ -394,43 +463,148 @@ function M.classifyVehicle(info)
   }
 end
 
--- Pure: pick best installed trailer JBeam model for coupler + cargo type/tier.
-function M.pickTrailerModel(coupler, cargoType, tier, existsFn)
+-- Pure: discover installed trailer models by coupler class ('fifthwheel' / 'towhitch').
+function M.discoverTrailerModels(existsFn, modelListFn)
+  existsFn = existsFn or M.modelExists
+  local out = { fifthwheel = {}, towhitch = {}, seen = {} }
+  local function add(kind, m)
+    if type(m) ~= 'string' or m == '' or out.seen[kind .. ':' .. m] then return end
+    if existsFn(m) then
+      out.seen[kind .. ':' .. m] = true
+      table.insert(out[kind], m)
+    end
+  end
+  for _, m in ipairs(M.SEMI_TRAILER_MODELS) do add('fifthwheel', m) end
+  for _, m in ipairs(M.TOWHITCH_TRAILER_MODELS) do add('towhitch', m) end
+
+  local list = nil
+  if type(modelListFn) == 'function' then
+    local ok, res = pcall(modelListFn)
+    if ok and type(res) == 'table' then list = res end
+  else
+    local cv = rawget(_G, 'core_vehicles')
+    if cv and cv.getModelList then
+      local ok, res = pcall(cv.getModelList)
+      if ok and type(res) == 'table' then list = res end
+    end
+  end
+  local models = list and (list.models or list)
+  if type(models) == 'table' then
+    local keys = {}
+    for k, info in pairs(models) do
+      if type(info) == 'table' and tostring(info.Type or ''):lower() == 'trailer' then
+        keys[#keys + 1] = tostring(k)
+      end
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      local kl = k:lower()
+      if kl:find('dryvan') or kl:find('reefer') or kl:find('tanker') or kl:find('flatbed')
+          or kl:find('container') or kl:find('dump') or kl:find('semi') or kl:find('lowboy')
+          or kl:find('log') or kl:find('boxtrailer') then
+        add('fifthwheel', k)
+      elseif kl:find('utility') or kl:find('cargo') or kl:find('tsfb') or kl:find('hitch') then
+        add('towhitch', k)
+      end
+    end
+  end
+  return out
+end
+
+-- Pure: pick best installed trailer JBeam model for coupler + cargo domain/type/tier.
+function M.pickTrailerModel(coupler, cargoType, tier, existsFn, cargoDomain, seed, discovered)
   existsFn = existsFn or M.modelExists
   local list
   if coupler == 'fifthwheel' then
     local fw = M.TRAILER_CANDIDATES.fifthwheel
-    list = fw[cargoType] or fw.default
+    list = fw[cargoType] or fw[cargoDomain] or fw.default
+    local avail = {}
+    for _, m in ipairs(list) do
+      if existsFn(m) then avail[#avail + 1] = m end
+    end
+    if #avail == 0 and discovered and type(discovered.fifthwheel) == 'table' then
+      for _, m in ipairs(discovered.fifthwheel) do
+        if existsFn(m) then avail[#avail + 1] = m end
+      end
+    end
+    if #avail == 0 then return nil end
+    -- Prefer primary domain match; when multiple match and seed is given, vary among top 2
+    if seed and #avail > 1 and not (cargoType == 'fuel' or cargoDomain == 'fuel') then
+      local idx = (math.floor(tonumber(seed) or 0) % math.min(2, #avail)) + 1
+      return avail[idx]
+    end
+    return avail[1]
   elseif coupler == 'towhitch' then
     local tw = M.TRAILER_CANDIDATES.towhitch
     list = (tier == 'city' or tier == 'regional' or tier == 'long') and tw.heavy or tw.light
-  else
-    return nil
-  end
-  for _, m in ipairs(list) do
-    if existsFn(m) then return m end
+    local avail = {}
+    for _, m in ipairs(list) do
+      if existsFn(m) then avail[#avail + 1] = m end
+    end
+    if #avail == 0 and discovered and type(discovered.towhitch) == 'table' then
+      for _, m in ipairs(discovered.towhitch) do
+        if existsFn(m) then avail[#avail + 1] = m end
+      end
+    end
+    if #avail == 0 then return nil end
+    if seed then
+      local idx = (math.floor(tonumber(seed) or 0) % #avail) + 1
+      return avail[idx]
+    end
+    return avail[1]
   end
   return nil
 end
 
--- Pure: generate candidate trailer spawn positions behind player vehicle.
+-- Pure: generate candidate trailer spawn positions (rear primary + forward/lane-aligned fallbacks).
 function M.trailerSpawnCandidates(px, py, pz, fx, fy, playerHalfLen, trailerHalfLen)
   local l = math.sqrt(fx * fx + fy * fy)
   if l < 1e-6 then fx, fy = 0, 1 else fx, fy = fx / l, fy / l end
-  local backDist = (tonumber(playerHalfLen) or 2.6) + (tonumber(trailerHalfLen) or 3.5) + 1.4
+  local pHalf = tonumber(playerHalfLen) or 2.6
+  local tHalf = tonumber(trailerHalfLen) or 3.5
+  local backDist = pHalf + tHalf + 1.4
   local out = {}
-  for _, deg in ipairs({ 0, 15, -15, 25, -25 }) do
+  for _, deg in ipairs({ 0, 15, -15, 30, -30 }) do
     local rad = math.rad(deg)
     local c, s = math.cos(rad), math.sin(rad)
     local dfx, dfy = fx * c - fy * s, fx * s + fy * c
     out[#out + 1] = {
+      mode = 'rear',
       x = px - dfx * backDist,
       y = py - dfy * backDist,
       z = pz,
       dirX = dfx,
       dirY = dfy,
+      dist = backDist,
       backDist = backDist,
       angleDeg = deg,
+    }
+  end
+  -- Forward & adjacent-lane fallback spots when rear space is tight
+  local rx, ry = fy, -fx
+  local frontDist = pHalf + tHalf + 2.4
+  out[#out + 1] = {
+    mode = 'front',
+    x = px + fx * frontDist,
+    y = py + fy * frontDist,
+    z = pz,
+    dirX = fx,
+    dirY = fy,
+    dist = frontDist,
+    backDist = frontDist,
+    angleDeg = 0,
+  }
+  for _, latOff in ipairs({ 3.8, -3.8 }) do
+    out[#out + 1] = {
+      mode = 'lane',
+      x = px + rx * latOff,
+      y = py + ry * latOff,
+      z = pz,
+      dirX = fx,
+      dirY = fy,
+      dist = math.abs(latOff),
+      backDist = math.abs(latOff),
+      angleDeg = 0,
     }
   end
   return out
@@ -499,6 +673,7 @@ if rec and rec.sum > 0 then
   end
 end]], targetKg)
 end
+M.CARGO_MASS_VE = M.buildCargoVeScript
 
 local PROBE_VE = [[
 local totalMass, coupler, couplerCid = 0, 'none', -1
@@ -509,11 +684,25 @@ if v and v.data and type(v.data.nodes) == 'table' and obj and obj.getNodeMass th
       if ok and type(m) == 'number' and m > 0 and m < 1e5 then totalMass = totalMass + m end
       if type(nd.couplerTag) == 'string' then
         local tag = nd.couplerTag:lower()
-        if tag:find('fifthwheel') then
+        if tag:find('fifthwheel') or tag:find('fifth_wheel') or tag:find('semitrailer') then
           coupler, couplerCid = 'fifthwheel', tonumber(nd.cid)
-        elseif coupler == 'none' and (tag:find('towhitch') or tag:find('pintle')) then
+        elseif coupler == 'none' and (tag:find('towhitch') or tag:find('tow_hitch') or tag:find('pintle') or tag:find('hitch')) then
           coupler, couplerCid = 'towhitch', tonumber(nd.cid)
         end
+      end
+    end
+  end
+end
+if coupler == 'none' and v and v.config and type(v.config.parts) == 'table' then
+  for slot, part in pairs(v.config.parts) do
+    local s = tostring(slot or ''):lower()
+    local p = tostring(part or ''):lower()
+    if p ~= '' and p ~= 'none' and p ~= 'empty' then
+      if s:find('fifthwheel') or p:find('fifthwheel') or p:find('fifth_wheel') then
+        coupler = 'fifthwheel'
+        break
+      elseif s:find('towhitch') or p:find('towhitch') or p:find('pintle') or p:find('_hitch') then
+        coupler = 'towhitch'
       end
     end
   end
@@ -524,6 +713,7 @@ local att = (beamstate and beamstate.isCouplerAttached and beamstate.isCouplerAt
 local payload = string.format('{massKg=%.1f,coupler=%q,couplerCid=%d,attached=%s}', totalMass, coupler, couplerCid, tostring(att == true))
 obj:queueGameEngineLua('if beamngEarth_transportModes and beamngEarth_transportModes._onVehicleProbe then beamngEarth_transportModes._onVehicleProbe(' .. obj:getID() .. ',' .. payload .. ') end')
 ]]
+M.PROBE_VE = PROBE_VE
 
 local function clearOwnedGps()
   if not gpsTarget then return end
@@ -598,7 +788,7 @@ local function inspectGeVehicle()
       if okE and ext then lenM = math.max(tonumber(ext.x) or 0, tonumber(ext.y) or 0) * 2 end
     end
   end
-  local mtype, cfgName = '', ''
+  local mtype, cfgName, geCoupler = '', '', 'none'
   local cv = rawget(_G, 'core_vehicles')
   if cv and cv.getCurrentVehicleDetails then
     local okD, det = pcall(cv.getCurrentVehicleDetails)
@@ -606,6 +796,21 @@ local function inspectGeVehicle()
       mtype = det.model and tostring(det.model.Type or '') or ''
       cfgName = det.configs and tostring(det.configs.Name or '') or ''
       if jbeam == '' and det.model and det.model.key then jbeam = tostring(det.model.key) end
+      local parts = (det.current and det.current.parts) or (det.configs and det.configs.parts)
+      if type(parts) == 'table' then
+        for slot, part in pairs(parts) do
+          local s = tostring(slot or ''):lower()
+          local p = tostring(part or ''):lower()
+          if p ~= '' and p ~= 'none' and p ~= 'empty' then
+            if s:find('fifthwheel') or p:find('fifthwheel') then
+              geCoupler = 'fifthwheel'
+              break
+            elseif s:find('towhitch') or p:find('towhitch') or p:find('pintle') then
+              geCoupler = 'towhitch'
+            end
+          end
+        end
+      end
     end
   end
   local attId = id and findAttachedTrailerId(id) or nil
@@ -615,6 +820,7 @@ local function inspectGeVehicle()
     modelType = mtype,
     configName = cfgName,
     lengthM = lenM,
+    coupler = geCoupler,
     hasTrailer = attId ~= nil,
     attachedTrailerId = attId,
   }
@@ -668,7 +874,12 @@ local function trySpawnTrailerForJob(j)
     j.trailerState = 'none'
     return
   end
-  local model = M.pickTrailerModel(coupler, j.cargoType, j.tier)
+  if j.useTrailer == false then
+    j.trailerState = 'solo'
+    return
+  end
+  local discovered = M.discoverTrailerModels()
+  local model = M.pickTrailerModel(coupler, j.cargoType, j.tier, nil, j.cargoDomain, j.seed, discovered)
   local cv = rawget(_G, 'core_vehicles')
   local pv = M.playerVeh()
   if not model or not cv or not cv.spawnNewVehicle or not pv then
@@ -686,8 +897,12 @@ local function trySpawnTrailerForJob(j)
     local gz = M.castRay(c.x, c.y, p.z + 12, 36)
     if gz and math.abs(gz - p.z) <= 4.5 then
       local clear = true
-      local hitD = M.castRayDir(p.x, p.y, p.z + 1.0, -c.dirX, -c.dirY, 0, c.backDist + tHalf + 1.2)
-      if hitD and hitD < c.backDist + tHalf + 0.8 then clear = false end
+      local rdx, rdy = c.x - p.x, c.y - p.y
+      local rlen = hypot(rdx, rdy)
+      if rlen > 0.5 then
+        local hitD = M.castRayDir(p.x, p.y, p.z + 1.0, rdx / rlen, rdy / rlen, 0, rlen + tHalf + 0.8)
+        if hitD and hitD < rlen + tHalf + 0.5 then clear = false end
+      end
       if clear and rawget(_G, 'be') and be.getObjectCount then
         local pvId = vehIdOf(pv)
         for i = 0, be:getObjectCount() - 1 do
@@ -699,7 +914,7 @@ local function trySpawnTrailerForJob(j)
         end
       end
       if clear then
-        chosen = { x = c.x, y = c.y, z = gz + 0.55, dirX = c.dirX, dirY = c.dirY }
+        chosen = { x = c.x, y = c.y, z = gz + 0.55, dirX = c.dirX, dirY = c.dirY, mode = c.mode or 'rear' }
         break
       end
     end
@@ -729,8 +944,13 @@ local function trySpawnTrailerForJob(j)
   j.trailerId = vehIdOf(trl)
   j.trailerOwnedByJob = true
   j.trailerModel = model
-  j.trailerState = 'spawning'
-  j.hitchPlan = { t0 = M.now(), next = 1, coupler = coupler, trailerId = j.trailerId }
+  if chosen.mode == 'rear' then
+    j.trailerState = 'spawning'
+    j.hitchPlan = { t0 = M.now(), next = 1, coupler = coupler, trailerId = j.trailerId }
+  else
+    j.trailerState = 'ready'
+    M.say('Trailer staged nearby — back up to hitch', 5)
+  end
   pcall(trl.queueLuaCommand, trl, 'input.event("parkingbrake", 0, 2)')
 end
 
@@ -788,13 +1008,17 @@ end
 local function dispatchPendingProbe(pr)
   local ge = pr.geInfo or {}
   local prb = pr.vehId and vehicleProbes[pr.vehId] or nil
+  local probeCoupler = prb and prb.coupler or 'none'
+  if probeCoupler == 'none' and ge.coupler and ge.coupler ~= 'none' then
+    probeCoupler = ge.coupler
+  end
   local merged = {
     jbeam = ge.jbeam,
     modelType = ge.modelType,
     configName = ge.configName,
     lengthM = ge.lengthM,
     massKg = prb and prb.massKg or nil,
-    coupler = prb and prb.coupler or 'none',
+    coupler = probeCoupler,
     hasTrailer = ge.hasTrailer or (prb and prb.attached == true) or false,
     attachedTrailerId = ge.attachedTrailerId,
   }
@@ -815,7 +1039,7 @@ local function dispatchPendingProbe(pr)
     lastError = 'Companion server not connected'
     return { ok = false, error = lastError }
   end
-  pending = { id = nextReqId, mode = pr.mode, tier = pr.tier, sentAt = M.now(), vehicle = classified }
+  pending = { id = nextReqId, mode = pr.mode, tier = pr.tier, sentAt = M.now(), vehicle = classified, seed = jobSeq }
   return { ok = true, id = nextReqId }
 end
 
@@ -889,6 +1113,8 @@ function M.onJobResult(msg)
   end
   local cargo = type(msg.cargo) == 'table' and msg.cargo or nil
   local cargoKg = cargo and tonumber(cargo.massKg) or 0
+  local taxiMeta = type(msg.taxi) == 'table' and msg.taxi or nil
+  local busMeta = type(msg.bus) == 'table' and msg.bus or nil
   local mode = tostring(msg.mode or req.mode)
   local tier = tostring(msg.tier or req.tier)
 
@@ -905,9 +1131,14 @@ function M.onJobResult(msg)
         lat = lat,
         lon = lon,
         road = tostring(s.road or ''),
+        roadClass = tostring(s.roadClass or ''),
+        bidirectional = s.bidirectional == true,
         bearing = tonumber(s.bearing) or 0,
         zoneRadius = math.max(8, math.min(20, tonumber(s.zoneRadius) or M.DEFAULT_ZONE_RADIUS_M)),
         cargoDeltaKg = tonumber(s.cargoDeltaKg) or 0,
+        paxBoard = tonumber(s.paxBoard) or 0,
+        paxAlight = tonumber(s.paxAlight) or 0,
+        targetArrivalS = tonumber(s.targetArrivalS),
       }
       local dtgt = tonumber(s.dwellTargetS)
       if not dtgt or dtgt <= 0 then
@@ -924,9 +1155,14 @@ function M.onJobResult(msg)
   lastError = nil
   summary = nil
   local firstTarget = stops[1].dwellTargetS or M.BAY_DWELL_S
+  local taxiArch = taxiMeta and tostring(taxiMeta.archetype or 'standard') or 'standard'
+  local taxiLabel = taxiMeta and tostring(taxiMeta.label or 'Standard Ride') or 'Standard Ride'
+  local busCap = busMeta and tonumber(busMeta.capacity) or M.BUS_CAPACITY
+  local busPaxKg = busMeta and tonumber(busMeta.paxMassPerPaxKg) or M.BUS_PAX_MASS_KG
   activeJob = {
     mode = mode,
     tier = tier,
+    seed = req.seed or jobSeq,
     title = tostring(msg.title or ''),
     routeRef = tostring(msg.routeRef or ''),
     source = tostring(msg.source or ''),
@@ -946,6 +1182,7 @@ function M.onJobResult(msg)
     drivenM = 0,
     elapsedS = 0,
     harshS = 0,
+    prevVertSpike = false,
     collisions = 0,
     damageDelta = 0,
     prevDamage = M.readDamage(),
@@ -956,21 +1193,37 @@ function M.onJobResult(msg)
     lastSample = nil,
     stopZ = nil,
     bayCornersZ = nil,
+    bayGridZ = nil,
     stopZAnchorId = nil,
     stopZAt = -math.huge,
     visGreen = 0,
     visAt = nil,
-    -- Taxi leg & fare state
+    -- Taxi leg, archetype & fare state
     passengerOnBoard = false,
     fareDrivenM = 0,
     fareElapsedS = 0,
     fareHarshS = 0,
     targetLegS = 0,
+    rideArchetype = taxiArch,
+    rideLabel = taxiLabel,
+    fareMult = taxiMeta and tonumber(taxiMeta.fareMult) or 1.0,
+    tipMult = taxiMeta and tonumber(taxiMeta.tipMult) or 1.0,
+    targetMult = taxiMeta and tonumber(taxiMeta.targetMult) or 1.0,
+    taxiPaxCount = taxiMeta and tonumber(taxiMeta.paxCount) or 1,
+    paxMassKg = taxiMeta and tonumber(taxiMeta.paxMassKg) or 80,
+    -- Bus passenger load & schedule state
+    paxCount = (mode == 'bus') and 0 or (taxiMeta and tonumber(taxiMeta.paxCount) or 0),
+    paxCapacity = (mode == 'bus') and busCap or nil,
+    paxMassPerPaxKg = busPaxKg,
+    scheduleDeltaS = 0,
+    scheduleText = 'On Time',
     -- Logistics cargo & trailer state
     vehicleClass = tostring(msg.vehicleClass or (cargo and cargo.vehicleClass) or (req.vehicle and req.vehicle.class) or ''),
     vehicleInfo = req.vehicle,
     cargoType = cargo and tostring(cargo.type or '') or '',
     cargoLabel = cargo and tostring(cargo.label or '') or '',
+    cargoDomain = cargo and tostring(cargo.domain or 'general') or 'general',
+    useTrailer = (cargo and cargo.useTrailer ~= nil) and (cargo.useTrailer == true) or nil,
     cargoKg = cargoKg,
     cargoCurrentKg = 0,
     cargoAppliedKg = 0,
@@ -1017,6 +1270,9 @@ local function finishJob(fallbackFinal)
     fare = fare,
     tip = tip,
     totalFare = totalFare,
+    rideArchetype = j.mode == 'taxi' and j.rideArchetype or nil,
+    rideLabel = j.mode == 'taxi' and j.rideLabel or nil,
+    paxCount = j.mode == 'taxi' and j.taxiPaxCount or (j.mode == 'bus' and j.paxCount or nil),
     cargoLabel = j.cargoLabel,
     cargoKg = j.cargoKg,
   }
@@ -1039,10 +1295,18 @@ local function advanceStop(completed, isFallback)
     if isFallback then j.fallbackCount = (j.fallbackCount or 0) + 1 end
     if j.mode == 'taxi' and doneStop and doneStop.kind == 'pickup' then
       j.passengerOnBoard = true
+      applyCargoMassToJob(j, j.paxMassKg or 80)
       local nextStop = j.stops[j.stopIndex + 1]
       local legM = nextStop and M.haversineM(doneStop.lat, doneStop.lon, nextStop.lat, nextStop.lon) or (j.estimatedKm * 1000)
       local spd = (j.tier == 'regional') and 19.0 or 12.5
-      j.targetLegS = math.max(45.0, (legM * 1.25) / spd)
+      j.targetLegS = math.max(35.0, ((legM * 1.25) / spd) * (j.targetMult or 1.0))
+    elseif j.mode == 'bus' and doneStop then
+      local cap = j.paxCapacity or M.BUS_CAPACITY
+      local cur = j.paxCount or 0
+      local alight = math.min(cur, math.max(0, tonumber(doneStop.paxAlight) or 0))
+      local board = math.max(0, tonumber(doneStop.paxBoard) or 0)
+      j.paxCount = math.max(0, math.min(cap, cur - alight + board))
+      applyCargoMassToJob(j, j.paxCount * (j.paxMassPerPaxKg or M.BUS_PAX_MASS_KG))
     elseif j.mode == 'logistics' and doneStop and doneStop.cargoDeltaKg ~= 0 then
       local cap = (j.cargoKg and j.cargoKg > 0) and j.cargoKg or 0
       if doneStop.kind == 'loading' then
@@ -1061,6 +1325,7 @@ local function advanceStop(completed, isFallback)
   j.inFallback = false
   j.stopZ = nil
   j.bayCornersZ = nil
+  j.bayGridZ = nil
   j.stopZAnchorId = nil
   j.stopZAt = -math.huge
   j.visGreen = 0
@@ -1077,7 +1342,7 @@ local function advanceStop(completed, isFallback)
     local okG, g = pcall(M.gps)
     local gs = okG and g and g.status and g.status()
     if gs and type(gs.eta) == 'number' and gs.eta > 5 then
-      j.targetLegS = gs.eta * 1.20
+      j.targetLegS = gs.eta * 1.20 * (j.targetMult or 1.0)
     end
   end
   local note = isFallback and 'Kerbside / Fallback Dropoff · ' or ''
@@ -1106,6 +1371,12 @@ function M.dismissSummary()
   return { ok = true }
 end
 
+function M.nextPassenger()
+  local tier = (summary and summary.mode == 'taxi' and summary.tier) or 'neighborhood'
+  summary = nil
+  return M.startJob('taxi', tier)
+end
+
 function M.onVehicleSwitched(oldId, newId, player)
   if activeJob then
     activeJob.trackedVehId = newId
@@ -1120,6 +1391,7 @@ function M.onRebased()
   activeJob.lastSample = nil
   activeJob.stopZ = nil
   activeJob.bayCornersZ = nil
+  activeJob.bayGridZ = nil
   activeJob.stopZAnchorId = nil
   activeJob.stopZAt = -math.huge
 end
@@ -1192,7 +1464,10 @@ local function updateMetrics(j, dtSim, player)
       local az = (vz - ls.vz) / sdt
       local ah = hypot(ax, ay)
       local jerk = ls.ax and math.sqrt(((ax - ls.ax) / sdt) ^ 2 + ((ay - ls.ay) / sdt) ^ 2) or 0
-      if ah > M.HARSH_ACCEL_MPS2 or math.abs(az) > M.HARSH_VERT_MPS2 or jerk > M.HARSH_JERK_MPS3 then
+      local isVip = (j.mode == 'taxi' and j.rideArchetype == 'vip')
+      local harsh, vertSustain = M.isHarshSample(ah, az, jerk, j.prevVertSpike, isVip)
+      j.prevVertSpike = vertSustain
+      if harsh then
         j.harshS = j.harshS + sdt
         if j.mode == 'taxi' and j.passengerOnBoard then
           j.fareHarshS = j.fareHarshS + sdt
@@ -1244,6 +1519,10 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
   if not paused and dtSim and dtSim > 0 then
     updateMetrics(j, dtSim, player)
   end
+  if j.mode == 'bus' and stop.targetArrivalS then
+    j.scheduleDeltaS = math.floor((j.elapsedS - stop.targetArrivalS) + 0.5)
+    j.scheduleText = M.formatScheduleDelta(j.scheduleDeltaS)
+  end
 
   local spec = M.baySpec(j.mode, j.tier)
   local nx, ny = 0, 1
@@ -1253,7 +1532,7 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
   end
   local fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
 
-  -- Ground height near stop & bay corners for bridge/overpass protection + slope-hugging marker
+  -- Ground height near stop & 3x5 bay terrain grid for bridge/overpass protection + slope-hugging marker
   if distXY <= M.DRAW_RADIUS_M and (j.stopZ == nil or now - j.stopZAt >= 0.75) then
     local zTop = (player.z or 0) + 40
     local gz = M.castRay(sx, sy, zTop, 120)
@@ -1264,11 +1543,24 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
       local function rayC(al, ac)
         return M.castRay(sx + al * fx + ac * rx, sy + al * fy + ac * ry, gz + 12, 36) or gz
       end
+      local grid = {}
+      local nu, nv = 5, 3
+      for iu = 1, nu do
+        local u = (iu - 1) / (nu - 1)
+        local al = -hl + u * (2 * hl)
+        grid[iu] = {}
+        for iv = 1, nv do
+          local v = (iv - 1) / (nv - 1)
+          local ac = -hw + v * (2 * hw)
+          grid[iu][iv] = rayC(al, ac)
+        end
+      end
+      j.bayGridZ = grid
       j.bayCornersZ = {
-        fl = rayC(hl, hw),
-        fr = rayC(hl, -hw),
-        bl = rayC(-hl, hw),
-        br = rayC(-hl, -hw),
+        fl = grid[nu][nv],
+        fr = grid[nu][1],
+        bl = grid[1][nv],
+        br = grid[1][1],
       }
     end
   end
@@ -1302,10 +1594,98 @@ local FALLBACK_AMBER = { 0.58, 0.88, 0.34 }
 
 local function lerp(a, b, t) return a + (b - a) * t end
 
+-- Pure: bilinearly sample 3x5 bay terrain height grid at normalized (u, v) in [0, 1]^2.
+function M.sampleBayGridZ(grid, u, v, zFallback)
+  if type(grid) ~= 'table' or #grid < 2 then return zFallback end
+  local nu = #grid
+  local nv = type(grid[1]) == 'table' and #grid[1] or 0
+  if nv < 2 then return zFallback end
+  u = math.max(0, math.min(1, tonumber(u) or 0.5))
+  v = math.max(0, math.min(1, tonumber(v) or 0.5))
+  local fu = u * (nu - 1) + 1
+  local fv = v * (nv - 1) + 1
+  local iu0 = math.min(nu - 1, math.floor(fu))
+  local iv0 = math.min(nv - 1, math.floor(fv))
+  local tu, tv = fu - iu0, fv - iv0
+  local z00 = grid[iu0][iv0] or zFallback
+  local z01 = grid[iu0][iv0 + 1] or zFallback
+  local z10 = grid[iu0 + 1][iv0] or zFallback
+  local z11 = grid[iu0 + 1][iv0 + 1] or zFallback
+  return lerp(lerp(z00, z01, tv), lerp(z10, z11, tv), tu)
+end
+
+-- Pure: build thick (0.28-0.34 m) ground-hugging quad strips & animated chevrons for a parking/loading bay.
+function M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, entryDir, now, colBorder, colBracket, colChevron)
+  local hl, hw = spec.halfL, spec.halfW
+  local dir = (entryDir == -1) and -1 or 1
+  local quads = {}
+
+  local function pt(along, across, lift)
+    local z = zFn(along, across) + (lift or 0.06)
+    return { x = sx + along * fx + across * rx, y = sy + along * fy + across * ry, z = z }
+  end
+
+  local function addStrip(a0, c0, a1, c1, widthM, col, kind, lift)
+    local da, dc = a1 - a0, c1 - c0
+    local len = math.sqrt(da * da + dc * dc)
+    if len < 1e-4 then return end
+    local na, nc = -dc / len * (widthM * 0.5), da / len * (widthM * 0.5)
+    quads[#quads + 1] = {
+      kind = kind or 'rail',
+      p0 = pt(a0 + na, c0 + nc, lift),
+      p1 = pt(a1 + na, c1 + nc, lift),
+      p2 = pt(a1 - na, c1 - nc, lift),
+      p3 = pt(a0 - na, c0 - nc, lift),
+      r = col[1], g = col[2], b = col[3], a = col[4],
+    }
+  end
+
+  -- 1. Solid front stop-bar (+dir * hl)
+  addStrip(dir * hl, -hw, dir * hl, hw, 0.34, colBracket, 'stop_bar', 0.07)
+
+  -- 2. Segmented side rails (0.28 m wide)
+  local dashLen, gapLen = 1.25, 0.85
+  local stepLen = dashLen + gapLen
+  local cur = -hl + 0.9
+  while cur < hl - 0.9 do
+    local segEnd = math.min(cur + dashLen, hl - 0.9)
+    addStrip(cur, -hw, segEnd, -hw, 0.28, colBorder, 'side_rail', 0.06)
+    addStrip(cur, hw, segEnd, hw, 0.28, colBorder, 'side_rail', 0.06)
+    cur = cur + stepLen
+  end
+
+  -- 3. Crisp L-shaped corner brackets (0.32 m wide) + subtle corner beacon pads
+  local armL, armW = math.min(1.4, hl * 0.3), math.min(0.9, hw * 0.45)
+  local colPad = { colBracket[1], colBracket[2], colBracket[3], math.min(1, colBracket[4] * 0.45) }
+  for _, sl in ipairs({ -1, 1 }) do
+    for _, sw in ipairs({ -1, 1 }) do
+      addStrip(sl * hl, sw * hw, sl * (hl - armL), sw * hw, 0.32, colBracket, 'bracket', 0.07)
+      addStrip(sl * hl, sw * hw, sl * hl, sw * (hw - armW), 0.32, colBracket, 'bracket', 0.07)
+      addStrip(sl * hl - 0.26, sw * hw, sl * hl + 0.26, sw * hw, 0.52, colPad, 'beacon_pad', 0.05)
+    end
+  end
+
+  -- 4. Animated forward-marching entry chevrons (0.30 m wide)
+  local chevSpan = hw * 0.48
+  local chevDepth = math.min(1.0, hl * 0.18)
+  local phase = ((tonumber(now) or 0) * 1.8) % 1.0
+  local fracs = { -0.58, -0.18, 0.22 }
+  for idx, frac in ipairs(fracs) do
+    local wave = 0.5 + 0.5 * math.cos((phase - (idx - 1) / 3.0) * 2.0 * math.pi)
+    local cChev = { colChevron[1], colChevron[2], colChevron[3], math.min(1, colChevron[4] * (0.45 + 0.55 * wave)) }
+    local tipAlong = dir * (hl * frac + chevDepth * 0.5)
+    local wingAlong = tipAlong - dir * chevDepth
+    addStrip(wingAlong, -chevSpan, tipAlong, 0, 0.30, cChev, 'chevron', 0.07)
+    addStrip(wingAlong, chevSpan, tipAlong, 0, 0.30, cChev, 'chevron', 0.07)
+  end
+
+  return quads
+end
+
 function M.drawMarker(anchor, player)
   if not activeJob or not anchor or not player then return end
   local dd = rawget(_G, 'debugDrawer')
-  if not dd or not dd.drawLineInstance or not ColorF then return end
+  if not dd or not ColorF then return end
   local j = activeJob
   local stop = j.stops[j.stopIndex]
   if not stop then return end
@@ -1322,20 +1702,12 @@ function M.drawMarker(anchor, player)
   local fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
 
   local zCenter = j.stopZ or player.z or 0
-  local cz = j.bayCornersZ
-  local zfl = (cz and cz.fl) or zCenter
-  local zfr = (cz and cz.fr) or zCenter
-  local zbl = (cz and cz.bl) or zCenter
-  local zbr = (cz and cz.br) or zCenter
   local hl, hw = spec.halfL, spec.halfW
-
-  local function bayPt(along, across)
+  local function bayZ(along, across)
     local u = math.max(0, math.min(1, (along + hl) / (2 * hl)))
     local v = math.max(0, math.min(1, (across + hw) / (2 * hw)))
-    local zB = lerp(zbr, zbl, v)
-    local zF = lerp(zfr, zfl, v)
-    local z = math.max(lerp(zB, zF, u), zCenter - 0.15) + 0.08
-    return vec3(sx + along * fx + across * rx, sy + along * fy + across * ry, z)
+    local z = M.sampleBayGridZ(j.bayGridZ, u, v, zCenter)
+    return math.max(z, zCenter - 0.25)
   end
 
   local now = M.now()
@@ -1357,47 +1729,44 @@ function M.drawMarker(anchor, player)
   local gCol = lerp(base[2], tgt[2], g)
   local bCol = lerp(base[3], tgt[3], g)
 
-  local colBorder = ColorF(rCol, gCol, bCol, 0.72)
-  local colBracket = ColorF(rCol, gCol, bCol, 0.96)
-  local colChevron = ColorF(rCol, gCol, bCol, 0.55 + 0.40 * g)
-
-  -- Solid front stop-bar (+hl)
-  dd:drawLineInstance(bayPt(hl, -hw), bayPt(hl, hw), 4, colBracket)
-
-  -- Dashed left/right bay side borders
-  local dashLen, gapLen = 1.25, 0.85
-  local stepLen = dashLen + gapLen
-  local cur = -hl + 0.9
-  while cur < hl - 0.9 do
-    local segEnd = math.min(cur + dashLen, hl - 0.9)
-    dd:drawLineInstance(bayPt(cur, -hw), bayPt(segEnd, -hw), 3, colBorder)
-    dd:drawLineInstance(bayPt(cur, hw), bayPt(segEnd, hw), 3, colBorder)
-    cur = cur + stepLen
+  -- Determine bidirectional approach alignment from player velocity or vector toward bay
+  local entryDir = 1
+  if stop.bidirectional then
+    local pvx, pvy = tonumber(player.vx) or 0, tonumber(player.vy) or 0
+    local ax, ay = (hypot(pvx, pvy) > 1.0) and pvx or (sx - player.x), (hypot(pvx, pvy) > 1.0) and pvy or (sy - player.y)
+    if (ax * fx + ay * fy) < 0 then entryDir = -1 end
   end
 
-  -- Subtle rear entry dashes (-hl)
-  dd:drawLineInstance(bayPt(-hl, -hw * 0.65), bayPt(-hl, -hw * 0.2), 2.5, colBorder)
-  dd:drawLineInstance(bayPt(-hl, hw * 0.2), bayPt(-hl, hw * 0.65), 2.5, colBorder)
+  local quads = M.buildBayQuads(
+    sx, sy, fx, fy, rx, ry, spec, bayZ, entryDir, now,
+    { rCol, gCol, bCol, 0.72 },
+    { rCol, gCol, bCol, 0.94 },
+    { rCol, gCol, bCol, 0.65 + 0.30 * g }
+  )
 
-  -- Crisp L-shaped corner brackets
-  local armL, armW = math.min(1.3, hl * 0.3), math.min(0.85, hw * 0.45)
-  for _, sl in ipairs({ -1, 1 }) do
-    for _, sw in ipairs({ -1, 1 }) do
-      local cPt = bayPt(sl * hl, sw * hw)
-      dd:drawLineInstance(cPt, bayPt(sl * (hl - armL), sw * hw), 6, colBracket)
-      dd:drawLineInstance(cPt, bayPt(sl * hl, sw * (hw - armW)), 6, colBracket)
+  if dd.drawQuadSolid then
+    for _, q in ipairs(quads) do
+      local col = ColorF(q.r, q.g, q.b, q.a)
+      dd:drawQuadSolid(
+        vec3(q.p0.x, q.p0.y, q.p0.z),
+        vec3(q.p1.x, q.p1.y, q.p1.z),
+        vec3(q.p2.x, q.p2.y, q.p2.z),
+        vec3(q.p3.x, q.p3.y, q.p3.z),
+        col
+      )
     end
-  end
-
-  -- Directional entry chevrons pointing forward along stop.bearing
-  local chevSpan = hw * 0.48
-  local chevDepth = math.min(1.0, hl * 0.18)
-  for _, frac in ipairs({ -0.58, -0.18, 0.22 }) do
-    local tipAlong = hl * frac + chevDepth * 0.5
-    local wingAlong = tipAlong - chevDepth
-    local tip = bayPt(tipAlong, 0)
-    dd:drawLineInstance(bayPt(wingAlong, -chevSpan), tip, 4, colChevron)
-    dd:drawLineInstance(bayPt(wingAlong, chevSpan), tip, 4, colChevron)
+  elseif dd.drawTriSolid then
+    for _, q in ipairs(quads) do
+      local col = ColorF(q.r, q.g, q.b, q.a)
+      local p0, p1 = vec3(q.p0.x, q.p0.y, q.p0.z), vec3(q.p1.x, q.p1.y, q.p1.z)
+      local p2, p3 = vec3(q.p2.x, q.p2.y, q.p2.z), vec3(q.p3.x, q.p3.y, q.p3.z)
+      dd:drawTriSolid(p0, p1, p2, col)
+      dd:drawTriSolid(p0, p2, p3, col)
+    end
+  elseif dd.drawLineInstance then
+    for _, q in ipairs(quads) do
+      dd:drawLineInstance(vec3(q.p0.x, q.p0.y, q.p0.z), vec3(q.p1.x, q.p1.y, q.p1.z), 4, ColorF(q.r, q.g, q.b, q.a))
+    end
   end
 end
 
@@ -1420,7 +1789,14 @@ function M.drawUi(hiddenByUi)
       if stop and stop.address ~= '' then im.TextUnformatted(stop.address) end
       if activeJob.mode == 'taxi' then
         local fare = M.computeTaxiFare(activeJob)
+        local rLbl = activeJob.rideLabel or 'Standard Ride'
+        local pax = activeJob.taxiPaxCount or 1
+        im.TextUnformatted(string.format('%s · %d pax', rLbl, pax))
         im.TextUnformatted(activeJob.passengerOnBoard and string.format('On board · Meter: $%.2f', fare) or 'En route to pickup')
+      elseif activeJob.mode == 'bus' then
+        local nextStop = activeJob.stops[activeJob.stopIndex + 1]
+        im.TextUnformatted(string.format('Load: %d/%d pax · %s', activeJob.paxCount or 0, activeJob.paxCapacity or M.BUS_CAPACITY, activeJob.scheduleText or 'On Time'))
+        if nextStop then im.TextUnformatted('Next Stop after this: ' .. nextStop.name) end
       elseif activeJob.mode == 'logistics' and activeJob.cargoKg and activeJob.cargoKg > 0 then
         im.TextUnformatted(string.format('%s · %d kg (Loaded: %d kg)', activeJob.cargoLabel, activeJob.cargoKg, activeJob.cargoCurrentKg or 0))
       end
@@ -1441,6 +1817,10 @@ function M.drawUi(hiddenByUi)
         im.TextUnformatted(string.format('Fare: $%.2f + Tip $%.2f = $%.2f', summary.fare or 0, summary.tip or 0, summary.totalFare))
       end
       im.TextUnformatted(string.format('Distance: %.2f km · Time: %d s', summary.drivenM / 1000, summary.elapsedS))
+      if summary.mode == 'taxi' then
+        if im.Button('Next Passenger') then M.nextPassenger() end
+        im.SameLine()
+      end
       if im.Button('Dismiss') then M.dismissSummary() end
     end
   end
@@ -1460,6 +1840,7 @@ function M.hudPayload()
     local score = M.computeScore(activeJob)
     local targetS = activeJob.dwellTargetS or M.BAY_DWELL_S
     local fare = activeJob.mode == 'taxi' and M.computeTaxiFare(activeJob) or nil
+    local nextStop = activeJob.stops[activeJob.stopIndex + 1]
     return {
       state = 'active',
       mode = activeJob.mode,
@@ -1471,6 +1852,7 @@ function M.hudPayload()
       stopAddress = stop and stop.address or '',
       stopKind = stop and stop.kind or '',
       stopType = stop and stop.stopType or 'kerbside',
+      nextStopName = nextStop and nextStop.name or nil,
       distM = activeJob.distM and math.floor(activeJob.distM + 0.5) or nil,
       etaS = activeJob.etaS and math.floor(activeJob.etaS + 0.5) or nil,
       dwellS = activeJob.dwellS,
@@ -1484,6 +1866,14 @@ function M.hudPayload()
       score = score,
       fare = fare,
       passengerOnBoard = activeJob.passengerOnBoard == true,
+      rideArchetype = activeJob.mode == 'taxi' and activeJob.rideArchetype or nil,
+      rideLabel = activeJob.mode == 'taxi' and activeJob.rideLabel or nil,
+      fareMult = activeJob.mode == 'taxi' and activeJob.fareMult or nil,
+      tipMult = activeJob.mode == 'taxi' and activeJob.tipMult or nil,
+      paxCount = (activeJob.mode == 'bus' and (activeJob.paxCount or 0)) or (activeJob.mode == 'taxi' and (activeJob.taxiPaxCount or 1)) or nil,
+      paxCapacity = activeJob.mode == 'bus' and (activeJob.paxCapacity or M.BUS_CAPACITY) or nil,
+      scheduleDeltaS = activeJob.mode == 'bus' and (activeJob.scheduleDeltaS or 0) or nil,
+      scheduleText = activeJob.mode == 'bus' and (activeJob.scheduleText or 'On Time') or nil,
       cargoLabel = activeJob.cargoLabel ~= '' and activeJob.cargoLabel or nil,
       cargoKg = (activeJob.cargoKg and activeJob.cargoKg > 0) and activeJob.cargoKg or nil,
       cargoCurrentKg = activeJob.cargoCurrentKg or 0,
@@ -1509,6 +1899,9 @@ function M.hudPayload()
       fare = summary.fare,
       tip = summary.tip,
       totalFare = summary.totalFare,
+      rideArchetype = summary.rideArchetype,
+      rideLabel = summary.rideLabel,
+      paxCount = summary.paxCount,
       cargoLabel = summary.cargoLabel,
       cargoKg = summary.cargoKg,
       collisions = summary.collisions,
@@ -1531,7 +1924,8 @@ function M.uiState()
   local activeStop = activeJob and activeJob.stops[activeJob.stopIndex] or nil
   local activeFare = (activeJob and activeJob.mode == 'taxi') and M.computeTaxiFare(activeJob) or nil
   local p = pending or pendingProbe
-  return {
+    local nextStop = activeJob and activeJob.stops[activeJob.stopIndex + 1] or nil
+    return {
     pending = p and { mode = p.mode, tier = p.tier } or nil,
     active = activeJob and {
       mode = activeJob.mode,
@@ -1543,6 +1937,7 @@ function M.uiState()
       stopIndex = activeJob.stopIndex,
       stopCount = #activeJob.stops,
       stops = activeJob.stops,
+      nextStopName = nextStop and nextStop.name or nil,
       distM = activeJob.distM and math.floor(activeJob.distM + 0.5) or nil,
       etaS = activeJob.etaS and math.floor(activeJob.etaS + 0.5) or nil,
       dwellS = activeJob.dwellS,
@@ -1558,6 +1953,14 @@ function M.uiState()
       score = select(1, M.computeScore(activeJob)),
       fare = activeFare,
       passengerOnBoard = activeJob.passengerOnBoard == true,
+      rideArchetype = activeJob.mode == 'taxi' and activeJob.rideArchetype or nil,
+      rideLabel = activeJob.mode == 'taxi' and activeJob.rideLabel or nil,
+      fareMult = activeJob.mode == 'taxi' and activeJob.fareMult or nil,
+      tipMult = activeJob.mode == 'taxi' and activeJob.tipMult or nil,
+      paxCount = (activeJob.mode == 'bus' and (activeJob.paxCount or 0)) or (activeJob.mode == 'taxi' and (activeJob.taxiPaxCount or 1)) or nil,
+      paxCapacity = activeJob.mode == 'bus' and (activeJob.paxCapacity or M.BUS_CAPACITY) or nil,
+      scheduleDeltaS = activeJob.mode == 'bus' and (activeJob.scheduleDeltaS or 0) or nil,
+      scheduleText = activeJob.mode == 'bus' and (activeJob.scheduleText or 'On Time') or nil,
       vehicleClass = activeJob.vehicleClass ~= '' and activeJob.vehicleClass or nil,
       cargoLabel = activeJob.cargoLabel ~= '' and activeJob.cargoLabel or nil,
       cargoKg = (activeJob.cargoKg and activeJob.cargoKg > 0) and activeJob.cargoKg or nil,

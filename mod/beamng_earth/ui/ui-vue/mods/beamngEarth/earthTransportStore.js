@@ -121,6 +121,19 @@ export function dismissSummary() {
   })
 }
 
+export function nextPassenger() {
+  actionError.value = ""
+  busy.value = true
+  engineLua("beamngEarth_settings and beamngEarth_settings.uiTransportNextPassenger and beamngEarth_settings.uiTransportNextPassenger() or nil", res => {
+    if (!res || res.ok === false) {
+      busy.value = false
+      actionError.value = (res && res.error) || "Could not start next passenger ride"
+    } else {
+      setTimeout(poll, 120)
+    }
+  })
+}
+
 export function modeLabel(m) {
   const f = TRANSPORT_MODES.find(x => x.id === m)
   return f ? f.label : String(m || "").toUpperCase()

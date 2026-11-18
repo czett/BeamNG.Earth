@@ -1128,6 +1128,11 @@ function M.uiTransportDismiss()
   if not tm or not tm.dismissSummary then return { ok = false, error = 'Transport Modes not loaded' } end
   return tm.dismissSummary()
 end
+function M.uiTransportNextPassenger()
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.nextPassenger then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.nextPassenger()
+end
 
 -- The map's search-as-you-type: send (q -> { id } or { error }) and poll (id -> nil while waiting, else
 -- { results = {{name, detail, kind, lat, lon}...}, error }). Biased toward the player.

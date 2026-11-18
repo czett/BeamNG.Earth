@@ -54,6 +54,7 @@ angular.module('beamng.apps')
               '<span>{{ subText }}</span>' +
               '<span ng-if="subBadge" style="padding:1px 5px;border-radius:3px;background:rgba(61,220,132,0.16);color:#6ae696;font-size:10px;font-weight:600;">{{ subBadge }}</span>' +
             '</div>' +
+            '<div ng-if="tr.mode === \'bus\' && tr.nextStopName" style="font-size:11px;color:#93a0ad;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Next Stop after this: {{ tr.nextStopName }}</div>' +
             '<div style="display:flex;align-items:baseline;gap:12px;margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);font-size:12px;color:#cdd6df;' + NUM + '">' +
               '<span ng-if="tr.distM != null"><span style="color:#8c99a6;font-size:11px;">Next </span><b style="color:#fff;">{{ distText }}</b></span>' +
               '<span ng-if="etaText"><span style="color:#8c99a6;font-size:11px;">ETA </span><b style="color:#fff;">{{ etaText }}</b></span>' +
@@ -84,8 +85,9 @@ angular.module('beamng.apps')
             '<div style="font-size:12px;color:#d6dee6;' + NUM + '">Stops {{ tr.stopsCompleted }}/{{ tr.stopCount }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
             '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:12px;color:#ffd45a;margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }} = ${{ tr.totalFare.toFixed(2) }}</div>' +
             '<div style="font-size:11px;color:#93a0ad;margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}</div>' +
-            '<div style="margin-top:7px;">' +
-              '<button ng-click="dismiss()" style="width:100%;' + BTN + '">Dismiss</button>' +
+            '<div style="display:flex;gap:6px;margin-top:7px;">' +
+              '<button ng-if="tr.mode === \'taxi\'" ng-click="nextPassenger()" style="flex:1;background:rgba(255,198,30,0.22);color:#ffd45a;border:1px solid rgba(255,198,30,0.45);border-radius:4px;padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer;">Next Passenger</button>' +
+              '<button ng-click="dismiss()" style="flex:1;' + BTN + '">Dismiss</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -132,6 +134,9 @@ angular.module('beamng.apps')
       scope.dismiss = function () {
         bngApi.engineLua('if beamngEarth_transportModes then beamngEarth_transportModes.dismissSummary() end')
       }
+      scope.nextPassenger = function () {
+        bngApi.engineLua('if beamngEarth_transportModes then beamngEarth_transportModes.nextPassenger() end')
+      }
 
       scope.$on('BeamNGEarthHud', function (event, data) {
         scope.$evalAsync(function () {
@@ -158,8 +163,14 @@ angular.module('beamng.apps')
             scope.subText = ''
             scope.subBadge = ''
             if (tr.mode === 'taxi') {
-              scope.subText = tr.passengerOnBoard ? ('Meter $' + Number(tr.fare || 0).toFixed(2)) : 'En route to pickup'
-              scope.subBadge = tr.passengerOnBoard ? 'On Board' : 'Pickup'
+              var paxTxt = (tr.paxCount || 1) + ' pax'
+              scope.subText = tr.passengerOnBoard ? (paxTxt + ' · Meter $' + Number(tr.fare || 0).toFixed(2)) : ('En route to pickup · ' + paxTxt)
+              if (tr.rideArchetype === 'express') scope.subBadge = 'Express +40%'
+              else if (tr.rideArchetype === 'vip') scope.subBadge = 'VIP +35% tip'
+              else scope.subBadge = tr.passengerOnBoard ? 'On Board' : 'Pickup'
+            } else if (tr.mode === 'bus') {
+              scope.subText = (tr.paxCount != null ? tr.paxCount : 0) + '/' + (tr.paxCapacity || 40) + ' pax'
+              scope.subBadge = tr.scheduleText || 'On Time'
             } else if (tr.mode === 'logistics' && tr.cargoKg) {
               var wt = tr.cargoKg >= 1000 ? (tr.cargoKg / 1000).toFixed(1) + ' t' : Math.round(tr.cargoKg) + ' kg'
               scope.subText = (tr.cargoLabel || 'Cargo') + ' · ' + wt

@@ -102,6 +102,79 @@ CARGO_CATALOG = {
         ("bulk_food", "Bulk Foodstuffs"),
     ],
 }
+
+DOMAIN_CARGO_CATALOG = {
+    "food": {
+        "car": [("chilled_parcels", "Fresh Food & Bakery Boxes"), ("beverages", "Cafe & Beverage Crates")],
+        "van": [("groceries", "Fresh Produce & Dry Goods"), ("chilled_food", "Chilled Food & Dairy"), ("beverages", "Beverage Pallets")],
+        "box_truck": [("groceries", "Fresh Produce & Dry Goods"), ("beverages", "Beverage Pallets"), ("chilled_food", "Chilled Food & Dairy")],
+        "semi": [("bulk_food", "Refrigerated Food Pallets"), ("beverages", "Palletized Beverages"), ("groceries", "Fresh Produce & Dry Goods")],
+    },
+    "medical": {
+        "car": [("medical", "Medical & Pharmacy Supplies"), ("lab_samples", "Diagnostic & Hygiene Kits")],
+        "van": [("medical", "Medical & Hygiene Supplies"), ("pharma", "Temperature-Controlled Pharma")],
+        "box_truck": [("medical", "Medical & Hygiene Supplies"), ("pharma", "Palletized Medical Supplies")],
+        "semi": [("pharma", "Palletized Medical & Hygiene Supplies"), ("medical", "Hospital Supply Pallets")],
+    },
+    "hardware": {
+        "car": [("auto_parts", "Express Auto & Trade Parts"), ("tools", "Hand Tools & Fasteners")],
+        "van": [("hardware", "Tools, Timber & Building Supplies"), ("auto_parts", "Workshop Parts & Lubricants"), ("landscaping", "Timber & Landscaping Materials")],
+        "box_truck": [("hardware", "Tools & Building Materials"), ("timber", "Packaged Timber & Framing"), ("hvac", "HVAC & Workshop Equipment")],
+        "semi": [("timber", "Packaged Timber & Building Materials"), ("machinery", "Workshop & Construction Equipment"), ("steel", "Structural Hardware & Framing")],
+    },
+    "fuel": {
+        "car": [("lubricants", "Packaged Lubricants & Forecourt Stock")],
+        "van": [("lubricants", "Packaged Lubricants & Forecourt Stock")],
+        "box_truck": [("fuel_drums", "Lubricant Drums & Station Stock")],
+        "semi": [("fuel", "Bulk Fuel & Lubricants")],
+    },
+    "retail": {
+        "car": [("parcels", "Courier Parcels"), ("documents", "Priority Documents")],
+        "van": [("appliances", "Small Appliances"), ("electronics", "Retail Electronics")],
+        "box_truck": [("pallets", "Palletized Retail Stock"), ("furniture", "Commercial Furniture")],
+        "semi": [("dry_goods", "Containerized Retail Goods"), ("pallets", "General Palletized Freight")],
+    },
+    "industrial": {
+        "car": [("auto_parts", "Express Industrial Parts"), ("parcels", "Courier Parcels")],
+        "van": [("hardware", "Trade & Maintenance Supplies"), ("pallets", "Light Palletized Freight")],
+        "box_truck": [("pallets", "General Palletized Freight"), ("hvac", "Industrial Equipment")],
+        "semi": [("dry_goods", "Containerized Dry Goods"), ("machinery", "Industrial Machinery"), ("steel", "Structural Steel"), ("pallets", "General Palletized Freight")],
+    },
+    "general": {
+        "car": [("parcels", "Courier Parcels"), ("documents", "Priority Documents")],
+        "van": [("pallets", "General Palletized Freight"), ("electronics", "Retail & Office Supplies")],
+        "box_truck": [("pallets", "General Palletized Freight"), ("dry_goods", "Palletized Mixed Freight")],
+        "semi": [("pallets", "General Palletized Freight"), ("dry_goods", "Containerized Dry Goods")],
+    },
+}
+
+_FOOD_TOKENS = frozenset({
+    "supermarket", "grocery", "grocery_store", "convenience", "convenience_store", "bakery", "butcher", "deli",
+    "greengrocer", "restaurant", "fast_food", "fast_food_restaurant", "casual_eatery", "cafe", "coffee_shop",
+    "bar", "pub", "beverages", "food", "market", "farmers_market",
+})
+_MEDICAL_TOKENS = frozenset({
+    "pharmacy", "chemist", "hospital", "clinic", "doctors", "dentist", "veterinary", "medical_supply",
+    "health_and_medical", "healthcare",
+})
+_HARDWARE_TOKENS = frozenset({
+    "hardware", "hardware_store", "building_supply_store", "diy", "doityourself", "trade", "craft", "carpenter",
+    "plumber", "electrician", "car_repair", "auto_repair", "auto_parts_store", "tire_shop", "garden_centre",
+    "landscaping", "lumber", "construction", "tyres",
+})
+_FUEL_TOKENS = frozenset({"fuel", "gas_station", "petrol_station", "oil_depot"})
+_RETAIL_TOKENS = frozenset({
+    "department_store", "shopping_mall", "shopping", "electronics_store", "furniture_store", "post_office",
+    "retail", "commercial", "office", "clothes", "books",
+})
+_INDUSTRIAL_TOKENS = frozenset({
+    "industrial", "warehouse", "factory", "manufacture", "depot", "storage", "hangar", "logistics_service",
+    "freight_forwarding_service", "wholesale", "wholesale_store", "distribution_service",
+})
+
+BUS_CAPACITY = 40
+BUS_PAX_MASS_KG = 75.0
+BIDIRECTIONAL_ROAD_CLASSES = frozenset({"service", "unclassified", "track", "living_street"})
 TAXI_HUB_CATS = frozenset({"airport", "train_station", "bus_station", "subway_station", "ferry_terminal", "hotel", "hospital"})
 BUS_HUB_KEYWORDS = ("station", "terminal", "hub", "central", "bahnhof", "gare", "airport", "interchange", "transit center")
 
@@ -244,33 +317,94 @@ def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats
     return round(min(hi, max(lo, base)), 1)
 
 
-def generate_cargo_manifest(vehicle, tier, seed):
-    """Select realistic cargo type and tonnage strictly matched to the player's vehicle class."""
+def classify_poi_cargo_domain(cat="", tax="", bld_class="", tags=None, name=""):
+    """Classify an Overture/OSM POI into a semantic cargo domain ('food'|'medical'|'hardware'|'fuel'|'retail'|'industrial'|'general')."""
+    tokens = []
+    for v in (cat, tax, bld_class):
+        s = str(v or "").strip().lower()
+        if s:
+            tokens.append(s)
+    if isinstance(tags, dict):
+        for k in ("amenity", "shop", "craft", "industrial", "building", "landuse", "healthcare"):
+            val = str(tags.get(k) or "").strip().lower()
+            if val:
+                tokens.append(val)
+    nm = str(name or "").strip().lower()
+
+    def _has_any(tok_set):
+        return any(t in tok_set for t in tokens)
+
+    if _has_any(_FUEL_TOKENS):
+        return "fuel"
+    if _has_any(_MEDICAL_TOKENS):
+        return "medical"
+    if _has_any(_FOOD_TOKENS):
+        return "food"
+    if _has_any(_HARDWARE_TOKENS):
+        return "hardware"
+    if _has_any(_RETAIL_TOKENS):
+        return "retail"
+    if _has_any(_INDUSTRIAL_TOKENS):
+        return "industrial"
+
+    # Keyword fallback on POI name when category/tags are sparse
+    if any(w in nm for w in ("pharmacy", "hospital", "clinic", "medical", "apotheke")):
+        return "medical"
+    if any(w in nm for w in ("supermarket", "grocery", "bakery", "restaurant", "cafe", "bistro", "market")):
+        return "food"
+    if any(w in nm for w in ("hardware", "timber", "lumber", "builder", "auto parts", "garage", "repair")):
+        return "hardware"
+    if any(w in nm for w in ("fuel", "petrol", "shell", "bp ", "chevron", "exxon")):
+        return "fuel"
+    if any(w in nm for w in ("industrial", "warehouse", "logistics", "freight", "factory")):
+        return "industrial"
+    return "general"
+
+
+def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
+    """Select realistic, destination-matched cargo type and tonnage for the player's vehicle."""
     v = vehicle or {"class": "van", "coupler": "none", "hasTrailer": False}
     vclass = v.get("class") if v.get("class") in VEHICLE_CLASSES else "van"
     coupler = v.get("coupler") or "none"
     has_trailer = bool(v.get("hasTrailer"))
-    lo, hi = CARGO_BANDS[vclass]
-    if vclass == "semi" and coupler != "fifthwheel" and not has_trailer:
-        lo, hi = SEMI_BOBTAIL_BAND
+    tier_l = str(tier or "local").lower()
+
+    if coupler == "towhitch" and not has_trailer:
+        roll = _stable_index(seed, f"towhitch_var:{tier_l}", 100)
+        thresh = 35 if tier_l == "local" else 60
+        use_trailer = roll < thresh
+        if use_trailer:
+            lo, hi = (800, 2400) if vclass != "car" else (450, 1200)
+        else:
+            lo, hi = (350, 1400) if vclass != "car" else (80, 350)
+    else:
+        use_trailer = (coupler == "fifthwheel") or has_trailer
+        lo, hi = CARGO_BANDS[vclass]
+        if vclass == "semi" and coupler != "fifthwheel" and not has_trailer:
+            lo, hi = SEMI_BOBTAIL_BAND
+
     tier_bands = {
         "local": (0.05, 0.55),
         "city": (0.30, 0.75),
         "regional": (0.55, 0.90),
         "long": (0.70, 1.00),
     }
-    f_lo, f_hi = tier_bands.get(str(tier or "local").lower(), (0.25, 0.75))
-    u = _stable_index(seed, f"cargo_w:{vclass}:{tier}", 101) / 100.0
+    f_lo, f_hi = tier_bands.get(tier_l, (0.25, 0.75))
+    u = _stable_index(seed, f"cargo_w:{vclass}:{tier_l}", 101) / 100.0
     frac = f_lo + (f_hi - f_lo) * u
     raw_kg = lo + (hi - lo) * frac
     mass_kg = int(max(lo, min(hi, round(raw_kg / 10.0) * 10)))
-    catalog = CARGO_CATALOG[vclass]
-    ctype, clabel = catalog[_stable_index(seed, f"cargo_t:{vclass}:{tier}", len(catalog))]
+
+    dom = dest_domain if dest_domain in DOMAIN_CARGO_CATALOG else "general"
+    catalog = DOMAIN_CARGO_CATALOG[dom].get(vclass) or DOMAIN_CARGO_CATALOG["general"][vclass]
+    ctype, clabel = catalog[_stable_index(seed, f"cargo_t:{dom}:{vclass}:{tier_l}", len(catalog))]
     return {
         "type": ctype,
         "label": clabel,
+        "domain": dom,
         "massKg": mass_kg,
         "vehicleClass": vclass,
+        "useTrailer": bool(use_trailer),
     }
 
 
@@ -578,6 +712,7 @@ def _collect_pois_in_cells(md, keys, layers, deadline):
                         "name": nm,
                         "cat": str(cats[i] or "").strip().lower(),
                         "tax": str(taxes[i] or "").strip().lower(),
+                        "tags": _tags_dict(attrs, i),
                         "lat": pt[0], "lon": pt[1], "conf": cval,
                     })
         if "buildings" in layers:
@@ -599,7 +734,7 @@ def _collect_pois_in_cells(md, keys, layers, deadline):
                     if not pt:
                         continue
                     seen.add(bid)
-                    bld_out.append({"name": nm, "class": cls, "lat": pt[0], "lon": pt[1]})
+                    bld_out.append({"name": nm, "class": cls, "tags": _tags_dict(attrs, i), "lat": pt[0], "lon": pt[1]})
         if "land_use" in layers:
             f = _cell_layer(md, key, "land_use", deadline)
             if f is not None and len(f.ids):
@@ -993,10 +1128,12 @@ def _snap_logistics_spot(md, poi_lat, poi_lon, deadline, road_cells=None, bld_ce
     return curb
 
 
-def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None):
+def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None, poi_domain=None):
     road = snapped.get("road") or ""
+    road_cls = str(snapped.get("roadClass") or "").strip().lower()
     addr = address or road or f"{snapped['lat']:.5f}, {snapped['lon']:.5f}"
     st = stop_type or snapped.get("stopType") or "kerbside"
+    bidir = (road_cls in BIDIRECTIONAL_ROAD_CLASSES) or (st == "loading_bay")
     stop = {
         "index": int(idx),
         "kind": kind,
@@ -1006,11 +1143,15 @@ def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type
         "lat": round(float(snapped["lat"]), 6),
         "lon": round(float(snapped["lon"]), 6),
         "road": road,
+        "roadClass": road_cls,
+        "bidirectional": bool(bidir),
         "bearing": round(float(snapped.get("bearing") or 0.0), 1),
         "zoneRadius": float(zone_radius),
     }
     if dwell_target_s is not None:
         stop["dwellTargetS"] = round(float(dwell_target_s), 1)
+    if poi_domain:
+        stop["_poiDomain"] = poi_domain
     return stop
 
 
@@ -1067,6 +1208,36 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
             bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
             return (snapped["road"] or fallback_name), _apply_curb_offset(snapped, anchor_lat, anchor_lon, snapped["lat"], snapped["lon"], bld_polys)
     return None
+
+
+def _select_taxi_ride_profile(pu_name, do_name, tier, seed):
+    """Deterministically select taxi ride archetype (standard/express/vip) and passenger load (1-3 pax, 80-240 kg)."""
+    combined = f"{pu_name} {do_name}".lower()
+    is_transit_hub = any(k in combined for k in ("airport", "station", "terminal", "ferry", "train", "rail"))
+    is_vip_venue = any(k in combined for k in ("hotel", "resort", "museum", "theatre", "theater", "palace", "restaurant"))
+    roll = _stable_index(seed, f"taxi_arch:{tier}", 100)
+    if is_transit_hub and roll < 55:
+        arch = "express"
+    elif is_vip_venue and roll < 50:
+        arch = "vip"
+    elif roll < 28:
+        arch = "express"
+    elif roll < 52:
+        arch = "vip"
+    else:
+        arch = "standard"
+
+    if arch == "express":
+        profile = {"archetype": "express", "label": "Airport / Station Express", "targetMult": 0.80, "fareMult": 1.40, "tipMult": 1.0}
+    elif arch == "vip":
+        profile = {"archetype": "vip", "label": "VIP Comfort Ride", "targetMult": 1.0, "fareMult": 1.0, "tipMult": 1.35}
+    else:
+        profile = {"archetype": "standard", "label": "Standard Ride", "targetMult": 1.0, "fareMult": 1.0, "tipMult": 1.0}
+
+    pax_count = 1 + _stable_index(seed, f"taxi_pax:{tier}", 3)
+    profile["paxCount"] = pax_count
+    profile["paxMassKg"] = pax_count * 80
+    return profile
 
 
 def _towns_in_band(lat, lon, min_km, max_km, heading, seed, tag):
@@ -1181,6 +1352,7 @@ def _generate_taxi(md, req, deadline):
         "title": f"{pu_stop['name']} -> {do_stop['name']}",
         "source": "overture",
         "estimatedKm": _route_estimate_km(lat, lon, stops),
+        "taxi": _select_taxi_ride_profile(pu_stop["name"], do_stop["name"], tier, seed),
         "stops": stops,
     }
 
@@ -1389,6 +1561,39 @@ def _chain_stops_by_heading(candidates, lat, lon, heading, target_count):
     return chosen
 
 
+def _apply_bus_passengers_and_schedule(stops, lat, lon, tier, seed):
+    """Assign deterministic per-stop boarding/alighting (2-12 board, 0-8 alight) and cumulative schedule targets."""
+    pax = 0
+    sched_s = 0.0
+    prev_lat, prev_lon = lat, lon
+    n = len(stops)
+    for idx, s in enumerate(stops, 1):
+        d_m = dist_m(prev_lat, prev_lon, s["lat"], s["lon"])
+        leg_s = max(25.0, (d_m * 1.25) / 9.5)
+        sched_s += leg_s
+        s["targetArrivalS"] = round(sched_s, 1)
+        sched_s += float(s.get("dwellTargetS") or 3.5)
+
+        if idx == 1:
+            alight = 0
+        elif idx == n and tier == "full":
+            alight = pax
+        else:
+            alight = min(pax, _stable_index(seed, f"bus_al:{idx}", 9))
+        after_alight = max(0, pax - alight)
+        if idx == n and tier == "full":
+            board = 0
+        else:
+            want_board = 2 + _stable_index(seed, f"bus_bd:{idx}", 11)
+            board = min(BUS_CAPACITY - after_alight, want_board)
+        pax = after_alight + board
+        s["paxAlight"] = int(alight)
+        s["paxBoard"] = int(board)
+        s["paxAfter"] = int(pax)
+        prev_lat, prev_lon = s["lat"], s["lon"]
+    return {"capacity": BUS_CAPACITY, "paxMassPerPaxKg": BUS_PAX_MASS_KG}
+
+
 def _generate_bus(md, net, req, deadline):
     lat, lon, heading, seed, tier = req["lat"], req["lon"], req["heading"], req["seed"], req["tier"]
     target_min = 4 if tier == "partial" else 6
@@ -1435,6 +1640,7 @@ def _generate_bus(md, net, req, deadline):
                 dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
             ))
         if len(snapped_stops) >= 4:
+            bus_meta = _apply_bus_passengers_and_schedule(snapped_stops, lat, lon, tier, seed)
             return {
                 "ok": True,
                 "mode": "bus",
@@ -1443,6 +1649,7 @@ def _generate_bus(md, net, req, deadline):
                 "routeRef": chosen_route["ref"] or chosen_route["name"],
                 "source": "osm_bus",
                 "estimatedKm": _route_estimate_km(lat, lon, snapped_stops),
+                "bus": bus_meta,
                 "stops": snapped_stops,
             }
 
@@ -1462,6 +1669,7 @@ def _generate_bus(md, net, req, deadline):
                 idx, "bus_stop", s["name"], snapped, zone_radius=14.0, stop_type="kerbside",
                 dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
             ))
+        bus_meta = _apply_bus_passengers_and_schedule(stops, lat, lon, tier, seed)
         return {
             "ok": True,
             "mode": "bus",
@@ -1470,6 +1678,7 @@ def _generate_bus(md, net, req, deadline):
             "routeRef": "Local Bus",
             "source": "overture",
             "estimatedKm": _route_estimate_km(lat, lon, stops),
+            "bus": bus_meta,
             "stops": stops,
         }
 
@@ -1502,6 +1711,7 @@ def _generate_bus(md, net, req, deadline):
 
     if len(stops) < 2:
         return {"ok": False, "error": "No drivable roads found nearby for a bus route"}
+    bus_meta = _apply_bus_passengers_and_schedule(stops, lat, lon, tier, seed)
     return {
         "ok": True,
         "mode": "bus",
@@ -1510,6 +1720,7 @@ def _generate_bus(md, net, req, deadline):
         "routeRef": "Local Corridor",
         "source": "road_chain",
         "estimatedKm": _route_estimate_km(lat, lon, stops),
+        "bus": bus_meta,
         "stops": stops,
     }
 
@@ -1551,13 +1762,15 @@ def _generate_logistics_short(md, req, deadline):
         d = dist_m(lat, lon, p["lat"], p["lon"])
         if 200.0 <= d <= max_r_m:
             retail = 2 if _is_retail_place(p["cat"], p["tax"]) else 1
-            candidates.append((retail, p["conf"], p["lat"], p["lon"], p["name"]))
+            dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((retail, p["conf"], p["lat"], p["lon"], p["name"], dom))
     for b in bld_out:
         if not b["name"]:
             continue
         d = dist_m(lat, lon, b["lat"], b["lon"])
         if 200.0 <= d <= max_r_m and b["class"] in (LOGISTICS_COMMERCIAL_CLASSES | LOGISTICS_HUB_CLASSES):
-            candidates.append((1, 0.6, b["lat"], b["lon"], b["name"]))
+            dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), b["name"])
+            candidates.append((1, 0.6, b["lat"], b["lon"], b["name"], dom))
 
     candidates.sort(key=lambda c: (-c[0], -c[1], c[4], c[2]))
     # Pick spread-out stops sequentially by nearest neighbor from player
@@ -1579,7 +1792,7 @@ def _generate_logistics_short(md, req, deadline):
         if snapped:
             stop_idx = len(picked) + 1
             kind = "loading" if stop_idx == 1 else "delivery"
-            picked.append(_make_stop(stop_idx, kind, nxt[4], snapped, zone_radius=13.0))
+            picked.append(_make_stop(stop_idx, kind, nxt[4], snapped, zone_radius=13.0, poi_domain=nxt[5]))
             cur_lat, cur_lon = snapped["lat"], snapped["lon"]
 
     # Road-chain fallback if sparse
@@ -1624,17 +1837,23 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
     for lu in land_out:
         prio = 4 if lu["class"] == "industrial" else 2
         nm = lu["name"] or (f"{fallback_label} Industrial Park" if lu["class"] == "industrial" else f"{fallback_label} Commercial Zone")
-        candidates.append((prio, lu["lat"], lu["lon"], nm))
+        dom = classify_poi_cargo_domain("", "", lu["class"], lu.get("tags"), nm)
+        candidates.append((prio, lu["lat"], lu["lon"], nm, dom))
     for b in bld_out:
         if b["class"] in LOGISTICS_HUB_CLASSES:
-            candidates.append((3, b["lat"], b["lon"], b["name"] or f"{fallback_label} Warehouse"))
+            nm = b["name"] or f"{fallback_label} Warehouse"
+            dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), nm)
+            candidates.append((3, b["lat"], b["lon"], nm, dom))
         elif b["class"] in LOGISTICS_COMMERCIAL_CLASSES and b["name"]:
-            candidates.append((1, b["lat"], b["lon"], b["name"]))
+            dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), b["name"])
+            candidates.append((1, b["lat"], b["lon"], b["name"], dom))
     for p in places_out:
         if p["cat"] in LOGISTICS_HUB_CATS or p["tax"] in LOGISTICS_HUB_CATS:
-            candidates.append((3, p["lat"], p["lon"], p["name"]))
+            dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((3, p["lat"], p["lon"], p["name"], dom))
         elif _is_retail_place(p["cat"], p["tax"]):
-            candidates.append((1, p["lat"], p["lon"], p["name"]))
+            dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((1, p["lat"], p["lon"], p["name"], dom))
 
     candidates.sort(key=lambda c: (-c[0], c[3], c[1]))
     if candidates:
@@ -1647,7 +1866,7 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
                 infra_cells=infra_cells, land_cells=land_cells,
             )
             if snapped:
-                return pick[3], snapped
+                return pick[3], {**snapped, "_poiDomain": pick[4]}
     snapped = snap_to_road(md, alat, alon, radius_m=1500.0, classes=LOGISTICS_FALLBACK_CLASSES,
                            deadline=deadline, road_cells=road_cells)
     if snapped:
@@ -1671,7 +1890,7 @@ def _generate_logistics_haul(md, req, deadline):
     if not origin:
         return {"ok": False, "error": "No drivable road found near origin"}
     o_name, o_snap = origin
-    stops = [_make_stop(1, "loading", o_name, o_snap, zone_radius=15.0)]
+    stops = [_make_stop(1, "loading", o_name, o_snap, zone_radius=15.0, poi_domain=o_snap.get("_poiDomain"))]
 
     # 2. Destination hub from targeted towns in [min_km, max_km] (zero Overpass!)
     dest = None
@@ -1707,13 +1926,13 @@ def _generate_logistics_haul(md, req, deadline):
         mlon = 0.5 * (stops[0]["lon"] + dest[1]["lon"])
         mid = _find_freight_hub(md, mlat, mlon, seed, "log_mid", deadline, "Midpoint")
         if mid and dist_m(stops[0]["lat"], stops[0]["lon"], mid[1]["lat"], mid[1]["lon"]) >= 8000.0:
-            stops.append(_make_stop(2, "delivery", mid[0], mid[1], zone_radius=15.0))
+            stops.append(_make_stop(2, "delivery", mid[0], mid[1], zone_radius=15.0, poi_domain=mid[1].get("_poiDomain")))
 
     d_name, d_snap = dest
     d_addr = d_snap.get("road") or ""
     if dest_town:
         d_addr = f"{d_addr}, {dest_town}" if d_addr else dest_town
-    stops.append(_make_stop(len(stops) + 1, "delivery", d_name, d_snap, address=d_addr, zone_radius=15.0))
+    stops.append(_make_stop(len(stops) + 1, "delivery", d_name, d_snap, address=d_addr, zone_radius=15.0, poi_domain=d_snap.get("_poiDomain")))
     return {
         "ok": True,
         "mode": "logistics",
@@ -1725,18 +1944,35 @@ def _generate_logistics_haul(md, req, deadline):
     }
 
 
+def _resolve_route_cargo_domain(stops):
+    """Pick the most specific semantic cargo domain from delivery stops (preferring food/medical/fuel/hardware over general)."""
+    priority = {"fuel": 5, "medical": 4, "food": 4, "hardware": 3, "retail": 2, "industrial": 1, "general": 0}
+    best_dom = "general"
+    best_prio = -1
+    deliveries = [s for s in stops if s.get("kind") != "loading"] or stops
+    for s in deliveries:
+        dom = s.get("_poiDomain") or classify_poi_cargo_domain(name=s.get("name", ""))
+        p = priority.get(dom, 0)
+        if p > best_prio:
+            best_prio = p
+            best_dom = dom
+    return best_dom
+
+
 def _apply_logistics_cargo_and_dwell(res, req):
     if not res.get("ok") or not res.get("stops"):
         return res
-    cargo = generate_cargo_manifest(req.get("vehicle"), req["tier"], req["seed"])
-    mass_kg = cargo["massKg"]
     stops = res["stops"]
+    dest_domain = _resolve_route_cargo_domain(stops)
+    cargo = generate_cargo_manifest(req.get("vehicle"), req["tier"], req["seed"], dest_domain=dest_domain)
+    mass_kg = cargo["massKg"]
     deliveries = [s for s in stops if s.get("kind") != "loading"]
     n_del = len(deliveries)
     per_del = (mass_kg // n_del) if n_del > 0 else 0
     rem = (mass_kg - per_del * n_del) if n_del > 0 else 0
     del_i = 0
     for s in stops:
+        s.pop("_poiDomain", None)
         if s.get("kind") == "loading":
             s["cargoDeltaKg"] = mass_kg if n_del > 0 else 0
         else:
