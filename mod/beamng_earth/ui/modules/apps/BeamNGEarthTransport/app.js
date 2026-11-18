@@ -69,8 +69,8 @@ angular.module('beamng.apps')
                 '<div ng-style="{width: dwellPct + \'%\', background: dwellBarColor}" style="height:100%;transition:width 0.14s linear;"></div>' +
               '</div>' +
             '</div>' +
-            '<div ng-if="tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= 35" style="margin-top:5px;font-size:11px;color:#8ad0ff;">' +
-              'Pull into bay &amp; stop' +
+            '<div ng-if="tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11px;color:#8ad0ff;">' +
+              '{{ tr.trailerState === \'staged\' ? \'Back up to hitch staged trailer\' : \'Pull into bay &amp; stop\' }}' +
             '</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
               '<button ng-click="skip()" style="flex:1;' + BTN + '">Skip Stop</button>' +
@@ -171,11 +171,19 @@ angular.module('beamng.apps')
             } else if (tr.mode === 'bus') {
               scope.subText = (tr.paxCount != null ? tr.paxCount : 0) + '/' + (tr.paxCapacity || 40) + ' pax'
               scope.subBadge = tr.scheduleText || 'On Time'
-            } else if (tr.mode === 'logistics' && tr.cargoKg) {
-              var wt = tr.cargoKg >= 1000 ? (tr.cargoKg / 1000).toFixed(1) + ' t' : Math.round(tr.cargoKg) + ' kg'
-              scope.subText = (tr.cargoLabel || 'Cargo') + ' · ' + wt
-              if (tr.trailerState === 'attached') scope.subBadge = 'Trailer'
-              else if (tr.trailerState === 'tight_space_solo') scope.subBadge = 'Solo'
+            } else if (tr.mode === 'logistics') {
+              if (tr.legLabel) {
+                scope.subText = tr.legLabel
+              } else if (tr.cargoKg) {
+                var wt = tr.cargoKg >= 1000 ? (tr.cargoKg / 1000).toFixed(1) + ' t' : Math.round(tr.cargoKg) + ' kg'
+                scope.subText = (tr.cargoLabel || 'Cargo') + ' · ' + wt
+              } else {
+                scope.subText = 'Deadhead · Drive to pickup'
+              }
+              if (tr.trailerState === 'staged') scope.subBadge = 'Hook Up'
+              else if (tr.trailerState === 'attached') scope.subBadge = 'Trailer'
+              else if (tr.legKind === 'deadhead') scope.subBadge = 'Deadhead'
+              else scope.subBadge = 'Solo'
             }
             if (tr.state === 'summary') {
               scope.summaryDist = fmtDist(tr.drivenM, !!tr.metric)

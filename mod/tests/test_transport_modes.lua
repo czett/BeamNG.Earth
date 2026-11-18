@@ -293,7 +293,8 @@ do
   local origPlayerVeh = tm.playerVeh
   tm.playerVeh = function() return playerVehObj end
   scenetree = { findObjectById = function(id) return id == 801 and spawnedTrl or (id == 701 and playerVehObj or nil) end }
-  core_vehicles = { spawnNewVehicle = function() return spawnedTrl end }
+  local spawnCalls = 0
+  core_vehicles = { spawnNewVehicle = function() spawnCalls = spawnCalls + 1; return spawnedTrl end }
   be = { getObjectCount = function() return 0 end }
   local rLog = tm.startJob('logistics', 'long')
   T.check(rLog.ok, 'logistics job started with probed semi')
@@ -306,14 +307,22 @@ do
     tier = 'long',
     vehicleClass = 'semi',
     cargo = { type = 'dry_goods', label = 'Containerized Dry Goods', massKg = 18000, vehicleClass = 'semi' },
+    legs = {
+      { index = 1, fromStop = 1, toStop = 2, legKind = 'loaded_trailer', cargoType = 'dry_goods', cargoLabel = 'Containerized Dry Goods', cargoMassKg = 18000, trailerModel = 'dryvan', trailerLabel = 'Dry Van Trailer' },
+    },
     stops = {
       { index = 1, kind = 'loading', stopType = 'loading_bay', name = 'Hub A', lat = 39.286, lon = -76.610, cargoDeltaKg = 18000, dwellTargetS = 10.5 },
       { index = 2, kind = 'delivery', stopType = 'loading_bay', name = 'Hub B', lat = 39.386, lon = -76.610, cargoDeltaKg = -18000, dwellTargetS = 9.7 },
     },
   })
-  T.check(tm.hudPayload().cargoKg == 18000 and tm.hudPayload().dwellTargetS == 10.5, 'logistics hudPayload exposes cargoKg and dynamic dwellTargetS')
+  T.check(spawnCalls == 0, 'Phase 4: no trailer spawned at job start')
+  T.check(tm.hudPayload().legLabel == 'Deadhead · Drive to pickup' and tm.hudPayload().cargoKg == nil, 'Phase 4: en route to pickup shows deadhead and nil cargoKg')
+  -- Approach < 160 m to Hub A -> stages trailer in bay
+  local anchorLog = { geodeticToEnu = function(_, lat) return 0, (lat == 39.286) and 120 or 5000 end }
+  tm.update(0.1, 0.1, anchorLog, { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }, false, false)
+  T.check(spawnCalls == 1 and tm.hudPayload().trailerState == 'staged' and tm.hudPayload().legLabel == 'Hook up Dry Van Trailer', 'Phase 4: approaching < 160 m stages trailer in pickup bay')
   tm.cancelJob()
-  T.check(#deleted == 1 and deleted[1] == 801, 'cancelJob deletes job-owned spawned trailer')
+  T.check(#deleted == 1 and deleted[1] == 801, 'cancelJob deletes job-owned staged trailer')
   tm.playerVeh = origPlayerVeh
   scenetree, core_vehicles, be = oldScenetree, oldCv, oldBe
 end
@@ -356,8 +365,21 @@ do
     { 10, 10, 10 }, { 10.2, 10.2, 10.2 }, { 10.5, 10.5, 10.5 }, { 10.8, 10.8, 10.8 }, { 11.0, 11.0, 11.0 }
   }
   T.check(math.abs(tm.sampleBayGridZ(grid, 0.5, 0.5, 0) - 10.5) < 1e-6, 'sampleBayGridZ bilinearly interpolates terrain')
-  local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end, 1, 1.0, {1,1,1,0.7}, {1,1,1,0.9}, {1,1,1,0.8})
-  T.check(#quads >= 15, 'buildBayQuads emits stop bar, brackets, pads, side rails, and 3 chevrons')
+  local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end, 1, 1.0, {1,1,1,0.64}, {1,1,1,0.88}, {1,1,1,0.52}, {1,1,1,0.14})
+  local hasFloor, hasThinStrip, hasPad = false, true, false
+  for _, q in ipairs(quads) do
+    if q.kind == 'floor_tint' then
+      hasFloor = true
+      T.check(q.a >= 0.12 and q.a <= 0.22, 'floor_tint uses soft 12-22% alpha')
+    elseif q.kind == 'beacon_pad' then
+      hasPad = true
+    elseif q.widthM and q.widthM > 0.14 then
+      hasThinStrip = false
+    end
+  end
+  T.check(#quads >= 20 and hasFloor and hasThinStrip and not hasPad, 'buildBayQuads emits thin RLS-style strips + soft floor tint without chunky pads')
+  T.check(tm.beaconAlpha(25) == 1.0 and tm.beaconAlpha(13) == 0.5 and tm.beaconAlpha(8) == 0.0, 'beaconAlpha fades smoothly < 18 m')
+  T.check(tm.buildBayBeacon(0, 0, 10, 1.0, 25, {1,1,1,0.75}) ~= nil and tm.buildBayBeacon(0, 0, 10, 1.0, 6, {1,1,1,0.75}) == nil, 'buildBayBeacon hides < 8 m')
 
   -- Bus live passenger load, schedule text, nextStopName & Taxi nextPassenger() chaining
   T.check(tm.formatScheduleDelta(10) == 'On Time' and tm.formatScheduleDelta(70) == '+1m 10s', 'formatScheduleDelta formats On Time and +1m 10s')
@@ -407,6 +429,103 @@ do
   local rNext = tm.nextPassenger()
   T.check(rNext.ok and tm.hudPayload().state == 'pending' and sentReqs[#sentReqs].tier == 'city', 'nextPassenger chains into a new city taxi job')
   tm.cancelJob()
+end
+
+-- 10. Phase 4: Auto-coupling (<= 2.8 m), deadhead cargo reset, > 80 m despawnQueue & player-owned trailer safety
+do
+  T.check(tm.hitchDistanceM(0, 7.0, 0, 1, 3.0, 0, 0, 0, 1, 6.2, 'fifthwheel') <= 2.8, 'hitchDistanceM detects fifthwheel coupling alignment <= 2.8 m')
+  T.check(not tm.shouldDespawnTrailer(50) and tm.shouldDespawnTrailer(85), 'shouldDespawnTrailer triggers only > 80 m')
+
+  local deleted, cmds = {}, {}
+  local oldScenetree, oldCv, oldBe, oldTr = scenetree, core_vehicles, be, core_trailerRespawn
+  local attachedId = nil
+  local playerPos, trlPos = vec3(0, 0, 10), vec3(0, 120, 10)
+  local pvObj = {
+    id = 901, JBeam = 'us_semi',
+    getID = function(self) return self.id end,
+    getJBeamFilename = function(self) return self.JBeam end,
+    getPosition = function() return playerPos end,
+    getDirectionVector = function() return vec3(0, 1, 0) end,
+    queueLuaCommand = function(_, cmd)
+      cmds[#cmds + 1] = cmd
+      if type(cmd) == 'string' and cmd:find('_onVehicleProbe') then
+        tm._onVehicleProbe(901, { massKg = 8200, coupler = 'fifthwheel', couplerCid = 10, attached = false })
+      end
+    end,
+  }
+  local trlObj = {
+    id = 902,
+    getID = function(self) return self.id end,
+    getPosition = function() return trlPos end,
+    getDirectionVector = function() return vec3(0, 1, 0) end,
+    queueLuaCommand = function(_, cmd) cmds[#cmds + 1] = cmd end,
+    delete = function(self) deleted[#deleted + 1] = self.id end,
+  }
+  local origPlayerVeh = tm.playerVeh
+  tm.playerVeh = function() return pvObj end
+  scenetree = { findObjectById = function(id) return id == 902 and trlObj or (id == 901 and pvObj or nil) end }
+  core_vehicles = { spawnNewVehicle = function() return trlObj end }
+  be = { getObjectCount = function() return 0 end }
+  core_trailerRespawn = { getTrailerData = function() return attachedId and { [901] = { trailerId = attachedId } } or {} end }
+
+  tm.startJob('logistics', 'city')
+  tm.update(0.05, 0.05, { geodeticToEnu = function() return 0, 0 end }, { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }, false, false)
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true, mode = 'logistics', tier = 'city', vehicleClass = 'semi',
+    cargo = { type = 'food', label = 'Fresh Produce', massKg = 14200, vehicleClass = 'semi' },
+    legs = {
+      { index = 1, fromStop = 1, toStop = 2, legKind = 'loaded_trailer', cargoType = 'food', cargoLabel = 'Fresh Produce', cargoMassKg = 14200, trailerModel = 'reefer', trailerLabel = 'Reefer Trailer' },
+      { index = 2, fromStop = 2, toStop = 3, legKind = 'deadhead', cargoType = '', cargoLabel = '', cargoMassKg = 0 },
+      { index = 3, fromStop = 3, toStop = 4, legKind = 'loaded_solo', cargoType = 'hardware', cargoLabel = 'Tools', cargoMassKg = 4000 },
+    },
+    stops = {
+      { index = 1, kind = 'loading', stopType = 'loading_bay', name = 'Farm', lat = 39.286, lon = -76.610, dwellTargetS = 3.5 },
+      { index = 2, kind = 'delivery', stopType = 'loading_bay', name = 'Market', lat = 39.290, lon = -76.610, dwellTargetS = 2.0 },
+      { index = 3, kind = 'loading', stopType = 'loading_bay', name = 'Depot', lat = 39.295, lon = -76.610, dwellTargetS = 2.0 },
+      { index = 4, kind = 'delivery', stopType = 'loading_bay', name = 'Site', lat = 39.300, lon = -76.610, dwellTargetS = 2.0 },
+    },
+  })
+
+  local stopCoords = { [39.286] = { 0, 120 }, [39.290] = { 0, 500 }, [39.295] = { 0, 900 }, [39.300] = { 0, 1400 } }
+  local anchor4 = { geodeticToEnu = function(_, lat) local c = stopCoords[lat] or {0,0}; return c[1], c[2] end }
+  local pl4 = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.2 }
+
+  -- Stage at Farm (< 160 m)
+  fakeNow = fakeNow + 0.6
+  tm.update(0.1, 0.1, anchor4, pl4, false, false)
+  T.check(tm.hudPayload().trailerState == 'staged', 'trailer staged at Farm')
+
+  -- Back up within 2.8 m -> attachExternalCoupler & auto-advance on confirmation
+  playerPos = vec3(0, 112.5, 10)
+  pl4.y = 112.5
+  fakeNow = fakeNow + 0.5
+  tm.update(0.1, 0.1, anchor4, pl4, false, false)
+  attachedId = 902
+  fakeNow = fakeNow + 0.1
+  tm.update(0.1, 0.1, anchor4, pl4, false, false)
+  local pLeg1 = tm.hudPayload()
+  T.check(pLeg1.stopIndex == 2 and pLeg1.cargoKg == 14200 and pLeg1.legLabel == 'Deliver Fresh Produce · 14.2 t', 'coupling applies 14.2 t and advances to delivery leg')
+
+  -- Deliver at Market -> uncouples, clears cargo on deadhead leg, and does NOT delete trailer while < 80 m
+  playerPos = vec3(0, 500, 10)
+  trlPos = vec3(0, 500, 10)
+  pl4.y = 500
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor4, pl4, false, false) end
+  local pDead = tm.hudPayload()
+  T.check(pDead.stopIndex == 3 and pDead.legKind == 'deadhead' and pDead.cargoKg == nil and pDead.legLabel == 'Deadhead · Drive to pickup', 'deadhead leg clears previous cargo')
+  T.check(#deleted == 0, 'dropped trailer NOT deleted while player < 80 m away')
+
+  -- Drive > 80 m away -> despawnQueue deletes dropped trailer
+  playerPos = vec3(0, 590, 10)
+  pl4.y = 590
+  fakeNow = fakeNow + 0.6
+  tm.update(0.1, 0.1, anchor4, pl4, false, false)
+  T.check(#deleted == 1 and deleted[1] == 902, 'despawnQueue deletes job-owned trailer once player > 80 m away')
+  tm.cancelJob()
+
+  tm.playerVeh = origPlayerVeh
+  scenetree, core_vehicles, be, core_trailerRespawn = oldScenetree, oldCv, oldBe, oldTr
 end
 
 T.done('test_transport_modes')

@@ -36,9 +36,11 @@
             <span class="tm-num"><b>{{ active.paxCount ?? 0 }}/{{ active.paxCapacity || 40 }}</b> pax</span>
             <span class="tm-pill" :class="{ on: !active.scheduleText || active.scheduleText === 'On Time' }">{{ active.scheduleText || 'On Time' }}</span>
           </div>
-          <div v-else-if="active.mode === 'logistics' && active.cargoKg" class="tm-subline">
-            <span>{{ active.cargoLabel || 'Cargo' }} · <b class="tm-num">{{ formatCargo(active.cargoKg) }}</b></span>
-            <span v-if="active.trailerState && active.trailerState !== 'none'" class="tm-pill on">{{ trailerLabel(active.trailerState) }}</span>
+          <div v-else-if="active.mode === 'logistics'" class="tm-subline">
+            <span>{{ active.legLabel || (active.cargoKg ? (active.cargoLabel || 'Cargo') + ' · ' + formatCargo(active.cargoKg) : 'Deadhead · Drive to pickup') }}</span>
+            <span class="tm-pill" :class="{ on: active.trailerState === 'attached' || active.trailerState === 'staged' }">
+              {{ logisticsBadge(active) }}
+            </span>
           </div>
           <div v-if="active.mode === 'bus' && active.nextStopName" class="tm-stop-addr">
             Next Stop after this: {{ active.nextStopName }}
@@ -70,8 +72,8 @@
               ></span>
             </div>
           </div>
-          <div v-else-if="active.distM != null && active.distM <= 35" class="tm-bay-hint">
-            {{ currentStop && currentStop.stopType === 'loading_bay' ? 'Pull into the loading bay and stop' : 'Pull up to the kerbside bay and stop' }}
+          <div v-else-if="active.distM != null && active.distM <= (active.trailerState === 'staged' ? 50 : 35)" class="tm-bay-hint">
+            {{ active.trailerState === 'staged' ? 'Back up to the staged trailer in the bay to hitch' : (currentStop && currentStop.stopType === 'loading_bay' ? 'Pull into the loading bay and stop' : 'Pull up to the kerbside bay and stop') }}
           </div>
         </div>
         <div class="tm-actions">
@@ -213,10 +215,12 @@ function formatCargo(kg) {
   const v = Number(kg) || 0
   return v >= 1000 ? `${(v / 1000).toFixed(1)} t` : `${Math.round(v)} kg`
 }
-function trailerLabel(st) {
-  if (st === "attached") return "Trailer Hitched"
-  if (st === "spawning" || st === "ready") return "Trailer Ready"
-  if (st === "tight_space_solo") return "Solo (Tight Space)"
+function logisticsBadge(act) {
+  if (!act) return "Solo"
+  if (act.trailerState === "staged") return "Hook Up"
+  if (act.trailerState === "attached") return "Trailer Hitched"
+  if (act.legKind === "deadhead") return "Deadhead"
+  if (act.trailerState === "tight_space_solo") return "Solo (Tight)"
   return "Solo"
 }
 const activeModeDesc = computed(() => {
