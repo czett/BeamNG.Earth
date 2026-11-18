@@ -14,7 +14,8 @@
               {{ stopTypeLabel(currentStop.stopType) }}
             </span>
           </div>
-          <span class="tm-stop-count tm-num">Stop {{ active.stopIndex }}/{{ active.stopCount }}</span>
+          <span v-if="active.mode === 'taxi'" class="tm-stop-count tm-num">{{ active.passengerOnBoard ? 'Drop-off' : 'Pickup' }} · {{ tierLabel('taxi', active.tier) }}</span>
+          <span v-else class="tm-stop-count tm-num">Stop {{ active.stopIndex }}/{{ active.stopCount }}</span>
         </div>
         <div v-if="active.title" class="tm-title">{{ active.title }}</div>
         <div class="tm-current">
@@ -37,8 +38,8 @@
             <span class="tm-pill" :class="{ on: !active.scheduleText || active.scheduleText === 'On Time' }">{{ active.scheduleText || 'On Time' }}</span>
           </div>
           <div v-else-if="active.mode === 'logistics'" class="tm-subline">
-            <span>{{ active.legLabel || (active.cargoKg ? (active.cargoLabel || 'Cargo') + ' · ' + formatCargo(active.cargoKg) : 'Deadhead · Drive to pickup') }}</span>
-            <span class="tm-pill" :class="{ on: active.trailerState === 'attached' || active.trailerState === 'staged' }">
+            <span>{{ active.legLabel || (active.legKind === 'deadhead' ? 'Deadhead · Empty transit (0 kg)' : (active.cargoKg ? (active.cargoLabel || 'Cargo') + ' · ' + formatCargo(active.cargoKg) : 'Deadhead · Empty transit (0 kg)')) }}</span>
+            <span class="tm-pill" :class="{ on: !active.trailerMissing && (active.trailerState === 'attached' || active.trailerState === 'staged'), warn: active.trailerMissing }">
               {{ logisticsBadge(active) }}
             </span>
           </div>
@@ -59,7 +60,10 @@
               <b class="tm-num">{{ active.score }}/100</b>
             </div>
           </div>
-          <div v-if="active.dwellFrac > 0" class="tm-dwell" :class="{ fallback: active.dwellMode === 'fallback' }">
+          <div v-if="active.trailerMissing" class="tm-bay-hint is-warn">
+            {{ active.bayHint || 'Trailer missing · Go back & hitch your trailer' }}
+          </div>
+          <div v-else-if="active.dwellFrac > 0" class="tm-dwell" :class="{ fallback: active.dwellMode === 'fallback' }">
             <div class="tm-dwell-row">
               <span>{{ dwellLabel }}</span>
               <span class="tm-num">{{ dwellTimerText }}</span>
@@ -120,7 +124,8 @@
         </div>
         <div v-if="summary.title" class="tm-title">{{ summary.title }}</div>
         <div class="tm-summary-grid">
-          <div><span>Stops</span><b class="tm-num">{{ summary.stopsCompleted }}/{{ summary.stopCount }}</b></div>
+          <div v-if="summary.mode === 'taxi'"><span>Trip</span><b class="tm-num">{{ summary.stopsCompleted >= 2 ? 'Pickup -> Drop-off' : 'Skipped' }}</b></div>
+          <div v-else><span>Stops</span><b class="tm-num">{{ summary.stopsCompleted }}/{{ summary.stopCount }}</b></div>
           <div><span>Distance</span><b class="tm-num">{{ formatDist(summary.drivenM, metric) }}</b></div>
           <div><span>Time</span><b class="tm-num">{{ formatDur(summary.elapsedS) }}</b></div>
           <div><span>Smoothness</span><b class="tm-num">{{ summary.smoothnessPct }}%</b></div>
@@ -176,7 +181,7 @@ import {
   TRANSPORT_MODES, selectedMode, selectedTier, currentTiers,
   transportState, busy, actionError,
   setMode, setTier, startJob, skipStop, cancelJob, dismissSummary, nextPassenger,
-  modeLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, toArray, start, stop,
+  modeLabel, tierLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, toArray, start, stop,
 } from "./earthTransportStore.js"
 
 const props = defineProps({
@@ -217,9 +222,11 @@ function formatCargo(kg) {
 }
 function logisticsBadge(act) {
   if (!act) return "Solo"
+  if (act.trailerMissing) return "Trailer Missing"
   if (act.trailerState === "staged") return "Hook Up"
   if (act.trailerState === "attached") return "Trailer Hitched"
   if (act.legKind === "deadhead") return "Deadhead"
+  if (act.legKind === "pickup_approach") return "Pickup"
   if (act.trailerState === "tight_space_solo") return "Solo (Tight)"
   return "Solo"
 }
@@ -414,6 +421,10 @@ const errText = computed(() => actionError.value || st.value.error || "")
   background: rgba(61, 220, 132, 0.18);
   color: #6ae696;
 }
+.tm-pill.warn {
+  background: rgba(235, 173, 71, 0.22);
+  color: #f0b856;
+}
 .tm-fare { font-weight: 700; color: #ffd45a; }
 
 .tm-dwell { margin-top: 2px; }
@@ -431,6 +442,7 @@ const errText = computed(() => actionError.value || st.value.error || "")
 .tm-bar-fill.dwell { background: #3ddc84; }
 .tm-bar-fill.fallback { background: #a9d94c; }
 .tm-bay-hint { font-size: 11px; color: #8ad0ff; margin-top: 2px; }
+.tm-bay-hint.is-warn { color: #f0b856; font-weight: 600; }
 
 .tm-actions { display: flex; gap: 8px; }
 .tm-actions .tm-btn { flex: 1; }

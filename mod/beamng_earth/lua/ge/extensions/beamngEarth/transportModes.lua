@@ -5,7 +5,7 @@ local M = {}
 
 M.MODES = { taxi = true, bus = true, logistics = true }
 M.TIERS = {
-  taxi = { neighborhood = true, city = true, regional = true },
+  taxi = { short = true, city = true, regional = true, long = true },
   bus = { partial = true, full = true },
   logistics = { ['local'] = true, city = true, regional = true, long = true },
 }
@@ -193,6 +193,7 @@ end
 function M.validateRequest(mode, tier)
   mode = type(mode) == 'string' and mode:lower() or ''
   tier = type(tier) == 'string' and tier:lower() or ''
+  if mode == 'taxi' and tier == 'neighborhood' then tier = 'short' end
   if not M.MODES[mode] then return false, 'unknown transport mode' end
   if not (M.TIERS[mode] and M.TIERS[mode][tier]) then return false, 'unknown tier for ' .. mode end
   return true
@@ -207,21 +208,28 @@ function M.haversineM(lat1, lon1, lat2, lon2)
 end
 
 -- Pure: default dwell target (seconds) when stop.dwellTargetS is absent
-function M.defaultDwellTargetS(mode, tier, stop, cargoKg)
+function M.defaultDwellTargetS(mode, tier, stop, cargoKg, legKind)
   mode = type(mode) == 'string' and mode:lower() or ''
   tier = type(tier) == 'string' and tier:lower() or ''
   local kind = stop and tostring(stop.kind or ''):lower() or ''
   local name = stop and tostring(stop.name or ''):lower() or ''
+  local lk = type(legKind) == 'string' and legKind:lower() or ''
   if mode == 'taxi' then
     local isHub = name:find('airport') or name:find('station') or name:find('terminal') or name:find('hotel') or name:find('hospital')
     if kind == 'pickup' then return isHub and 2.5 or 2.2 end
-    return (isHub or tier == 'regional') and 3.0 or 2.5
+    return (isHub or tier == 'regional' or tier == 'long') and 3.0 or 2.5
   elseif mode == 'bus' then
     local isHub = name:find('station') or name:find('terminal') or name:find('hub') or name:find('central')
       or name:find('bahnhof') or name:find('gare') or name:find('airport')
     return isHub and 4.5 or 3.5
   elseif mode == 'logistics' then
+    if lk == 'loaded_trailer' or lk == 'deadhead' or kind == 'deadhead' then
+      return 2.5
+    end
     local kg = math.max(0, tonumber(cargoKg) or 0)
+    if lk == 'loaded_solo' then
+      kg = math.min(8000, kg)
+    end
     local lo, hi, frac
     if kg <= 1400 then
       lo, hi, frac = 3.5, 4.5, math.min(1, kg / 1400)
@@ -238,16 +246,32 @@ function M.defaultDwellTargetS(mode, tier, stop, cargoKg)
 end
 
 -- Pure: contextual dwell status label
-function M.dwellStatusLabel(mode, stopKind, dwellMode)
+function M.dwellStatusLabel(mode, stopKind, dwellMode, legKind, upLegKind, trailerState)
   mode = type(mode) == 'string' and mode:lower() or ''
   local kind = type(stopKind) == 'string' and stopKind:lower() or ''
+  local lk = type(legKind) == 'string' and legKind:lower() or ''
+  local ulk = type(upLegKind) == 'string' and upLegKind:lower() or ''
   local base
   if mode == 'taxi' then
     base = (kind == 'pickup') and 'Passenger boarding' or 'Passenger alighting'
   elseif mode == 'bus' then
     base = 'Passengers boarding'
   elseif mode == 'logistics' then
-    base = (kind == 'loading') and 'Loading cargo' or 'Unloading cargo'
+    if kind == 'deadhead' or (lk == 'deadhead' and ulk == '') then
+      base = 'Checking in at depot'
+    elseif kind == 'loading' then
+      if ulk == 'loaded_trailer' or trailerState == 'staged' then
+        base = 'Hooking up trailer'
+      else
+        base = 'Loading cargo'
+      end
+    else
+      if lk == 'loaded_trailer' then
+        base = 'Unhooking trailer'
+      else
+        base = 'Unloading cargo'
+      end
+    end
   else
     base = 'Hold in bay'
   end
@@ -1079,6 +1103,7 @@ local function stageTrailerAtBay(j, stop, sx, sy, fx, fy, rx, ry, leg, playerZ)
     local cap = M.SOLO_CARGO_CAP_KG[j.vehicleClass or 'van'] or 1400
     if (leg.cargoMassKg or 0) > cap then leg.cargoMassKg = cap end
     j.trailerState = 'tight_space_solo'
+    j.dwellTargetS = M.defaultDwellTargetS('logistics', j.tier, stop, leg.cargoMassKg, 'loaded_solo')
     M.say('Bay too tight for trailer — running solo cargo', 5)
     return false
   end
@@ -1106,13 +1131,7 @@ local function stageTrailerAtBay(j, stop, sx, sy, fx, fy, rx, ry, leg, playerZ)
   return true
 end
 
-local function tickStagedCoupling(j, now, player)
-  if not j or j.trailerState ~= 'staged' or not j.trailerId then return false end
-  local pv = M.playerVeh()
-  local pvId = vehIdOf(pv)
-  local trl = rawget(_G, 'scenetree') and scenetree.findObjectById and scenetree.findObjectById(j.trailerId)
-  if not pv or not pvId or not trl then return false end
-
+local function tryCoupleToTrailer(j, now, player, pv, pvId, trl)
   local attId = findAttachedTrailerId(pvId)
   if attId == j.trailerId then
     return true
@@ -1155,6 +1174,26 @@ end]], couplerTag, j.trailerId, M.COUPLER_RANGE_M)
   return false
 end
 
+local function tickStagedCoupling(j, now, player)
+  if not j or j.trailerState ~= 'staged' or not j.trailerId then return false end
+  local pv = M.playerVeh()
+  local pvId = vehIdOf(pv)
+  local trl = rawget(_G, 'scenetree') and scenetree.findObjectById and scenetree.findObjectById(j.trailerId)
+  if not pv or not pvId or not trl then return false end
+  return tryCoupleToTrailer(j, now, player, pv, pvId, trl)
+end
+
+-- Verify that the job's required trailer is physically attached to the player vehicle.
+function M.isTrailerAttachedToJob(j, pvId)
+  if not j or j.mode ~= 'logistics' then return true end
+  local stopIdx = j.stopIndex or 1
+  local curLeg = (stopIdx >= 2) and j.legs and j.legs[stopIdx - 1] or nil
+  if not (curLeg and curLeg.legKind == 'loaded_trailer') then return true end
+  if not j.trailerId then return false end
+  local attId = pvId and findAttachedTrailerId(pvId) or nil
+  return attId == j.trailerId
+end
+
 -- Pure: format weight in kg or metric tonnes.
 local function fmtCargoWt(kg)
   kg = math.max(0, tonumber(kg) or 0)
@@ -1164,58 +1203,80 @@ local function fmtCargoWt(kg)
   return string.format('%d kg', math.floor(kg + 0.5))
 end
 
--- Pure: compute active leg task & cargo display state for Logistics jobs.
+-- Pure: compute active leg task & cargo display state for Logistics jobs (strictly active-leg-only).
 function M.activeLegInfo(j)
   if not j or j.mode ~= 'logistics' then return nil end
   local legs = j.legs or {}
   local stopIdx = j.stopIndex or 1
+  local curStop = j.stops and j.stops[stopIdx] or nil
   local curLeg = (stopIdx >= 2) and legs[stopIdx - 1] or nil
   local upLeg = legs[stopIdx]
 
-  if stopIdx == 1 or (curLeg and curLeg.legKind == 'deadhead') then
-    if j.trailerState == 'staged' and upLeg and upLeg.legKind == 'loaded_trailer' then
+  if curLeg and curLeg.legKind == 'deadhead' and j.trailerState ~= 'staged' then
+    return {
+      legKind = 'deadhead',
+      legLabel = 'Deadhead · Empty transit (0 kg)',
+      cargoLabel = nil,
+      cargoKg = nil,
+      trailerLabel = nil,
+      trailerModel = nil,
+    }
+  end
+
+  if stopIdx == 1 or (curStop and curStop.kind == 'loading' and j.trailerState == 'staged') then
+    if upLeg and upLeg.legKind == 'loaded_trailer' then
       local tLbl = j.trailerLabel or upLeg.trailerLabel or 'Trailer'
+      local cLbl = (upLeg.cargoLabel and upLeg.cargoLabel ~= '') and upLeg.cargoLabel or 'Freight'
+      local upKg = tonumber(upLeg.cargoMassKg) or 0
       return {
-        legKind = 'deadhead',
-        legLabel = 'Hook up ' .. tLbl,
+        legKind = 'pickup_approach',
+        legLabel = string.format('Pick up %s (%s · %s)', tLbl, cLbl, fmtCargoWt(upKg)),
         cargoLabel = nil,
         cargoKg = nil,
         trailerLabel = tLbl,
         trailerModel = upLeg.trailerModel,
       }
+    elseif upLeg then
+      local cLbl = (upLeg.cargoLabel and upLeg.cargoLabel ~= '') and upLeg.cargoLabel or 'Cargo'
+      local upKg = tonumber(upLeg.cargoMassKg) or 0
+      return {
+        legKind = 'pickup_approach',
+        legLabel = string.format('Pick up %s (%s)', cLbl, fmtCargoWt(upKg)),
+        cargoLabel = nil,
+        cargoKg = nil,
+        trailerLabel = nil,
+        trailerModel = nil,
+      }
     end
     return {
       legKind = 'deadhead',
-      legLabel = 'Deadhead · Drive to pickup',
+      legLabel = 'Deadhead · Empty transit (0 kg)',
       cargoLabel = nil,
       cargoKg = nil,
-      trailerLabel = upLeg and upLeg.trailerLabel or nil,
-      trailerModel = upLeg and upLeg.trailerModel or nil,
+      trailerLabel = nil,
+      trailerModel = nil,
     }
   end
 
-  if curLeg and curLeg.legKind == 'loaded_trailer' then
+  if curLeg and (curLeg.legKind == 'loaded_trailer' or curLeg.legKind == 'loaded_solo') then
     local kg = (tonumber(j.cargoCurrentKg) or 0) > 0 and j.cargoCurrentKg or (tonumber(curLeg.cargoMassKg) or 0)
     local lbl = (curLeg.cargoLabel and curLeg.cargoLabel ~= '') and curLeg.cargoLabel or 'Freight'
+    local isTrl = curLeg.legKind == 'loaded_trailer'
     return {
-      legKind = 'loaded_trailer',
+      legKind = curLeg.legKind,
       legLabel = string.format('Deliver %s · %s', lbl, fmtCargoWt(kg)),
       cargoLabel = lbl,
       cargoKg = kg > 0 and kg or nil,
-      trailerLabel = j.trailerLabel or curLeg.trailerLabel,
-      trailerModel = curLeg.trailerModel,
+      trailerLabel = isTrl and (j.trailerLabel or curLeg.trailerLabel) or nil,
+      trailerModel = isTrl and curLeg.trailerModel or nil,
     }
   end
 
-  local kg = (tonumber(j.cargoCurrentKg) or 0) > 0 and j.cargoCurrentKg or (curLeg and tonumber(curLeg.cargoMassKg) or 0)
-  local lbl = (curLeg and curLeg.cargoLabel and curLeg.cargoLabel ~= '') and curLeg.cargoLabel or (j.cargoLabel ~= '' and j.cargoLabel or 'Cargo')
-  local vc = tostring(j.vehicleClass or 'van')
-  local vName = vc == 'car' and 'Car' or (vc == 'van' and 'Van' or (vc == 'box_truck' and 'Box Truck' or 'Truck'))
   return {
-    legKind = 'loaded_solo',
-    legLabel = string.format('Solo %s Cargo · %s', vName, fmtCargoWt(kg)),
-    cargoLabel = lbl,
-    cargoKg = kg > 0 and kg or nil,
+    legKind = 'deadhead',
+    legLabel = 'Deadhead · Empty transit (0 kg)',
+    cargoLabel = nil,
+    cargoKg = nil,
     trailerLabel = nil,
     trailerModel = nil,
   }
@@ -1283,6 +1344,7 @@ function M.startJob(mode, tier)
     return { ok = false, error = errV }
   end
   mode, tier = mode:lower(), tier:lower()
+  if mode == 'taxi' and tier == 'neighborhood' then tier = 'short' end
   local st, pl, heading = playerPose()
   if not (st and st.inOurLevel and pl and pl.lat and pl.lon) then
     lastError = 'Load into the BeamNG.Earth world first'
@@ -1548,7 +1610,7 @@ local function finishJob(fallbackFinal)
     rideLabel = j.mode == 'taxi' and j.rideLabel or nil,
     paxCount = j.mode == 'taxi' and j.taxiPaxCount or (j.mode == 'bus' and j.paxCount or nil),
     cargoLabel = j.cargoLabel,
-    cargoKg = (j.totalCargoHauledKg and j.totalCargoHauledKg > 0) and j.totalCargoHauledKg or j.cargoKg,
+    cargoKg = (j.totalCargoHauledKg and j.totalCargoHauledKg > 0) and j.totalCargoHauledKg or nil,
   }
   activeJob = nil
   clearOwnedGps()
@@ -1574,7 +1636,7 @@ local function advanceStop(completed, isFallback)
       applyCargoMassToJob(j, j.paxMassKg or 80)
       local nextStop = j.stops[doneIdx + 1]
       local legM = nextStop and M.haversineM(doneStop.lat, doneStop.lon, nextStop.lat, nextStop.lon) or (j.estimatedKm * 1000)
-      local spd = (j.tier == 'regional') and 19.0 or 12.5
+      local spd = (j.tier == 'regional' or j.tier == 'long') and 19.0 or 12.5
       j.targetLegS = math.max(35.0, ((legM * 1.25) / spd) * (j.targetMult or 1.0))
     elseif j.mode == 'bus' and doneStop then
       local cap = j.paxCapacity or M.BUS_CAPACITY
@@ -1623,6 +1685,10 @@ local function advanceStop(completed, isFallback)
   j.dwellMode = 'none'
   j.inBay = false
   j.inFallback = false
+  j.trailerDetached = false
+  j.trailerMissing = false
+  j.bayHint = nil
+  j.lastMissingSayAt = -math.huge
   j.stopZ = nil
   j.bayCornersZ = nil
   j.bayGridZ = nil
@@ -1635,7 +1701,10 @@ local function advanceStop(completed, isFallback)
   end
   j.stopIndex = j.stopIndex + 1
   local nxt = j.stops[j.stopIndex]
-  j.dwellTargetS = nxt.dwellTargetS or M.defaultDwellTargetS(j.mode, j.tier, nxt, j.cargoKg)
+  local nxtLeg = j.legs and j.legs[j.stopIndex - 1] or nil
+  local nxtUpLeg = j.legs and j.legs[j.stopIndex] or nil
+  local nxtLk = (nxt.kind == 'loading') and (nxtUpLeg and nxtUpLeg.legKind) or (nxtLeg and nxtLeg.legKind)
+  j.dwellTargetS = nxt.dwellTargetS or M.defaultDwellTargetS(j.mode, j.tier, nxt, j.cargoKg, nxtLk)
   syncGpsToStop(nxt, j.stopIndex, #j.stops)
   -- Capture GPS ETA for taxi dropoff target time if available
   if j.mode == 'taxi' and j.passengerOnBoard then
@@ -1672,7 +1741,7 @@ function M.dismissSummary()
 end
 
 function M.nextPassenger()
-  local tier = (summary and summary.mode == 'taxi' and summary.tier) or 'neighborhood'
+  local tier = (summary and summary.mode == 'taxi' and summary.tier) or 'short'
   summary = nil
   return M.startJob('taxi', tier)
 end
@@ -1892,7 +1961,51 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
   j.inBay = heightOk and math.abs(latOff) <= spec.latTol and math.abs(longOff) <= spec.longTol
   j.inFallback = (not j.inBay) and heightOk and distXY <= M.FALLBACK_RADIUS_M
 
-  local stopTarget = stop.dwellTargetS or M.defaultDwellTargetS(j.mode, j.tier, stop, j.cargoKg)
+  -- Enforce trailer presence on loaded_trailer deliveries & block premature dwell while staged
+  local curLeg = (j.stopIndex >= 2) and j.legs and j.legs[j.stopIndex - 1] or nil
+  local upLeg = j.legs and j.legs[j.stopIndex] or nil
+  local blockDwell = false
+  if j.mode == 'logistics' then
+    if stop.kind == 'loading' and j.trailerState == 'staged' then
+      blockDwell = true
+    elseif stop.kind == 'delivery' and curLeg and curLeg.legKind == 'loaded_trailer' then
+      local pv = M.playerVeh()
+      local pvId = vehIdOf(pv)
+      local attachedOk = M.isTrailerAttachedToJob(j, pvId)
+      if not attachedOk and j.trailerId and pv and pvId then
+        local trl = rawget(_G, 'scenetree') and scenetree.findObjectById and scenetree.findObjectById(j.trailerId)
+        if trl and tryCoupleToTrailer(j, now, player, pv, pvId, trl) then
+          attachedOk = true
+        end
+      end
+      j.trailerDetached = not attachedOk
+      if not attachedOk and (j.inBay or j.inFallback) then
+        blockDwell = true
+        j.trailerMissing = true
+        j.bayHint = 'Trailer missing · Go back & hitch your trailer'
+        if (now - (j.lastMissingSayAt or -math.huge)) >= 8.0 then
+          j.lastMissingSayAt = now
+          M.say('Trailer missing · Go back & hitch your trailer', 5)
+        end
+      else
+        j.trailerMissing = false
+        j.bayHint = nil
+      end
+    else
+      j.trailerDetached = false
+      j.trailerMissing = false
+      j.bayHint = nil
+    end
+  end
+
+  if blockDwell then
+    j.dwellS = 0
+    j.dwellMode = 'none'
+    return
+  end
+
+  local lkForDwell = (stop.kind == 'loading') and (upLeg and upLeg.legKind) or (curLeg and curLeg.legKind)
+  local stopTarget = stop.dwellTargetS or M.defaultDwellTargetS(j.mode, j.tier, stop, j.cargoKg, lkForDwell)
   local state, nextDwell, nextMode, targetS = M.stepBayStop(
     j.dwellS, j.dwellMode, distXY, longOff, latOff, dz, player.speed or 0, spec, dtSim, paused, stopTarget
   )
@@ -1906,52 +2019,25 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
   end
 end
 
-local MODE_RGBA = {
-  taxi = { 0.96, 0.75, 0.22 },
-  bus = { 0.24, 0.74, 0.96 },
-  logistics = { 0.94, 0.58, 0.22 },
-}
-local BAY_GREEN = { 0.22, 0.88, 0.50 }
-local FALLBACK_AMBER = { 0.58, 0.86, 0.36 }
+M.BAY_FLOAT_H = 0.10
+M.BAY_CORNER_R = 0.65
+M.BAY_CORNER_SEGS = 6
+M.BAY_LINE_W = 0.09
+M.BAY_IDLE_GREY = { 0.72, 0.74, 0.78, 0.34 }
+M.BAY_ALIGNED_GREEN = { 0.25, 0.85, 0.52, 0.55 }
+M.BAY_PARTIAL_AMBER = { 0.92, 0.68, 0.28, 0.48 }
 
 local function lerp(a, b, t) return a + (b - a) * t end
 
--- Pure: smooth distance fade-out for floating 3D target beacon as player enters < 18 m.
-function M.beaconAlpha(distXY)
-  local d = tonumber(distXY)
-  if not d or d ~= d then return 0 end
-  if d >= 18.0 then return 1.0 end
-  if d <= 8.0 then return 0.0 end
-  return (d - 8.0) / 10.0
-end
-
--- Pure: compact floating 3D target beacon (~2.0 m above bay center: slender vertical stem + thin ring).
-function M.buildBayBeacon(sx, sy, zCenter, now, distXY, col)
-  local fade = M.beaconAlpha(distXY)
-  if fade <= 0.02 then return nil end
-  local alpha = (col[4] or 0.78) * fade
-  local bob = 0.07 * math.sin((tonumber(now) or 0) * 2.2)
-  local zRing = zCenter + 2.0 + bob
-  local radius = 0.55
-  local segs = 16
-  local ring = {}
-  for i = 1, segs do
-    local a0 = ((i - 1) / segs) * 2 * math.pi
-    local a1 = (i / segs) * 2 * math.pi
-    ring[i] = {
-      p0 = { x = sx + math.cos(a0) * radius, y = sy + math.sin(a0) * radius, z = zRing },
-      p1 = { x = sx + math.cos(a1) * radius, y = sy + math.sin(a1) * radius, z = zRing },
-    }
+-- Pure: select subtle grey / soft emerald green / soft warm amber RGBA for the floating park box.
+function M.bayFrameColor(inBay, inFallback, dwellMode, trailerState, trailerMissing)
+  if trailerMissing or dwellMode == 'fallback' or inFallback or trailerState == 'staged' then
+    return M.BAY_PARTIAL_AMBER
   end
-  return {
-    alpha = alpha,
-    r = col[1], g = col[2], b = col[3],
-    stem = {
-      p0 = { x = sx, y = sy, z = zCenter + 0.15 },
-      p1 = { x = sx, y = sy, z = zRing - 0.18 },
-    },
-    ring = ring,
-  }
+  if inBay or dwellMode == 'bay' then
+    return M.BAY_ALIGNED_GREEN
+  end
+  return M.BAY_IDLE_GREY
 end
 
 -- Pure: bilinearly sample 3x5 bay terrain height grid at normalized (u, v) in [0, 1]^2.
@@ -1974,95 +2060,98 @@ function M.sampleBayGridZ(grid, u, v, zFallback)
   return lerp(lerp(z00, z01, tv), lerp(z10, z11, tv), tu)
 end
 
--- Pure: build RLS-inspired sleek (~0.11 m) asphalt-style ground markings, soft ~14% floor tint, & guide chevrons.
-function M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, entryDir, now, colBorder, colBracket, colChevron, colFill)
+-- Pure: build minimalist rounded-rectangle floating frame suspended ~0.10 m above terrain (no pole, ring, floor tint, or chevrons).
+function M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, col, radiusM, lineW)
   local hl, hw = spec.halfL, spec.halfW
-  local dir = (entryDir == -1) and -1 or 1
-  local quads = {}
-  local lineW = 0.11
+  local r = math.min(tonumber(radiusM) or M.BAY_CORNER_R, hw - 0.15, hl - 0.15)
+  local w = tonumber(lineW) or M.BAY_LINE_W
+  local halfW = w * 0.5
+  local segs = M.BAY_CORNER_SEGS
+  local lift = M.BAY_FLOAT_H
+  local c = col or M.BAY_IDLE_GREY
+  local ihl, ihw = hl - r, hw - r
 
-  local function pt(along, across, lift)
-    local z = zFn(along, across) + (lift or 0.05)
+  local function pt(along, across)
+    local z = zFn(along, across) + lift
     return { x = sx + along * fx + across * rx, y = sy + along * fy + across * ry, z = z }
   end
 
-  local function addStrip(a0, c0, a1, c1, widthM, col, kind, lift)
-    local da, dc = a1 - a0, c1 - c0
-    local len = math.sqrt(da * da + dc * dc)
-    if len < 1e-4 then return end
-    local na, nc = -dc / len * (widthM * 0.5), da / len * (widthM * 0.5)
-    quads[#quads + 1] = {
-      kind = kind or 'rail',
-      widthM = widthM,
-      p0 = pt(a0 + na, c0 + nc, lift),
-      p1 = pt(a1 + na, c1 + nc, lift),
-      p2 = pt(a1 - na, c1 - nc, lift),
-      p3 = pt(a0 - na, c0 - nc, lift),
-      r = col[1], g = col[2], b = col[3], a = col[4],
+  local ring = {}
+  local function addPt(a, cr)
+    if #ring > 0 then
+      local prev = ring[#ring]
+      if math.abs(prev.a - a) < 1e-5 and math.abs(prev.c - cr) < 1e-5 then return end
+    end
+    ring[#ring + 1] = { a = a, c = cr }
+  end
+  local function addArc(ca, cc, ang0, ang1)
+    for i = 0, segs do
+      local ang = ang0 + (i / segs) * (ang1 - ang0)
+      addPt(ca + r * math.cos(ang), cc + r * math.sin(ang))
+    end
+  end
+  local function addEdge(a0, c0, a1, c1)
+    local len = math.sqrt((a1 - a0) ^ 2 + (c1 - c0) ^ 2)
+    local n = math.max(1, math.ceil(len / 1.5))
+    for i = 1, n do
+      local t = i / n
+      addPt(a0 + (a1 - a0) * t, c0 + (c1 - c0) * t)
+    end
+  end
+
+  addArc(ihl, ihw, 0, math.pi * 0.5)
+  addEdge(ihl, hw, -ihl, hw)
+  addArc(-ihl, ihw, math.pi * 0.5, math.pi)
+  addEdge(-hl, ihw, -hl, -ihw)
+  addArc(-ihl, -ihw, math.pi, math.pi * 1.5)
+  addEdge(-ihl, -hw, ihl, -hw)
+  addArc(ihl, -ihw, math.pi * 1.5, math.pi * 2.0)
+  addEdge(hl, -ihw, hl, ihw)
+  if #ring > 1 and math.abs(ring[#ring].a - ring[1].a) < 1e-5 and math.abs(ring[#ring].c - ring[1].c) < 1e-5 then
+    ring[#ring] = nil
+  end
+
+  local n = #ring
+  if n < 3 then return {} end
+  local outer, inner = {}, {}
+  for i = 1, n do
+    local prev = ring[((i - 2) % n) + 1]
+    local cur = ring[i]
+    local nxt = ring[(i % n) + 1]
+    local d1a, d1c = cur.a - prev.a, cur.c - prev.c
+    local l1 = math.max(1e-6, math.sqrt(d1a * d1a + d1c * d1c))
+    local n1a, n1c = d1c / l1, -d1a / l1
+    local d2a, d2c = nxt.a - cur.a, nxt.c - cur.c
+    local l2 = math.max(1e-6, math.sqrt(d2a * d2a + d2c * d2c))
+    local n2a, n2c = d2c / l2, -d2a / l2
+    local ma, mc = n1a + n2a, n1c + n2c
+    local ml = math.sqrt(ma * ma + mc * mc)
+    if ml < 1e-5 then
+      ma, mc = n1a, n1c
+    else
+      ma, mc = ma / ml, mc / ml
+      local dot = ma * n1a + mc * n1c
+      local scale = math.min(1.8, 1.0 / math.max(0.4, dot))
+      ma, mc = ma * scale, mc * scale
+    end
+    outer[i] = pt(cur.a + ma * halfW, cur.c + mc * halfW)
+    inner[i] = pt(cur.a - ma * halfW, cur.c - mc * halfW)
+  end
+
+  local quads = {}
+  for i = 1, n do
+    local j = (i % n) + 1
+    quads[i] = {
+      kind = 'frame_rail',
+      widthM = w,
+      liftM = lift,
+      p0 = outer[i],
+      p1 = outer[j],
+      p2 = inner[j],
+      p3 = inner[i],
+      r = c[1], g = c[2], b = c[3], a = c[4],
     }
   end
-
-  -- 1. Soft, low-alpha interior floor tint (~14% opacity) subdivided 4x2 to conform cleanly to terrain grid
-  local fillCol = colFill or { colBorder[1], colBorder[2], colBorder[3], 0.14 }
-  local nL, nW = 4, 2
-  for il = 1, nL do
-    local a0 = -hl + ((il - 1) / nL) * (2 * hl)
-    local a1 = -hl + (il / nL) * (2 * hl)
-    for iw = 1, nW do
-      local c0 = -hw + ((iw - 1) / nW) * (2 * hw)
-      local c1 = -hw + (iw / nW) * (2 * hw)
-      quads[#quads + 1] = {
-        kind = 'floor_tint',
-        p0 = pt(a0, c0, 0.045),
-        p1 = pt(a1, c0, 0.045),
-        p2 = pt(a1, c1, 0.045),
-        p3 = pt(a0, c1, 0.045),
-        r = fillCol[1], g = fillCol[2], b = fillCol[3], a = fillCol[4],
-      }
-    end
-  end
-
-  -- 2. Subtle front stop line (+dir * (hl - 0.06), 0.12 m wide)
-  addStrip(dir * (hl - 0.06), -hw + 0.12, dir * (hl - 0.06), hw - 0.12, 0.12, colBracket, 'stop_bar', 0.055)
-
-  -- 3. Thin dashed side border lines (0.11 m wide)
-  local armL = math.min(1.45, hl * 0.28)
-  local dashLen, gapLen = 1.5, 0.95
-  local stepLen = dashLen + gapLen
-  local cur = -hl + armL + 0.45
-  local railEnd = hl - armL - 0.45
-  while cur < railEnd do
-    local segEnd = math.min(cur + dashLen, railEnd)
-    if segEnd - cur >= 0.35 then
-      addStrip(cur, -hw, segEnd, -hw, lineW, colBorder, 'side_rail', 0.05)
-      addStrip(cur, hw, segEnd, hw, lineW, colBorder, 'side_rail', 0.05)
-    end
-    cur = cur + stepLen
-  end
-
-  -- 4. Crisp, thin corner L-brackets (0.11 m wide)
-  local armW = math.min(0.95, hw * 0.44)
-  for _, sl in ipairs({ -1, 1 }) do
-    for _, sw in ipairs({ -1, 1 }) do
-      addStrip(sl * hl, sw * hw, sl * (hl - armL), sw * hw, lineW, colBracket, 'bracket', 0.055)
-      addStrip(sl * hl, sw * hw, sl * hl, sw * (hw - armW), lineW, colBracket, 'bracket', 0.055)
-    end
-  end
-
-  -- 5. Subtle forward-moving guide chevrons (0.11 m wide)
-  local chevSpan = hw * 0.42
-  local chevDepth = math.min(0.85, hl * 0.16)
-  local phase = ((tonumber(now) or 0) * 1.5) % 1.0
-  local fracs = { -0.55, -0.15, 0.25 }
-  for idx, frac in ipairs(fracs) do
-    local wave = 0.5 + 0.5 * math.cos((phase - (idx - 1) / 3.0) * 2.0 * math.pi)
-    local cChev = { colChevron[1], colChevron[2], colChevron[3], math.min(1, colChevron[4] * (0.35 + 0.65 * wave)) }
-    local tipAlong = dir * (hl * frac + chevDepth * 0.5)
-    local wingAlong = tipAlong - dir * chevDepth
-    addStrip(wingAlong, -chevSpan, tipAlong, 0, lineW, cChev, 'chevron', 0.055)
-    addStrip(wingAlong, chevSpan, tipAlong, 0, lineW, cChev, 'chevron', 0.055)
-  end
-
   return quads
 end
 
@@ -2097,38 +2186,18 @@ function M.drawMarker(anchor, player)
   local now = M.now()
   local dtVis = j.visAt and math.max(0, math.min(0.25, now - j.visAt)) or 0.05
   j.visAt = now
-  local dwellFrac = (j.dwellTargetS and j.dwellTargetS > 0) and math.min(1, math.max(0, j.dwellS / j.dwellTargetS)) or 0
-  local targetGreen = 0
-  if j.inBay or j.dwellMode == 'bay' then
-    targetGreen = 0.45 + 0.55 * dwellFrac
-  elseif j.dwellMode == 'fallback' then
-    targetGreen = 0.35 * dwellFrac
-  end
-  j.visGreen = lerp(j.visGreen or 0, targetGreen, math.min(1, dtVis * 8.0))
+  local tgtCol = M.bayFrameColor(j.inBay, j.inFallback, j.dwellMode, (distXY <= 25 and j.trailerState or nil), j.trailerMissing)
+  local prevCol = j.visCol or M.BAY_IDLE_GREY
+  local tBlend = math.min(1, dtVis * 8.0)
+  local curCol = {
+    lerp(prevCol[1], tgtCol[1], tBlend),
+    lerp(prevCol[2], tgtCol[2], tBlend),
+    lerp(prevCol[3], tgtCol[3], tBlend),
+    lerp(prevCol[4], tgtCol[4], tBlend),
+  }
+  j.visCol = curCol
 
-  local base = MODE_RGBA[j.mode] or MODE_RGBA.taxi
-  local tgt = (j.dwellMode == 'fallback') and FALLBACK_AMBER or BAY_GREEN
-  local g = j.visGreen
-  local rCol = lerp(base[1], tgt[1], g)
-  local gCol = lerp(base[2], tgt[2], g)
-  local bCol = lerp(base[3], tgt[3], g)
-
-  -- Determine bidirectional approach alignment from player velocity or vector toward bay
-  local entryDir = 1
-  if stop.bidirectional then
-    local pvx, pvy = tonumber(player.vx) or 0, tonumber(player.vy) or 0
-    local ax, ay = (hypot(pvx, pvy) > 1.0) and pvx or (sx - player.x), (hypot(pvx, pvy) > 1.0) and pvy or (sy - player.y)
-    if (ax * fx + ay * fy) < 0 then entryDir = -1 end
-  end
-
-  local fillAlpha = j.inBay and 0.20 or 0.14
-  local quads = M.buildBayQuads(
-    sx, sy, fx, fy, rx, ry, spec, bayZ, entryDir, now,
-    { rCol, gCol, bCol, 0.64 },
-    { rCol, gCol, bCol, 0.88 },
-    { rCol, gCol, bCol, 0.52 + 0.28 * g },
-    { rCol, gCol, bCol, fillAlpha }
-  )
+  local quads = M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, bayZ, curCol)
 
   if dd.drawQuadSolid then
     for _, q in ipairs(quads) do
@@ -2151,27 +2220,7 @@ function M.drawMarker(anchor, player)
     end
   elseif dd.drawLineInstance then
     for _, q in ipairs(quads) do
-      if q.kind ~= 'floor_tint' then
-        dd:drawLineInstance(vec3(q.p0.x, q.p0.y, q.p0.z), vec3(q.p1.x, q.p1.y, q.p1.z), 3, ColorF(q.r, q.g, q.b, q.a))
-      end
-    end
-  end
-
-  local beacon = M.buildBayBeacon(sx, sy, bayZ(0, 0), now, distXY, { rCol, gCol, bCol, 0.75 })
-  if beacon and dd.drawLineInstance then
-    local bColObj = ColorF(beacon.r, beacon.g, beacon.b, beacon.alpha)
-    local sColObj = ColorF(beacon.r, beacon.g, beacon.b, beacon.alpha * 0.55)
-    dd:drawLineInstance(
-      vec3(beacon.stem.p0.x, beacon.stem.p0.y, beacon.stem.p0.z),
-      vec3(beacon.stem.p1.x, beacon.stem.p1.y, beacon.stem.p1.z),
-      2, sColObj
-    )
-    for _, seg in ipairs(beacon.ring) do
-      dd:drawLineInstance(
-        vec3(seg.p0.x, seg.p0.y, seg.p0.z),
-        vec3(seg.p1.x, seg.p1.y, seg.p1.z),
-        3, bColObj
-      )
+      dd:drawLineInstance(vec3(q.p0.x, q.p0.y, q.p0.z), vec3(q.p1.x, q.p1.y, q.p1.z), 3, ColorF(q.r, q.g, q.b, q.a))
     end
   end
 end
@@ -2208,12 +2257,17 @@ function M.drawUi(hiddenByUi)
         if leg and leg.legLabel then
           im.TextUnformatted(leg.legLabel)
         end
+        if activeJob.bayHint then
+          im.TextUnformatted(activeJob.bayHint)
+        end
       end
       if activeJob.distM then im.TextUnformatted(string.format('Distance: %.0f m', activeJob.distM)) end
       if activeJob.dwellS > 0 then
         local targetS = activeJob.dwellTargetS or M.BAY_DWELL_S
         local rem = math.max(0, targetS - activeJob.dwellS)
-        local lbl = M.dwellStatusLabel(activeJob.mode, stop and stop.kind, activeJob.dwellMode)
+        local curLeg = (activeJob.stopIndex >= 2) and activeJob.legs and activeJob.legs[activeJob.stopIndex - 1] or nil
+        local upLeg = activeJob.legs and activeJob.legs[activeJob.stopIndex] or nil
+        local lbl = M.dwellStatusLabel(activeJob.mode, stop and stop.kind, activeJob.dwellMode, curLeg and curLeg.legKind, upLeg and upLeg.legKind, activeJob.trailerState)
         im.TextUnformatted(string.format('%s: %.1f / %.1f s (%.1f s left)', lbl, activeJob.dwellS, targetS, rem))
       end
       if im.Button('Skip Stop') then M.skipStop() end
@@ -2251,6 +2305,9 @@ function M.hudPayload()
     local fare = activeJob.mode == 'taxi' and M.computeTaxiFare(activeJob) or nil
     local nextStop = activeJob.stops[activeJob.stopIndex + 1]
     local legInfo = activeJob.mode == 'logistics' and M.activeLegInfo(activeJob) or nil
+    local curLeg = (activeJob.stopIndex >= 2) and activeJob.legs and activeJob.legs[activeJob.stopIndex - 1] or nil
+    local upLeg = activeJob.legs and activeJob.legs[activeJob.stopIndex] or nil
+    local dLbl = M.dwellStatusLabel(activeJob.mode, stop and stop.kind, activeJob.dwellMode, curLeg and curLeg.legKind, upLeg and upLeg.legKind, activeJob.trailerState)
     return {
       state = 'active',
       mode = activeJob.mode,
@@ -2269,7 +2326,7 @@ function M.hudPayload()
       dwellTargetS = targetS,
       dwellRemainingS = math.max(0, targetS - activeJob.dwellS),
       dwellMode = activeJob.dwellMode or 'none',
-      dwellLabel = M.dwellStatusLabel(activeJob.mode, stop and stop.kind, activeJob.dwellMode),
+      dwellLabel = dLbl,
       dwellFrac = math.min(1, math.max(0, activeJob.dwellS / targetS)),
       inBay = activeJob.inBay == true,
       inFallback = activeJob.inFallback == true,
@@ -2291,6 +2348,9 @@ function M.hudPayload()
       legLabel = legInfo and legInfo.legLabel or nil,
       trailerLabel = legInfo and legInfo.trailerLabel or nil,
       trailerState = activeJob.trailerState ~= 'none' and activeJob.trailerState or nil,
+      trailerDetached = activeJob.trailerDetached == true,
+      trailerMissing = activeJob.trailerMissing == true,
+      bayHint = activeJob.bayHint or nil,
       collisions = activeJob.collisions,
       metric = metric,
     }
@@ -2339,6 +2399,9 @@ function M.uiState()
   local p = pending or pendingProbe
   local nextStop = activeJob and activeJob.stops[activeJob.stopIndex + 1] or nil
   local legInfo = (activeJob and activeJob.mode == 'logistics') and M.activeLegInfo(activeJob) or nil
+  local curLeg = (activeJob and activeJob.stopIndex >= 2) and activeJob.legs and activeJob.legs[activeJob.stopIndex - 1] or nil
+  local upLeg = activeJob and activeJob.legs and activeJob.legs[activeJob.stopIndex] or nil
+  local dLbl = activeJob and M.dwellStatusLabel(activeJob.mode, activeStop and activeStop.kind, activeJob.dwellMode, curLeg and curLeg.legKind, upLeg and upLeg.legKind, activeJob.trailerState) or nil
   return {
     pending = p and { mode = p.mode, tier = p.tier } or nil,
     active = activeJob and {
@@ -2358,7 +2421,7 @@ function M.uiState()
       dwellTargetS = activeTarget,
       dwellRemainingS = math.max(0, activeTarget - activeJob.dwellS),
       dwellMode = activeJob.dwellMode or 'none',
-      dwellLabel = M.dwellStatusLabel(activeJob.mode, activeStop and activeStop.kind, activeJob.dwellMode),
+      dwellLabel = dLbl,
       dwellFrac = math.min(1, math.max(0, activeJob.dwellS / activeTarget)),
       inBay = activeJob.inBay == true,
       inFallback = activeJob.inFallback == true,
@@ -2384,6 +2447,9 @@ function M.uiState()
       cargoKg = legInfo and legInfo.cargoKg or nil,
       cargoCurrentKg = activeJob.cargoCurrentKg or 0,
       trailerState = activeJob.trailerState ~= 'none' and activeJob.trailerState or nil,
+      trailerDetached = activeJob.trailerDetached == true,
+      trailerMissing = activeJob.trailerMissing == true,
+      bayHint = activeJob.bayHint or nil,
       collisions = activeJob.collisions,
     } or nil,
     summary = summary,

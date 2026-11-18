@@ -52,18 +52,19 @@ BLD_CLEAR_M = 2.5
 MODES = ("taxi", "bus", "logistics")
 TIERS = {
     "taxi": {
-        "neighborhood": {"min_km": 1.0, "max_km": 3.0, "label": "Neighborhood (1-3 km)"},
-        "city": {"min_km": 4.0, "max_km": 12.0, "label": "City (4-12 km)"},
-        "regional": {"min_km": 20.0, "max_km": 60.0, "label": "Regional (20-60 km)"},
+        "short": {"min_km": 1.0, "max_km": 3.5, "label": "Short Ride (1-3.5 km)"},
+        "city": {"min_km": 4.0, "max_km": 12.0, "label": "City Ride (4-12 km)"},
+        "regional": {"min_km": 20.0, "max_km": 50.0, "label": "Regional Ride (20-50 km)"},
+        "long": {"min_km": 55.0, "max_km": 110.0, "label": "Airport / Long Ride (55-110 km)"},
     },
     "bus": {
         "partial": {"min_stops": 4, "max_stops": 6, "label": "Partial Route (4-6 stops)"},
         "full": {"min_stops": 6, "max_stops": 60, "label": "Full Line (complete OSM route=bus)"},
     },
     "logistics": {
-        "local": {"target_km": 3.0, "min_stops": 3, "max_stops": 4, "label": "Local Van (3 km, 3-4 stops)"},
-        "city": {"target_km": 10.0, "min_stops": 5, "max_stops": 8, "label": "City Delivery (10 km, 5-8 stops)"},
-        "regional": {"target_km": 50.0, "min_stops": 2, "max_stops": 3, "label": "Regional Haul (50 km, 2-3 stops)"},
+        "local": {"target_km": 3.0, "min_stops": 2, "max_stops": 4, "label": "Local Van (3 km, 2-4 stops)"},
+        "city": {"target_km": 10.0, "min_stops": 4, "max_stops": 6, "label": "City Delivery (10 km, 4-6 stops)"},
+        "regional": {"target_km": 50.0, "min_stops": 2, "max_stops": 4, "label": "Regional Haul (50 km, 2-4 stops)"},
         "long": {"target_km": 115.0, "min_stops": 2, "max_stops": 2, "label": "Long Haul (100 km+)"},
     },
 }
@@ -341,25 +342,30 @@ def _clean_vehicle(raw):
     }
 
 
-def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats=(), cargo_kg=0.0, seed=0, idx=1):
+def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats=(), cargo_kg=0.0, seed=0, idx=1, leg_kind=None):
     """Compute realistic job- and cargo-scaled dwell duration (seconds) for a stop."""
     mode = str(mode or "").lower()
     tier = str(tier or "").lower()
     kind = str(kind or "").lower()
+    lk = str(leg_kind or "").lower()
     nm = str(name or "").lower()
     cat_set = {str(c or "").lower() for c in (cats or ())}
     if mode == "taxi":
         is_hub = bool(cat_set & TAXI_HUB_CATS) or any(k in nm for k in ("airport", "station", "terminal", "hotel", "hospital"))
         if kind == "pickup":
             return 2.5 if is_hub else (2.0 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.2)
-        return 3.0 if (is_hub or tier == "regional") else (2.4 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.6)
+        return 3.0 if (is_hub or tier in ("regional", "long")) else (2.4 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.6)
     if mode == "bus":
         is_hub = bool(cat_set & {"bus_station", "station", "terminal"}) or any(k in nm for k in BUS_HUB_KEYWORDS)
         if is_hub:
             return round(4.5 + 0.5 * _stable_index(seed, f"bdw:{idx}", 2), 1)
         return round(3.0 + 0.2 * _stable_index(seed, f"bdw:{idx}", 5), 1)
-    # Logistics: scale with cargo weight & stop kind
+    # Logistics: trailer hookup/unhook and deadhead check-ins take ~2.5 s; solo cargo scales 3.5-8.0 s
+    if lk in ("loaded_trailer", "deadhead") or kind == "deadhead":
+        return 2.5
     kg = max(0.0, float(cargo_kg or 0.0))
+    if lk == "loaded_solo":
+        kg = min(8000.0, kg)
     if kg <= 1400.0:
         lo, hi = 3.5, 4.5
         frac = min(1.0, kg / 1400.0)
@@ -429,7 +435,7 @@ def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
 
     if coupler == "towhitch" and not has_trailer:
         roll = _stable_index(seed, f"towhitch_var:{tier_l}", 100)
-        thresh = 35 if tier_l == "local" else 60
+        thresh = 60 if tier_l == "local" else 75
         use_trailer = roll < thresh
         if use_trailer:
             lo, hi = (800, 2400) if vclass != "car" else (450, 1200)
@@ -516,6 +522,8 @@ def validate_request(msg):
     if mode not in TIERS:
         return None, f"unknown mode {mode!r}"
     tier = str(msg.get("tier") or "").strip().lower()
+    if mode == "taxi" and tier == "neighborhood":
+        tier = "short"
     if tier not in TIERS[mode]:
         return None, f"unknown tier {tier!r} for {mode}"
     try:
@@ -1382,7 +1390,7 @@ def _generate_taxi(md, req, deadline):
     # 2. Drop-off in the selected distance tier
     dropoff = None
     base_brg = heading if heading is not None else float(_stable_index(seed, "taxi_brg", 360))
-    if tier == "neighborhood":
+    if tier == "short":
         for rot in (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0):
             if time.monotonic() > deadline:
                 break
@@ -1407,14 +1415,14 @@ def _generate_taxi(md, req, deadline):
             )
             if dropoff:
                 break
-    else:  # regional (20-60 km)
-        towns = _towns_in_band(pu_stop["lat"], pu_stop["lon"], min_km, max_km, heading, seed, "taxi_reg")
+    else:  # regional (20-50 km) or long / airport (55-110 km)
+        towns = _towns_in_band(pu_stop["lat"], pu_stop["lon"], min_km, max_km, heading, seed, f"taxi_{tier}")
         for _, tlat, tlon, tname in towns[:4]:
             if time.monotonic() > deadline:
                 break
             dropoff = _pick_taxi_spot(
                 md, tlat, tlon, min_km * 1000.0, max_km * 1000.0,
-                pu_stop["lat"], pu_stop["lon"], seed, f"taxi_reg:{tname}", deadline, tname,
+                pu_stop["lat"], pu_stop["lon"], seed, f"taxi_{tier}:{tname}", deadline, tname,
             )
             if dropoff:
                 do_name, do_snap = dropoff
@@ -1422,6 +1430,7 @@ def _generate_taxi(md, req, deadline):
                     dropoff = (do_name, {**do_snap, "_town": tname})
                 break
         if not dropoff:
+            fallback_lbl = "Airport / Long Destination" if tier == "long" else "Regional Destination"
             for rot in (0.0, 45.0, -45.0, 90.0, -90.0):
                 if time.monotonic() > deadline:
                     break
@@ -1429,7 +1438,7 @@ def _generate_taxi(md, req, deadline):
                 alat, alon = offset_latlon(pu_stop["lat"], pu_stop["lon"], dist_target, (base_brg + rot) % 360.0)
                 dropoff = _pick_taxi_spot(
                     md, alat, alon, min_km * 1000.0, max_km * 1000.0,
-                    pu_stop["lat"], pu_stop["lon"], seed, f"taxi_reg_off:{rot}", deadline, "Regional Destination",
+                    pu_stop["lat"], pu_stop["lon"], seed, f"taxi_{tier}_off:{rot}", deadline, fallback_lbl,
                 )
                 if dropoff:
                     break
@@ -1878,7 +1887,8 @@ def _generate_logistics_short(md, req, deadline):
     cur_lat, cur_lon = lat, lon
     pool = list(candidates[:80])
     min_gap = 320.0 if tier == "local" else 650.0
-    want = min_stops + _stable_index(seed, f"n:{tier}", max_stops - min_stops + 1)
+    even_choices = list(range(min_stops, max_stops + 1, 2)) or [min_stops]
+    want = even_choices[_stable_index(seed, f"n:{tier}", len(even_choices))]
     while pool and len(picked) < want and time.monotonic() <= deadline:
         pool.sort(key=lambda c: (dist_m(cur_lat, cur_lon, c[2], c[3]) - c[0] * 150.0, c[4]))
         nxt = None
@@ -1891,27 +1901,31 @@ def _generate_logistics_short(md, req, deadline):
         snapped = _snap_logistics_spot(md, nxt[2], nxt[3], deadline)
         if snapped:
             stop_idx = len(picked) + 1
-            kind = "loading" if stop_idx == 1 else "delivery"
+            kind = "loading" if (stop_idx % 2 == 1) else "delivery"
             picked.append(_make_stop(stop_idx, kind, nxt[4], snapped, zone_radius=13.0, poi_domain=nxt[5]))
             cur_lat, cur_lon = snapped["lat"], snapped["lon"]
 
-    # Road-chain fallback if sparse
-    if len(picked) < min_stops:
-        step_m = (target_km * 1000.0) / max(1, min_stops)
-        for k in range(len(picked) + 1, min_stops + 2):
-            if time.monotonic() > deadline or len(picked) >= min_stops:
+    # Road-chain fallback if sparse; always target an even stop count (complete Pickup -> Delivery pairs)
+    target_even = max(2, len(picked) + (len(picked) % 2)) if len(picked) >= min_stops else min_stops
+    if len(picked) < target_even:
+        step_m = (target_km * 1000.0) / max(1, target_even)
+        for k in range(len(picked) + 1, target_even + 3):
+            if time.monotonic() > deadline or len(picked) >= target_even:
                 break
             alat, alon = offset_latlon(cur_lat, cur_lon, step_m, (base_brg + (k % 3 - 1) * 25.0) % 360.0)
             snapped = snap_to_road(md, alat, alon, radius_m=500.0, classes=LOGISTICS_FALLBACK_CLASSES, deadline=deadline)
             if snapped and all(dist_m(snapped["lat"], snapped["lon"], prev["lat"], prev["lon"]) >= 250.0 for prev in picked):
                 stop_idx = len(picked) + 1
-                nm = f"{snapped['road']} Drop-off {stop_idx}" if snapped.get("road") else f"Delivery Point {stop_idx}"
+                kind = "loading" if (stop_idx % 2 == 1) else "delivery"
+                nm = f"{snapped['road']} {'Pickup' if kind == 'loading' else 'Drop-off'} {stop_idx}" if snapped.get("road") else f"{'Pickup' if kind == 'loading' else 'Delivery'} Point {stop_idx}"
                 bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
                 curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
-                picked.append(_make_stop(stop_idx, "loading" if stop_idx == 1 else "delivery", nm, curb, zone_radius=13.0, stop_type="kerbside"))
+                picked.append(_make_stop(stop_idx, kind, nm, curb, zone_radius=13.0, stop_type="kerbside"))
                 cur_lat, cur_lon = curb["lat"], curb["lon"]
 
-    if not picked:
+    if len(picked) > 2 and len(picked) % 2 == 1:
+        picked.pop()
+    if len(picked) < 2:
         return {"ok": False, "error": "No drivable delivery locations found nearby"}
     return {
         "ok": True,
@@ -2020,13 +2034,18 @@ def _generate_logistics_haul(md, req, deadline):
     if not dest:
         return {"ok": False, "error": "Could not find a freight destination in range"}
 
-    # Optional midpoint stop on Regional Haul (50 km, 2-3 stops)
+    # Optional midpoint 2-stop cycle (Delivery + next Pickup) on Regional Haul (50 km, 2 or 4 stops)
     if tier == "regional" and _stable_index(seed, "reg_mid", 2) == 1 and time.monotonic() < deadline - 0.35:
         mlat = 0.5 * (stops[0]["lat"] + dest[1]["lat"])
         mlon = 0.5 * (stops[0]["lon"] + dest[1]["lon"])
-        mid = _find_freight_hub(md, mlat, mlon, seed, "log_mid", deadline, "Midpoint")
-        if mid and dist_m(stops[0]["lat"], stops[0]["lon"], mid[1]["lat"], mid[1]["lon"]) >= 8000.0:
-            stops.append(_make_stop(2, "delivery", mid[0], mid[1], zone_radius=15.0, poi_domain=mid[1].get("_poiDomain")))
+        mid_del = _find_freight_hub(md, mlat, mlon, seed, "log_mid_del", deadline, "Midpoint")
+        if mid_del and dist_m(stops[0]["lat"], stops[0]["lon"], mid_del[1]["lat"], mid_del[1]["lon"]) >= 8000.0:
+            brg_next = bearing_deg(mid_del[1]["lat"], mid_del[1]["lon"], dest[1]["lat"], dest[1]["lon"])
+            p2_lat, p2_lon = offset_latlon(mid_del[1]["lat"], mid_del[1]["lon"], 950.0, brg_next)
+            mid_load = _find_freight_hub(md, p2_lat, p2_lon, seed, "log_mid_load", deadline, "Midpoint Depot")
+            if mid_load and dist_m(mid_del[1]["lat"], mid_del[1]["lon"], mid_load[1]["lat"], mid_load[1]["lon"]) >= 300.0:
+                stops.append(_make_stop(2, "delivery", mid_del[0], mid_del[1], zone_radius=15.0, poi_domain=mid_del[1].get("_poiDomain")))
+                stops.append(_make_stop(3, "loading", mid_load[0], mid_load[1], zone_radius=15.0, poi_domain=mid_load[1].get("_poiDomain")))
 
     d_name, d_snap = dest
     d_addr = d_snap.get("road") or ""
@@ -2084,27 +2103,18 @@ def _apply_logistics_cargo_and_dwell(res, req):
         res["legs"] = []
         return res
 
-    # Build pickup -> delivery cycles. For >= 4 stops, interleave deadhead legs between cycles.
-    cycles = []
-    if n_stops <= 3:
-        cycles.append((0, list(range(1, n_stops))))
-    else:
-        i = 0
-        while i < n_stops:
-            rem_stops = n_stops - i
-            if rem_stops == 3:
-                cycles.append((i, [i + 1, i + 2]))
-                break
-            elif rem_stops == 2:
-                cycles.append((i, [i + 1]))
-                break
-            else:
-                cycles.append((i, [i + 1]))
-                i += 2
+    # Enforce strict complete 2-stop Pickup -> Delivery cycles (no half-dangling 3-stop splits)
+    if n_stops > 2 and n_stops % 2 == 1:
+        stops = stops[:-1]
+        res["stops"] = stops
+        n_stops = len(stops)
+
+    cycles = [(i, [i + 1]) for i in range(0, n_stops - 1, 2)]
 
     legs = []
     first_cargo = None
     stop_cargo_kg = [0] * n_stops
+    stop_leg_kind = {}
 
     for c_idx, (load_i, del_indices) in enumerate(cycles):
         stops[load_i]["kind"] = "loading"
@@ -2130,6 +2140,7 @@ def _apply_logistics_cargo_and_dwell(res, req):
             leg_kind = "loaded_solo"
             trl_model, trl_label = None, None
 
+        stop_leg_kind[load_i] = leg_kind
         n_del = len(del_indices)
         per_del = mass_kg // n_del
         rem = mass_kg - per_del * n_del
@@ -2142,6 +2153,7 @@ def _apply_logistics_cargo_and_dwell(res, req):
             drop_kg = per_del + (rem if d_pos == n_del - 1 else 0)
             stops[di]["cargoDeltaKg"] = -drop_kg
             stop_cargo_kg[di] = carried
+            stop_leg_kind[di] = leg_kind
             legs.append({
                 "index": len(legs) + 1,
                 "fromStop": prev_idx + 1,
@@ -2177,6 +2189,7 @@ def _apply_logistics_cargo_and_dwell(res, req):
         s["dwellTargetS"] = compute_dwell_target_s(
             "logistics", tier, s.get("kind"), s.get("stopType"),
             s.get("name"), cargo_kg=stop_cargo_kg[idx_s], seed=seed, idx=s.get("index", idx_s + 1),
+            leg_kind=stop_leg_kind.get(idx_s),
         )
     res["cargo"] = first_cargo
     res["vehicleClass"] = first_cargo["vehicleClass"]
