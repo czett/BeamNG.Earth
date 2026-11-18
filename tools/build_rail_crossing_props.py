@@ -85,12 +85,13 @@ class Mesh:
                            ((-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1))):
             self.face(mat, [v(*a), v(*b), v(*d), v(*e)])
 
-    def cylinder(self, mat, x, y, z0, z1, r, caps=True):
+    def cylinder(self, mat, x, y, z0, z1, r, caps=True, segs=None):
         """An upright cylinder."""
-        ang = [2 * math.pi * i / self.segs for i in range(self.segs)]
+        n = self.segs if segs is None else segs
+        ang = [2 * math.pi * i / n for i in range(n)]
         ring = [(x + r * math.cos(a), y + r * math.sin(a)) for a in ang]
-        for i in range(self.segs):
-            (ax_, ay_), (bx, by) = ring[i], ring[(i + 1) % self.segs]
+        for i in range(n):
+            (ax_, ay_), (bx, by) = ring[i], ring[(i + 1) % n]
             self.face(mat, [(ax_, ay_, z0), (bx, by, z0), (bx, by, z1), (ax_, ay_, z1)])
         if caps:
             self.face(mat, [(px, py, z1) for px, py in ring])

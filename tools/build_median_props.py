@@ -125,7 +125,8 @@ def giveway(near):
         for (x0, z0), (x1, z1) in zip(edge, edge[1:] + edge[:1]):
             m.face("bne_cable_steel", [(x0, back, mid + z0), (x1, back, mid + z1), (x1, front, mid + z1),
                                        (x0, front, mid + z0)])
-        m.cylinder("bne_cable_steel", 0.0, 0.0, -POST_SINK, B1_TOP - 0.05, B1_POST, caps=False)
+    m.cylinder("bne_cable_steel", 0.0, 0.0, -POST_SINK, B1_TOP - 0.05, B1_POST, caps=False,
+               segs=None if near else 4)
     return m
 
 
@@ -148,7 +149,8 @@ def moose(near):
         for (x0, z0), (x1, z1) in zip(edge, edge[1:] + edge[:1]):
             m.face("bne_cable_steel", [(x0, back, mid + z0), (x1, back, mid + z1), (x1, front, mid + z1),
                                        (x0, front, mid + z0)])
-        m.cylinder("bne_cable_steel", 0.0, 0.0, -POST_SINK, A19_TOP - 0.05, B1_POST, caps=False)
+    m.cylinder("bne_cable_steel", 0.0, 0.0, -POST_SINK, A19_TOP - 0.05, B1_POST, caps=False,
+               segs=None if near else 4)
     return m
 
 
@@ -209,9 +211,9 @@ def se_sign(group, near):
                 m.face("bne_cable_steel", [(x0, back, mid + z0), (x1, back, mid + z1), (x1, front, mid + z1),
                                            (x0, front, mid + z0)])
         z += h + SE_GAP
-    if near:
-        for x in poles:
-            m.cylinder("bne_cable_steel", x, 0.0, -POST_SINK, z - SE_GAP - 0.05, B1_POST, caps=False)
+    for x in poles:
+        m.cylinder("bne_cable_steel", x, 0.0, -POST_SINK, z - SE_GAP - 0.05, B1_POST, caps=False,
+                   segs=None if near else 4)
     return m
 
 
@@ -253,10 +255,10 @@ def de_sign(group, near):
             for (x0, z0), (x1, z1) in zip(edge, edge[1:] + edge[:1]):
                 m.face("bne_cable_steel", [(x0, back, mid + z0), (x1, back, mid + z1), (x1, front, mid + z1),
                                            (x0, front, mid + z0)])
-    if near:
-        _, shape, size, mid = DE_SIGNS[group][-1]
-        _, z0, _, z1 = designs.extent(shape, size)
-        m.cylinder("bne_cable_steel", 0.0, 0.0, -designs.SINK_M, mid + (z0 + z1) / 2 + (z1 - z0) / 4, designs.POST_R_M)
+    _, shape, size, mid = DE_SIGNS[group][-1]
+    _, z0, _, z1 = designs.extent(shape, size)
+    m.cylinder("bne_cable_steel", 0.0, 0.0, -designs.SINK_M, mid + (z0 + z1) / 2 + (z1 - z0) / 4,
+               designs.POST_R_M, caps=near, segs=None if near else 4)
     return m
 
 

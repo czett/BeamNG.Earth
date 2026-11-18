@@ -699,13 +699,13 @@ do -- the median barriers' groups (server guardrails.GROUPS): shapes at scale 1,
     'guard rails are barriers, trees not')
 end
 do -- Germany's junction signs (server designs.GROUPS): each mesh at its true size, never thinned, one spelling
-  for _, g in ipairs({ 'de_z205', 'de_z206_g1', 'de_z306_p4_g3', 'de_z307' }) do
+  for _, g in ipairs({ 'de_z205', 'de_z205_z215', 'de_z206_g1', 'de_z306', 'de_z306_p4_g3', 'de_z307' }) do
     local c = trees.CATALOG[g] and trees.CATALOG[g][1] or {}
     T.check(c[1] == '/levels/beamng_earth/art/shapes/beamngEarth/bne_' .. g, g .. ': its own mesh')
     local shape, sc = trees.pick(g, c[2] or 1, 0.3)
     T.check(c[1] ~= nil and shape == c[1] and math.abs(sc - 1) < 1e-9, g .. ': at 1:1')
-    T.check(trees.isBarrier(g) and trees.GROUP_MAX_M[g] == 300 and trees.ONE_SPELLING[g],
-      g .. ': kept, near only, one spelling')
+    T.check(trees.isBarrier(g) and trees.GROUP_MAX_M[g] == 300 and trees.ONE_SPELLING[g] and not trees.NO_COLLIDE[g],
+      g .. ': kept, near only, one spelling, solid')
   end
 end
 do -- stock world props (server worldprops.py): the catalog height is the mesh, so that height is 1:1
