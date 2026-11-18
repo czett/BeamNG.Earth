@@ -262,7 +262,7 @@ do
   T.check(tm.pickTrailerModel('towhitch', 'groceries', 'local', function() return true end) == 'boxutility', 'towhitch local picks boxutility')
 
   local cands = tm.trailerSpawnCandidates(0, 0, 10, 0, 1, 3.0, 6.0)
-  T.check(#cands == 5 and cands[1].y < -9.0, 'trailer spawn candidates placed safely behind player')
+  T.check(#cands >= 5 and cands[1].y < -9.0, 'trailer spawn candidates placed safely behind player')
 
   local veLoad = tm.buildCargoVeScript(4500)
   local veReset = tm.buildCargoVeScript(0)
@@ -316,6 +316,97 @@ do
   T.check(#deleted == 1 and deleted[1] == 801, 'cancelJob deletes job-owned spawned trailer')
   tm.playerVeh = origPlayerVeh
   scenetree, core_vehicles, be = oldScenetree, oldCv, oldBe
+end
+
+-- 9. Phase 3: Probe timeout, trailer discovery/domain matching, bidirectional bays, crash cap, rural jerk, Taxi/Bus depth
+do
+  T.check(tm.PROBE_TIMEOUT_S == 0.6, 'coupler probe timeout extended to 0.6 s')
+  T.check(tm.PROBE_VE:find('v%.config%.parts') ~= nil, 'PROBE_VE inspects v.config.parts slot names')
+
+  local disc = tm.discoverTrailerModels(
+    function(m) return m == 'tanker' or m == 'reefer' or m == 'flatbed' or m == 'boxutility' or m == 'mod_semi' end,
+    function() return { models = { mod_semi = { Type = 'Trailer' } } } end
+  )
+  T.check(#disc.fifthwheel >= 4 and #disc.towhitch >= 1, 'discoverTrailerModels finds base + modded trailers')
+  T.check(tm.pickTrailerModel('fifthwheel', 'fuel', 'long', function(m) return m == 'tanker' or m == 'dryvan' end, 'fuel') == 'tanker', 'fuel picks tanker')
+  T.check(tm.pickTrailerModel('fifthwheel', 'groceries', 'city', function(m) return m == 'reefer' or m == 'dryvan' end, 'food') == 'reefer', 'food picks reefer')
+
+  local cands = tm.trailerSpawnCandidates(0, 0, 10, 0, 1, 3.0, 6.0)
+  T.check(#cands == 8 and cands[1].mode == 'rear' and cands[6].mode == 'front' and cands[7].mode == 'lane', 'trailerSpawnCandidates includes rear, front, and lane fallbacks')
+
+  -- Crash cap at 65 & rural vertical bump tolerance
+  local sCrash, smCrash = tm.computeScore({ elapsedS = 180, harshS = 0, collisions = 12, damageDelta = 25000 })
+  T.check(sCrash == 35 and smCrash == 100, 'severe multi-crash caps collisionPen at 65 -> score 35')
+  local hBump, susp = tm.isHarshSample(1.2, 13.5, 4.0, false, false)
+  T.check(not hBump and not susp, 'isolated 13.5 m/s^2 rural bump is not harsh')
+  local hVip = tm.isHarshSample(4.6, 0, 2.0, false, true)
+  T.check(hVip, 'VIP ride enforces stricter horizontal smoothness threshold')
+
+  -- Taxi archetype bonuses (+40% express fare, +35% vip tip)
+  local mExp = tm.computeTaxiFare({ passengerOnBoard = true, fareDrivenM = 3000, fareMult = 1.40, _scoreHint = 90 })
+  local mStd, tStd = tm.computeTaxiFare({ passengerOnBoard = true, fareDrivenM = 3000, fareMult = 1.0, tipMult = 1.0, _scoreHint = 90 })
+  local _, tVip = tm.computeTaxiFare({ passengerOnBoard = true, fareDrivenM = 3000, fareMult = 1.0, tipMult = 1.35, _scoreHint = 90 })
+  T.check(mExp > mStd * 1.35 and tVip > tStd * 1.30, 'Express +40% fare and VIP +35% tip applied')
+
+  -- Bidirectional bay entry & 3x5 terrain-conforming thick quads
+  local dFwd, okFwd = tm.bayEntryDir(0, 0, true)
+  local dRev, okRev = tm.bayEntryDir(180, 0, true)
+  T.check(dFwd == 1 and okFwd and dRev == -1 and okRev, 'bidirectional bay allows 0 deg and 180 deg entry')
+  local grid = {
+    { 10, 10, 10 }, { 10.2, 10.2, 10.2 }, { 10.5, 10.5, 10.5 }, { 10.8, 10.8, 10.8 }, { 11.0, 11.0, 11.0 }
+  }
+  T.check(math.abs(tm.sampleBayGridZ(grid, 0.5, 0.5, 0) - 10.5) < 1e-6, 'sampleBayGridZ bilinearly interpolates terrain')
+  local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end, 1, 1.0, {1,1,1,0.7}, {1,1,1,0.9}, {1,1,1,0.8})
+  T.check(#quads >= 15, 'buildBayQuads emits stop bar, brackets, pads, side rails, and 3 chevrons')
+
+  -- Bus live passenger load, schedule text, nextStopName & Taxi nextPassenger() chaining
+  T.check(tm.formatScheduleDelta(10) == 'On Time' and tm.formatScheduleDelta(70) == '+1m 10s', 'formatScheduleDelta formats On Time and +1m 10s')
+  local rBus = tm.startJob('bus', 'partial')
+  T.check(rBus.ok, 'bus job started')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true,
+    mode = 'bus',
+    tier = 'partial',
+    bus = { capacity = 40, paxMassPerPaxKg = 75 },
+    stops = {
+      { index = 1, kind = 'bus_stop', name = 'Central', lat = 39.286, lon = -76.610, paxBoard = 10, paxAlight = 0, targetArrivalS = 30, dwellTargetS = 2.0 },
+      { index = 2, kind = 'bus_stop', name = 'North Gate', lat = 39.290, lon = -76.610, paxBoard = 6, paxAlight = 2, targetArrivalS = 80, dwellTargetS = 2.0 },
+      { index = 3, kind = 'bus_stop', name = 'Terminus', lat = 39.295, lon = -76.610, paxBoard = 0, paxAlight = 14, targetArrivalS = 140, dwellTargetS = 2.0 },
+    },
+  })
+  T.check(tm.hudPayload().nextStopName == 'North Gate' and tm.hudPayload().paxCount == 0, 'bus hudPayload exposes nextStopName and initial 0 pax')
+  local anchorB = { geodeticToEnu = function(_, lat) return 0, lat == 39.286 and 0 or 500 end }
+  local plB = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.2 }
+  for _ = 1, 4 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorB, plB, false, false) end
+  local pB2 = tm.hudPayload()
+  T.check(pB2.stopIndex == 2 and pB2.paxCount == 10 and pB2.nextStopName == 'Terminus', 'completing bus stop 1 updates paxCount=10 and nextStopName=Terminus')
+  tm.cancelJob()
+
+  -- Taxi nextPassenger() chains directly from summary
+  local rTx = tm.startJob('taxi', 'city')
+  T.check(rTx.ok, 'taxi city started')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true,
+    mode = 'taxi',
+    tier = 'city',
+    taxi = { archetype = 'express', label = 'Airport / Station Express', fareMult = 1.4, tipMult = 1.0, targetMult = 0.8, paxCount = 2, paxMassKg = 160 },
+    stops = {
+      { index = 1, kind = 'pickup', name = 'Hotel', lat = 39.286, lon = -76.610, dwellTargetS = 2.0 },
+      { index = 2, kind = 'dropoff', name = 'Airport', lat = 39.320, lon = -76.610, dwellTargetS = 2.0 },
+    },
+  })
+  local anchorT = { geodeticToEnu = function(_, lat) return 0, lat == 39.286 and 0 or 3800 end }
+  local plT = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.2 }
+  for _ = 1, 4 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorT, plT, false, false) end
+  T.check(tm.hudPayload().passengerOnBoard and tm.hudPayload().paxCount == 2, 'taxi pickup boards 2 pax')
+  plT.y = 3800
+  for _ = 1, 4 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorT, plT, false, false) end
+  T.check(tm.hudPayload().state == 'summary', 'taxi dropoff reaches summary')
+  local rNext = tm.nextPassenger()
+  T.check(rNext.ok and tm.hudPayload().state == 'pending' and sentReqs[#sentReqs].tier == 'city', 'nextPassenger chains into a new city taxi job')
+  tm.cancelJob()
 end
 
 T.done('test_transport_modes')

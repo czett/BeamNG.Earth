@@ -21,6 +21,18 @@ T.check(H.update(8.5, get) and #sent == 3, 'a new app: the current state at once
 local p = H.payload({ banner = { text = 'World server not running', level = 'error', visible = true }, transport = { state = 'active', mode = 'taxi', stopIndex = 1, stopCount = 2 } })
 T.check(p.banner == 'World server not running' and p.bannerLevel == 'error' and p.status == '', 'the banner when there is one')
 T.check(p.transport and p.transport.mode == 'taxi' and p.transport.stopIndex == 1, 'transport payload forwarded')
+local busStep = 0
+H.setMounted('transport', true)
+local busGet = function()
+  busStep = busStep + 1
+  return {
+    status = '', credits = '', banner = { text = '', level = 'info', visible = false },
+    transport = { state = 'active', mode = 'bus', stopIndex = 1, stopCount = 4, paxCount = busStep == 1 and 8 or 14, paxCapacity = 40, scheduleText = 'On Time', nextStopName = 'Central' },
+  }
+end
+T.check(H.update(10, busGet), 'bus hud update sent')
+T.check(H.update(10.3, busGet), 'bus hud re-emits when paxCount changes')
+H.setMounted('transport', false)
 H.setMounted('status', false); H.setMounted('banner', false)
 T.check(not H.any() and not H.mounted('status'), 'all apps gone')
 -- the minimap's label: the town, else the street, else the stock fallback; a level's own zone still first

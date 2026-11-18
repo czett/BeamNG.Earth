@@ -421,5 +421,65 @@ class Phase2CargoAndDwellTest(unittest.TestCase):
         self.assertTrue(9.0 <= tm.compute_dwell_target_s("logistics", "long", "loading", cargo_kg=24000) <= 12.0)
 
 
+class Phase3SemanticAndGameplayTest(unittest.TestCase):
+    def test_semantic_cargo_matching(self):
+        self.assertEqual(tm.classify_poi_cargo_domain(cat="supermarket", name="Fresh Mart"), "food")
+        self.assertEqual(tm.classify_poi_cargo_domain(cat="pharmacy", name="City Pharmacy"), "medical")
+        self.assertEqual(tm.classify_poi_cargo_domain(cat="hardware_store", name="Ace Hardware"), "hardware")
+        self.assertEqual(tm.classify_poi_cargo_domain(cat="fuel", name="Shell Station"), "fuel")
+        self.assertEqual(tm.classify_poi_cargo_domain(bld_class="warehouse", name="Central Hub"), "industrial")
+        self.assertEqual(tm.classify_poi_cargo_domain(name="Mystery Building"), "general")
+
+        # Supermarket never gets steel or machinery
+        for seed in range(25):
+            c = tm.generate_cargo_manifest({"class": "semi", "coupler": "fifthwheel"}, "city", seed, dest_domain="food")
+            self.assertEqual(c["domain"], "food")
+            self.assertNotIn(c["type"], ("steel", "machinery", "fuel"))
+
+        c_fuel = tm.generate_cargo_manifest({"class": "semi", "coupler": "fifthwheel"}, "regional", 1, dest_domain="fuel")
+        self.assertEqual(c_fuel["type"], "fuel")
+
+    def test_towhitch_intentional_variety(self):
+        v = {"class": "van", "coupler": "towhitch", "hasTrailer": False}
+        local_trailers = sum(1 for s in range(60) if tm.generate_cargo_manifest(v, "local", s)["useTrailer"])
+        city_trailers = sum(1 for s in range(60) if tm.generate_cargo_manifest(v, "city", s)["useTrailer"])
+        self.assertTrue(10 <= local_trailers <= 32, f"local_trailers={local_trailers}")
+        self.assertTrue(24 <= city_trailers <= 48, f"city_trailers={city_trailers}")
+        for s in range(20):
+            m = tm.generate_cargo_manifest(v, "local", s)
+            if not m["useTrailer"]:
+                self.assertTrue(350 <= m["massKg"] <= 1400)
+
+    def test_taxi_archetypes_and_bus_passengers_schedule(self):
+        md = _seed_corridor_md()
+        arches = set()
+        for s in range(30):
+            rt = tm.generate_job(md, None, mode="taxi", tier="city", lat=39.285, lon=-76.610, heading=20.0, seed=s)
+            self.assertTrue(rt["ok"], rt)
+            tx = rt["taxi"]
+            arches.add(tx["archetype"])
+            self.assertIn(tx["paxCount"], (1, 2, 3))
+            self.assertEqual(tx["paxMassKg"], tx["paxCount"] * 80)
+        self.assertEqual(arches, {"standard", "express", "vip"})
+
+        tm._bus_cache.clear()
+        bad_net = SimpleNamespace(get=mock.Mock(side_effect=RuntimeError("offline")))
+        rb = tm.generate_job(md, bad_net, mode="bus", tier="partial", lat=39.285, lon=-76.610, heading=20.0, seed=3)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(rb["bus"]["capacity"], 40)
+        prev_t = 0.0
+        for idx, st in enumerate(rb["stops"]):
+            self.assertGreater(st["targetArrivalS"], prev_t)
+            prev_t = st["targetArrivalS"]
+            if idx == 0:
+                self.assertEqual(st["paxAlight"], 0)
+            else:
+                self.assertTrue(0 <= st["paxAlight"] <= 8)
+            self.assertTrue(2 <= st["paxBoard"] <= 12)
+            self.assertTrue(0 <= st["paxAfter"] <= 40)
+            self.assertIn("roadClass", st)
+            self.assertIn("bidirectional", st)
+
+
 if __name__ == "__main__":
     unittest.main()
