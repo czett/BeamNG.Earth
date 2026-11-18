@@ -76,9 +76,13 @@ end
 -- 2b. Rectangular bay projection & guaranteed completable fail-safe (primary 2.5 s vs 15 m fallback 5.0 s)
 do
   local specTaxi = tm.baySpec('taxi', 'neighborhood')
+  local specLocal = tm.baySpec('logistics', 'local')
   local specBus = tm.baySpec('bus', 'full')
-  T.check(specTaxi.width == 3.4 and specTaxi.length == 8.5, 'taxi bay is 3.4 x 8.5 m')
-  T.check(specBus.width == 3.8 and specBus.length == 14.0, 'bus bay is 3.8 x 14.0 m')
+  local specSemi = tm.baySpec('logistics', 'long')
+  T.check(specTaxi.width == 2.7 and specTaxi.length == 6.2 and specTaxi.halfW == 1.35 and specTaxi.halfL == 3.10, 'taxi bay is compact 2.7 x 6.2 m')
+  T.check(specLocal.width == 2.7 and specLocal.length == 6.2, 'logistics local bay is compact 2.7 x 6.2 m')
+  T.check(specBus.width == 3.2 and specBus.length == 11.5 and specBus.halfW == 1.60 and specBus.halfL == 5.75, 'bus bay is compact 3.2 x 11.5 m')
+  T.check(specSemi.width == 3.2 and specSemi.length == 11.5 and specSemi.longTol == 7.75, 'logistics city+ bay is 3.2 x 11.5 m with forgiving 7.75 m longTol')
 
   local fx, fy, rx, ry = tm.bayFrame(0, 1, 90)
   local longOff, latOff = tm.bayOffsets(4, -2, 0, 0, fx, fy, rx, ry)
@@ -371,18 +375,55 @@ do
   }
   T.check(math.abs(tm.sampleBayGridZ(grid, 0.5, 0.5, 0) - 10.5) < 1e-6, 'sampleBayGridZ bilinearly interpolates terrain')
   local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end)
-  local onlyFrame, liftOk, widthOk = true, true, true
+  local cornerBands, edgeBars = 0, 0
+  local hasOuter, hasInner, hasTop = false, false, false
+  local minZ, maxZ = math.huge, -math.huge
+  local bandSeen, edgeSeen, segCoords = {}, {}, {}
+  local barWidthOk, barHeightOk, shadeDiffOk = true, true, false
+  local minColR, maxColR = math.huge, -math.huge
   for _, q in ipairs(quads) do
-    if q.kind ~= 'frame_rail' then onlyFrame = false end
-    if math.abs((q.p0.z or 0) - 10.10) > 1e-5 then liftOk = false end
-    if math.abs((q.widthM or 0) - 0.09) > 1e-5 then widthOk = false end
+    for _, pt in ipairs({ q.p0, q.p1, q.p2, q.p3 }) do
+      minZ = math.min(minZ, pt.z)
+      maxZ = math.max(maxZ, pt.z)
+    end
+    minColR = math.min(minColR, q.r)
+    maxColR = math.max(maxColR, q.r)
+    if q.face == 'outer' then hasOuter = true end
+    if q.face == 'inner' then hasInner = true end
+    if q.face == 'top' then hasTop = true end
+    if q.kind == 'corner_band' then
+      cornerBands = cornerBands + 1
+      if q.band then bandSeen[q.band] = true end
+    elseif q.kind == 'edge_bar' then
+      edgeBars = edgeBars + 1
+      if q.edge then edgeSeen[q.edge] = true end
+      if math.abs((q.widthM or 0) - 0.16) > 1e-5 then barWidthOk = false end
+      if math.abs((q.heightM or 0) - 0.14) > 1e-5 then barHeightOk = false end
+      if q.edge == 'left' and q.face == 'outer' and q.segmentId then
+        segCoords[q.segmentId] = segCoords[q.segmentId] or { minY = math.huge, maxY = -math.huge }
+        segCoords[q.segmentId].minY = math.min(segCoords[q.segmentId].minY, q.p0.y, q.p1.y)
+        segCoords[q.segmentId].maxY = math.max(segCoords[q.segmentId].maxY, q.p0.y, q.p1.y)
+      end
+    end
   end
-  T.check(#quads >= 28 and onlyFrame and liftOk and widthOk, 'Phase 5: buildBayQuads emits only 0.10 m elevated 0.09 m rounded frame_rail quads')
+  shadeDiffOk = (maxColR - minColR) > 0.05
+  -- Verify disconnected gaps between consecutive left-side bars
+  local leftSegs = {}
+  for _, sc in pairs(segCoords) do leftSegs[#leftSegs + 1] = sc end
+  table.sort(leftSegs, function(a, b) return a.minY < b.minY end)
+  local sideGapsOk = #leftSegs >= 3
+  for i = 2, #leftSegs do
+    if (leftSegs[i].minY - leftSegs[i - 1].maxY) < 0.25 then sideGapsOk = false end
+  end
+  T.check(cornerBands > 0 and bandSeen[1] and bandSeen[2] and bandSeen[3], '3D stacked corner brackets have 3 separated bands')
+  T.check(edgeBars > 0 and edgeSeen.left and edgeSeen.right and edgeSeen.front and edgeSeen.rear and barWidthOk and barHeightOk and sideGapsOk, 'disconnected 0.16 x 0.14 m 3D edge bars span all 4 sides with clear gaps')
+  T.check(hasOuter and hasInner and hasTop and math.abs(minZ - 10.10) < 1e-5 and math.abs(maxZ - 10.65) < 1e-5 and shadeDiffOk, '3D enclosure floats 0.10..0.65 m above terrain with inner/outer/top faces and shading')
   local cIdle = tm.bayFrameColor(false, false, 'none', nil, false)
   local cGreen = tm.bayFrameColor(true, false, 'bay', 'attached', false)
   local cAmber = tm.bayFrameColor(true, false, 'none', 'attached', true)
   local cStaged = tm.bayFrameColor(false, false, 'none', 'staged', false)
-  T.check(cIdle == tm.BAY_IDLE_GREY and cGreen == tm.BAY_ALIGNED_GREEN and cAmber == tm.BAY_PARTIAL_AMBER and cStaged == tm.BAY_PARTIAL_AMBER, 'Phase 5: bayFrameColor transitions cleanly between grey, emerald green, and warm amber')
+  T.check(cIdle == tm.BAY_IDLE_GREY and cGreen == tm.BAY_ALIGNED_GREEN and cAmber == tm.BAY_PARTIAL_AMBER and cStaged == tm.BAY_PARTIAL_AMBER, 'bayFrameColor transitions cleanly between cool grey, emerald green, and warm amber')
+  T.check(math.abs(tm.BAY_IDLE_GREY[4] - 0.44) < 1e-5 and math.abs(tm.BAY_ALIGNED_GREEN[4] - 0.62) < 1e-5 and math.abs(tm.BAY_PARTIAL_AMBER[4] - 0.55) < 1e-5, 'bay colors use semi-transparent alpha levels')
 
   -- Bus live passenger load, schedule text, nextStopName & Taxi nextPassenger() chaining
   T.check(tm.formatScheduleDelta(10) == 'On Time' and tm.formatScheduleDelta(70) == '+1m 10s', 'formatScheduleDelta formats On Time and +1m 10s')
