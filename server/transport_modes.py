@@ -103,6 +103,51 @@ CARGO_CATALOG = {
     ],
 }
 
+TRAILER_CANDIDATES = {
+    "fifthwheel": {
+        "fuel": ("tanker", "dryvan", "container"),
+        "fuel_drums": ("dryvan", "flatbed", "container"),
+        "food": ("reefer", "dryvan", "container"),
+        "groceries": ("reefer", "dryvan", "container"),
+        "chilled_food": ("reefer", "dryvan", "container"),
+        "bulk_food": ("reefer", "dryvan", "container"),
+        "beverages": ("dryvan", "reefer", "container"),
+        "medical": ("reefer", "dryvan", "container"),
+        "pharma": ("reefer", "dryvan", "container"),
+        "hardware": ("flatbed", "container", "dryvan"),
+        "timber": ("flatbed", "log_trailer", "container"),
+        "steel": ("flatbed", "dryvan", "container"),
+        "machinery": ("flatbed", "lowboy", "dryvan", "container"),
+        "industrial": ("flatbed", "container", "dryvan", "frameless_dump"),
+        "aggregates": ("frameless_dump", "flatbed", "container"),
+        "retail": ("dryvan", "container", "reefer", "flatbed"),
+        "dry_goods": ("dryvan", "container", "reefer", "flatbed"),
+        "pallets": ("dryvan", "container", "flatbed", "reefer"),
+        "general": ("dryvan", "container", "flatbed", "reefer"),
+        "default": ("dryvan", "flatbed", "container", "reefer", "frameless_dump", "tanker"),
+    },
+    "towhitch": {
+        "heavy": ("boxutility_large", "cargotrailer", "boxutility", "tsfb"),
+        "light": ("boxutility", "boxutility_large", "tsfb", "cargotrailer"),
+    },
+}
+
+TRAILER_LABELS = {
+    "dryvan": "Dry Van Trailer",
+    "reefer": "Reefer Trailer",
+    "tanker": "Tanker Trailer",
+    "flatbed": "Flatbed Trailer",
+    "container": "Container Trailer",
+    "frameless_dump": "Dump Trailer",
+    "log_trailer": "Log Trailer",
+    "lowboy": "Lowboy Trailer",
+    "boxtrailer": "Box Trailer",
+    "boxutility": "Utility Trailer",
+    "boxutility_large": "Large Utility Trailer",
+    "cargotrailer": "Cargo Trailer",
+    "tsfb": "Flatbed Utility Trailer",
+}
+
 DOMAIN_CARGO_CATALOG = {
     "food": {
         "car": [("chilled_parcels", "Fresh Food & Bakery Boxes"), ("beverages", "Cafe & Beverage Crates")],
@@ -275,11 +320,24 @@ def _clean_vehicle(raw):
             vclass = "van"
         else:
             vclass = "car"
+    tmodels = None
+    raw_tm = raw.get("trailerModels")
+    if isinstance(raw_tm, dict):
+        tmodels = {}
+        for ck in ("fifthwheel", "towhitch"):
+            lst = raw_tm.get(ck)
+            if isinstance(lst, list):
+                cleaned = [str(m).strip().lower() for m in lst if isinstance(m, str) and m.strip()][:24]
+                if cleaned:
+                    tmodels[ck] = cleaned
+        if not tmodels:
+            tmodels = None
     return {
         "class": vclass,
         "massKg": round(mass_kg, 1) if mass_kg is not None else None,
         "coupler": coupler,
         "hasTrailer": bool(raw.get("hasTrailer")),
+        "trailerModels": tmodels,
     }
 
 
@@ -406,6 +464,48 @@ def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
         "vehicleClass": vclass,
         "useTrailer": bool(use_trailer),
     }
+
+
+def pick_trailer_model(coupler, cargo_type, cargo_domain, tier, seed, installed_models=None):
+    """Select an appropriate trailer JBeam model and display label for a leg."""
+    coupler = str(coupler or "none").lower()
+    if coupler not in ("fifthwheel", "towhitch"):
+        return None, None
+    installed = None
+    if isinstance(installed_models, dict):
+        cand = installed_models.get(coupler)
+        if isinstance(cand, (list, tuple)) and cand:
+            installed = [str(m).lower() for m in cand if m]
+    if coupler == "fifthwheel":
+        fw = TRAILER_CANDIDATES["fifthwheel"]
+        base_list = list(fw.get(cargo_type) or fw.get(cargo_domain) or fw["default"])
+        if installed is not None:
+            avail = [m for m in base_list if m in installed]
+            if not avail:
+                avail = list(installed)
+        else:
+            avail = base_list
+        if not avail:
+            return None, None
+        if len(avail) > 1 and cargo_type != "fuel" and cargo_domain != "fuel":
+            model = avail[_stable_index(seed, f"fw_m:{cargo_type}:{cargo_domain}", min(2, len(avail)))]
+        else:
+            model = avail[0]
+    else:
+        tw = TRAILER_CANDIDATES["towhitch"]
+        tier_l = str(tier or "local").lower()
+        base_list = list(tw["heavy"] if tier_l in ("city", "regional", "long") else tw["light"])
+        if installed is not None:
+            avail = [m for m in base_list if m in installed]
+            if not avail:
+                avail = list(installed)
+        else:
+            avail = base_list
+        if not avail:
+            return None, None
+        model = avail[_stable_index(seed, f"tw_m:{tier_l}:{cargo_type}", len(avail))]
+    label = TRAILER_LABELS.get(model) or f"{model.replace('_', ' ').title()} Trailer"
+    return model, label
 
 
 def validate_request(msg):
@@ -1963,27 +2063,124 @@ def _apply_logistics_cargo_and_dwell(res, req):
     if not res.get("ok") or not res.get("stops"):
         return res
     stops = res["stops"]
-    dest_domain = _resolve_route_cargo_domain(stops)
-    cargo = generate_cargo_manifest(req.get("vehicle"), req["tier"], req["seed"], dest_domain=dest_domain)
-    mass_kg = cargo["massKg"]
-    deliveries = [s for s in stops if s.get("kind") != "loading"]
-    n_del = len(deliveries)
-    per_del = (mass_kg // n_del) if n_del > 0 else 0
-    rem = (mass_kg - per_del * n_del) if n_del > 0 else 0
-    del_i = 0
-    for s in stops:
-        s.pop("_poiDomain", None)
-        if s.get("kind") == "loading":
-            s["cargoDeltaKg"] = mass_kg if n_del > 0 else 0
-        else:
-            del_i += 1
-            s["cargoDeltaKg"] = -(per_del + (rem if del_i == n_del else 0))
-        s["dwellTargetS"] = compute_dwell_target_s(
-            "logistics", req["tier"], s.get("kind"), s.get("stopType"),
-            s.get("name"), cargo_kg=mass_kg, seed=req["seed"], idx=s.get("index", 1),
+    n_stops = len(stops)
+    vehicle = req.get("vehicle") or {"class": "van", "coupler": "none", "hasTrailer": False}
+    coupler = vehicle.get("coupler") or "none"
+    has_trailer = bool(vehicle.get("hasTrailer"))
+    installed_models = vehicle.get("trailerModels")
+    tier = req["tier"]
+    seed = req["seed"]
+
+    if n_stops == 1:
+        stops[0].pop("_poiDomain", None)
+        cargo = generate_cargo_manifest(vehicle, tier, seed, dest_domain="general")
+        stops[0]["cargoDeltaKg"] = 0
+        stops[0]["dwellTargetS"] = compute_dwell_target_s(
+            "logistics", tier, stops[0].get("kind"), stops[0].get("stopType"),
+            stops[0].get("name"), cargo_kg=cargo["massKg"], seed=seed, idx=stops[0].get("index", 1),
         )
-    res["cargo"] = cargo
-    res["vehicleClass"] = cargo["vehicleClass"]
+        res["cargo"] = cargo
+        res["vehicleClass"] = cargo["vehicleClass"]
+        res["legs"] = []
+        return res
+
+    # Build pickup -> delivery cycles. For >= 4 stops, interleave deadhead legs between cycles.
+    cycles = []
+    if n_stops <= 3:
+        cycles.append((0, list(range(1, n_stops))))
+    else:
+        i = 0
+        while i < n_stops:
+            rem_stops = n_stops - i
+            if rem_stops == 3:
+                cycles.append((i, [i + 1, i + 2]))
+                break
+            elif rem_stops == 2:
+                cycles.append((i, [i + 1]))
+                break
+            else:
+                cycles.append((i, [i + 1]))
+                i += 2
+
+    legs = []
+    first_cargo = None
+    stop_cargo_kg = [0] * n_stops
+
+    for c_idx, (load_i, del_indices) in enumerate(cycles):
+        stops[load_i]["kind"] = "loading"
+        for di in del_indices:
+            stops[di]["kind"] = "delivery"
+        cycle_stops = [stops[di] for di in del_indices]
+        cycle_domain = _resolve_route_cargo_domain(cycle_stops)
+        cycle_seed = seed if c_idx == 0 else (seed + c_idx * 131)
+        cargo = generate_cargo_manifest(vehicle, tier, cycle_seed, dest_domain=cycle_domain)
+        if first_cargo is None:
+            first_cargo = cargo
+        mass_kg = cargo["massKg"]
+
+        if has_trailer:
+            leg_kind = "loaded_trailer"
+            trl_model, trl_label = None, None
+        elif cargo["useTrailer"] and coupler in ("fifthwheel", "towhitch"):
+            trl_model, trl_label = pick_trailer_model(
+                coupler, cargo["type"], cargo["domain"], tier, seed + c_idx * 97, installed_models,
+            )
+            leg_kind = "loaded_trailer" if trl_model else "loaded_solo"
+        else:
+            leg_kind = "loaded_solo"
+            trl_model, trl_label = None, None
+
+        n_del = len(del_indices)
+        per_del = mass_kg // n_del
+        rem = mass_kg - per_del * n_del
+        stops[load_i]["cargoDeltaKg"] = mass_kg
+        stop_cargo_kg[load_i] = mass_kg
+
+        carried = mass_kg
+        prev_idx = load_i
+        for d_pos, di in enumerate(del_indices):
+            drop_kg = per_del + (rem if d_pos == n_del - 1 else 0)
+            stops[di]["cargoDeltaKg"] = -drop_kg
+            stop_cargo_kg[di] = carried
+            legs.append({
+                "index": len(legs) + 1,
+                "fromStop": prev_idx + 1,
+                "toStop": di + 1,
+                "legKind": leg_kind,
+                "cargoType": cargo["type"],
+                "cargoLabel": cargo["label"],
+                "cargoDomain": cargo["domain"],
+                "cargoMassKg": carried,
+                "trailerModel": trl_model,
+                "trailerLabel": trl_label,
+            })
+            carried = max(0, carried - drop_kg)
+            prev_idx = di
+
+        if c_idx + 1 < len(cycles):
+            next_load_i = cycles[c_idx + 1][0]
+            legs.append({
+                "index": len(legs) + 1,
+                "fromStop": del_indices[-1] + 1,
+                "toStop": next_load_i + 1,
+                "legKind": "deadhead",
+                "cargoType": "",
+                "cargoLabel": "",
+                "cargoDomain": "general",
+                "cargoMassKg": 0,
+                "trailerModel": None,
+                "trailerLabel": None,
+            })
+
+    for idx_s, s in enumerate(stops):
+        s.pop("_poiDomain", None)
+        s["dwellTargetS"] = compute_dwell_target_s(
+            "logistics", tier, s.get("kind"), s.get("stopType"),
+            s.get("name"), cargo_kg=stop_cargo_kg[idx_s], seed=seed, idx=s.get("index", idx_s + 1),
+        )
+    res["cargo"] = first_cargo
+    res["vehicleClass"] = first_cargo["vehicleClass"]
+    res["legs"] = legs
     return res
 
 

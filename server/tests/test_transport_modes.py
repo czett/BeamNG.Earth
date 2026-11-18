@@ -481,5 +481,71 @@ class Phase3SemanticAndGameplayTest(unittest.TestCase):
             self.assertIn("bidirectional", st)
 
 
+class Phase4MultiLegLogisticsTest(unittest.TestCase):
+    def test_multi_leg_deadhead_and_trailer_swap(self):
+        md = _seed_corridor_md()
+        r = tm.generate_job(
+            md, None, mode="logistics", tier="city",
+            lat=39.285, lon=-76.610, heading=20.0, seed=6,
+            vehicle={
+                "class": "semi", "coupler": "fifthwheel", "hasTrailer": False,
+                "trailerModels": {"fifthwheel": ["dryvan", "reefer", "flatbed", "tanker"]},
+            },
+        )
+        self.assertTrue(r["ok"], r)
+        stops = r["stops"]
+        legs = r["legs"]
+        self.assertEqual(len(legs), len(stops) - 1)
+        deadheads = [lg for lg in legs if lg["legKind"] == "deadhead"]
+        loaded = [lg for lg in legs if lg["legKind"] == "loaded_trailer"]
+        self.assertGreaterEqual(len(deadheads), 1)
+        self.assertGreaterEqual(len(loaded), 2)
+        for dh in deadheads:
+            self.assertEqual(dh["cargoMassKg"], 0)
+            self.assertEqual(dh["cargoType"], "")
+            self.assertIsNone(dh["trailerModel"])
+        for ld in loaded:
+            self.assertGreaterEqual(ld["cargoMassKg"], 12000)
+            self.assertIn(ld["trailerModel"], ("dryvan", "reefer", "flatbed", "tanker"))
+            self.assertTrue(ld["trailerLabel"])
+        self.assertEqual(sum(s["cargoDeltaKg"] for s in stops), 0)
+
+    def test_installed_trailer_filtering_and_player_owned_trailer(self):
+        md = _seed_corridor_md()
+        r_inst = tm.generate_job(
+            md, None, mode="logistics", tier="city",
+            lat=39.285, lon=-76.610, heading=20.0, seed=4,
+            vehicle={
+                "class": "semi", "coupler": "fifthwheel", "hasTrailer": False,
+                "trailerModels": {"fifthwheel": ["dryvan", "tanker"]},
+            },
+        )
+        self.assertTrue(r_inst["ok"], r_inst)
+        for lg in r_inst["legs"]:
+            if lg["legKind"] == "loaded_trailer":
+                self.assertIn(lg["trailerModel"], ("dryvan", "tanker"))
+
+        r_owned = tm.generate_job(
+            md, None, mode="logistics", tier="local",
+            lat=39.285, lon=-76.610, heading=20.0, seed=2,
+            vehicle={"class": "semi", "coupler": "fifthwheel", "hasTrailer": True},
+        )
+        self.assertTrue(r_owned["ok"], r_owned)
+        for lg in r_owned["legs"]:
+            self.assertIsNone(lg["trailerModel"])
+
+    def test_solo_vehicle_multi_leg_has_deadhead_and_no_trailers(self):
+        md = _seed_corridor_md()
+        r = tm.generate_job(
+            md, None, mode="logistics", tier="city",
+            lat=39.285, lon=-76.610, heading=20.0, seed=5,
+            vehicle={"class": "van", "coupler": "none", "hasTrailer": False},
+        )
+        self.assertTrue(r["ok"], r)
+        for lg in r["legs"]:
+            self.assertIn(lg["legKind"], ("loaded_solo", "deadhead"))
+            self.assertIsNone(lg["trailerModel"])
+
+
 if __name__ == "__main__":
     unittest.main()

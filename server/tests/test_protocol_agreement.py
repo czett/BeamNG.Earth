@@ -321,6 +321,7 @@ SERVER_TO_MOD = {
     "transport_job_result": {"id": F(int), "ok": F(bool), "mode": F(str), "tier": F(str),
                              "title": F(str, OPT), "routeRef": F(str, OPT), "source": F(str, OPT),
                              "estimatedKm": F(NUM, OPT), "cargo": F(dict, OPT), "vehicleClass": F(str, OPT),
+                             "legs": F(list, OPT),
                              "taxi": F(dict, OPT), "bus": F(dict, OPT),
                              "stops": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
