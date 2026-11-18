@@ -572,6 +572,21 @@ class JunctionRowsTest(Placed, unittest.TestCase):
         self.assertEqual(self.placed(rows), [("de_z205", "s", "before"), ("de_z306", "e", "before"),
                                              ("de_z306", "w", "before")], "in town the 306 stands before it (Rn. 2)")
 
+    def test_priority_yield_lateral_clearance(self):
+        """Every de_z205* and de_z306* post clears all road carriageways by >= 0.55 m outside road half-width."""
+        for urban in (True, False):
+            rs = self.stretch_t(urban=urban)
+            rows = self.props(rs)
+            self.assertTrue(any(r[0].startswith("de_z205") for r in rows), urban)
+            self.assertTrue(any(r[0].startswith("de_z306") for r in rows), urban)
+            for r in rows:
+                if not r[0].startswith(("de_z205", "de_z306")):
+                    continue
+                pt = np.array([r[1], r[2]], dtype=float)
+                for _fid, sp, pts, _ in rs:
+                    dist = furniture._seg_dist_min(pt, np.asarray(pts, dtype=float)[:, :2])
+                    self.assertGreaterEqual(dist - sp.width / 2.0, 0.55, (urban, r[0], dist, sp.width))
+
     def fixtures(self):
         res = [self.road("e", "residential", "e"), self.road("w", "residential", "w"),
                self.road("s", "residential", "s")]

@@ -220,6 +220,11 @@ do
   T.check(mShop:getField('emissiveIntensityNits', 0) == '', 'bne_bld_shop emissive restored outside dusk')
   deEnhancer.clearAll()
   settings.set('expDeStreetImmersion', false)
+  settings.set('expPriorityStops', false)
+  T.check(deEnhancer.isEnabled() == false, 'off-switch parity: isEnabled stays false')
+  settings.set('expPriorityStops', true)
+  T.check(deEnhancer.isEnabled() == false, 'expPriorityStops does not enable deEnhancer')
+  settings.set('expPriorityStops', false)
 end
 
 T.done('test_de_enhancer')

@@ -93,12 +93,13 @@ def lum(rgb):
     return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 
 
-def dae(group):
-    """The near LOD of bne_<group>.dae: positions (n, 3), uvs (n, 2) and {material: triangles (k, 3)}."""
+def dae(group, lod=32):
+    """One LOD of bne_<group>.dae: positions (n, 3), uvs (n, 2) and {material: triangles (k, 3)}."""
     with open(os.path.join(SHAPES, f"bne_{group}.dae"), encoding="utf-8") as fh:
         xml = fh.read()
-    geom = re.search(r'<geometry id="bne_%s32-g">(.*?)</geometry>' % re.escape(group), xml, re.S).group(1)
-    arr = lambda kind: np.array(re.search(r'<float_array id="bne_%s32-g-%s-a"[^>]*>([^<]*)<' % (re.escape(group), kind),
+    gid = f"bne_{group}{lod}-g"
+    geom = re.search(r'<geometry id="%s">(.*?)</geometry>' % re.escape(gid), xml, re.S).group(1)
+    arr = lambda kind: np.array(re.search(r'<float_array id="%s-%s-a"[^>]*>([^<]*)<' % (re.escape(gid), kind),
                                           geom).group(1).split(), float)
     tris = {m: np.array(p.split(), int).reshape(-1, 3)
             for m, p in re.findall(r'<triangles count="\d+" material="([\w]+)-mat">.*?<p>([^<]*)</p>', geom, re.S)}
@@ -181,6 +182,16 @@ class CatalogTest(unittest.TestCase):
             self.assertTrue((p[face, 1] < 0).all(), g)
             self.assertTrue(((uv[face] >= 0) & (uv[face] <= 1)).all(), g)
             self.assertIn("bne_cable_steel", tris, g)
+
+    def test_far_lod_retains_post(self):
+        """Far LOD (4 px) keeps the metallic post from below ground up into the sign plate so signs never float."""
+        for g in designs.GROUPS:
+            p, _, tris = dae(g, lod=4)
+            self.assertIn("bne_de_signs", tris, g)
+            self.assertIn("bne_cable_steel", tris, g)
+            steel = np.unique(tris["bne_cable_steel"])
+            self.assertLessEqual(p[steel, 2].min(), -0.15, g)
+            self.assertGreaterEqual(p[steel, 2].max(), designs.LOW_M, g)
 
     def test_the_sizes_are_the_vwv_tables(self):
         """VwV-StVO zu den §§ 39 bis 43 Rn. 13: triangle side 630 / 900 / 1260, square side 420 / 600 / 840 mm;
