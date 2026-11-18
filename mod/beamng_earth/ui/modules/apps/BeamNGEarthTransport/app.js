@@ -46,13 +46,13 @@ angular.module('beamng.apps')
                 '<span ng-style="{color: stopTypeColor, background: stopTypeBg}" ' +
                   'style="padding:1px 6px;border-radius:3px;font-weight:600;font-size:10px;letter-spacing:0.02em;white-space:nowrap;">{{ stopTypeLabel }}</span>' +
               '</div>' +
-              '<span style="font-weight:600;font-size:11px;color:#b8c4d0;white-space:nowrap;' + NUM + '">Stop {{ tr.stopIndex }}/{{ tr.stopCount }}</span>' +
+              '<span style="font-weight:600;font-size:11px;color:#b8c4d0;white-space:nowrap;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
             '</div>' +
             '<div style="font-weight:600;font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopName }}</div>' +
             '<div ng-if="tr.stopAddress" style="font-size:11px;color:#93a0ad;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopAddress }}</div>' +
             '<div ng-if="subText" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:#cdd6df;' + NUM + '">' +
               '<span>{{ subText }}</span>' +
-              '<span ng-if="subBadge" style="padding:1px 5px;border-radius:3px;background:rgba(61,220,132,0.16);color:#6ae696;font-size:10px;font-weight:600;">{{ subBadge }}</span>' +
+              '<span ng-if="subBadge" ng-style="tr.trailerMissing ? {background:\'rgba(235,173,71,0.22)\',color:\'#f0b856\'} : {}" style="padding:1px 5px;border-radius:3px;background:rgba(61,220,132,0.16);color:#6ae696;font-size:10px;font-weight:600;">{{ subBadge }}</span>' +
             '</div>' +
             '<div ng-if="tr.mode === \'bus\' && tr.nextStopName" style="font-size:11px;color:#93a0ad;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Next Stop after this: {{ tr.nextStopName }}</div>' +
             '<div style="display:flex;align-items:baseline;gap:12px;margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);font-size:12px;color:#cdd6df;' + NUM + '">' +
@@ -60,7 +60,10 @@ angular.module('beamng.apps')
               '<span ng-if="etaText"><span style="color:#8c99a6;font-size:11px;">ETA </span><b style="color:#fff;">{{ etaText }}</b></span>' +
               '<span style="margin-left:auto;"><span style="color:#8c99a6;font-size:11px;">Score </span><b style="color:#fff;">{{ tr.score }}</b></span>' +
             '</div>' +
-            '<div ng-if="tr.dwellFrac > 0" style="margin-top:6px;">' +
+            '<div ng-if="tr.trailerMissing" style="margin-top:5px;font-size:11px;color:#f0b856;font-weight:600;">' +
+              '{{ tr.bayHint || \'Trailer missing · Go back &amp; hitch your trailer\' }}' +
+            '</div>' +
+            '<div ng-if="!tr.trailerMissing && tr.dwellFrac > 0" style="margin-top:6px;">' +
               '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;' + NUM + '" ng-style="{color: dwellTextColor}">' +
                 '<span>{{ dwellLabel }}</span>' +
                 '<span>{{ dwellTimer }}</span>' +
@@ -69,7 +72,7 @@ angular.module('beamng.apps')
                 '<div ng-style="{width: dwellPct + \'%\', background: dwellBarColor}" style="height:100%;transition:width 0.14s linear;"></div>' +
               '</div>' +
             '</div>' +
-            '<div ng-if="tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11px;color:#8ad0ff;">' +
+            '<div ng-if="!tr.trailerMissing && tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11px;color:#8ad0ff;">' +
               '{{ tr.trailerState === \'staged\' ? \'Back up to hitch staged trailer\' : \'Pull into bay &amp; stop\' }}' +
             '</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
@@ -82,7 +85,7 @@ angular.module('beamng.apps')
               '<span ng-style="{color: modeStyle.color}" style="font-weight:700;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;">{{ tr.mode }} · Complete</span>' +
               '<span style="font-weight:700;color:#6ae696;' + NUM + '">{{ tr.score }}/100</span>' +
             '</div>' +
-            '<div style="font-size:12px;color:#d6dee6;' + NUM + '">Stops {{ tr.stopsCompleted }}/{{ tr.stopCount }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
+            '<div style="font-size:12px;color:#d6dee6;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.stopsCompleted >= 2 ? \'Pickup -> Drop-off\' : \'Ride Skipped\') : (\'Stops \' + tr.stopsCompleted + \'/\' + tr.stopCount) }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
             '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:12px;color:#ffd45a;margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }} = ${{ tr.totalFare.toFixed(2) }}</div>' +
             '<div style="font-size:11px;color:#93a0ad;margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
@@ -172,17 +175,21 @@ angular.module('beamng.apps')
               scope.subText = (tr.paxCount != null ? tr.paxCount : 0) + '/' + (tr.paxCapacity || 40) + ' pax'
               scope.subBadge = tr.scheduleText || 'On Time'
             } else if (tr.mode === 'logistics') {
-              if (tr.legLabel) {
+              if (tr.legKind === 'deadhead') {
+                scope.subText = tr.legLabel || 'Deadhead · Empty transit (0 kg)'
+              } else if (tr.legLabel) {
                 scope.subText = tr.legLabel
               } else if (tr.cargoKg) {
                 var wt = tr.cargoKg >= 1000 ? (tr.cargoKg / 1000).toFixed(1) + ' t' : Math.round(tr.cargoKg) + ' kg'
                 scope.subText = (tr.cargoLabel || 'Cargo') + ' · ' + wt
               } else {
-                scope.subText = 'Deadhead · Drive to pickup'
+                scope.subText = 'Deadhead · Empty transit (0 kg)'
               }
-              if (tr.trailerState === 'staged') scope.subBadge = 'Hook Up'
+              if (tr.trailerMissing) scope.subBadge = 'Trailer Missing'
+              else if (tr.trailerState === 'staged') scope.subBadge = 'Hook Up'
               else if (tr.trailerState === 'attached') scope.subBadge = 'Trailer'
               else if (tr.legKind === 'deadhead') scope.subBadge = 'Deadhead'
+              else if (tr.legKind === 'pickup_approach') scope.subBadge = 'Pickup'
               else scope.subBadge = 'Solo'
             }
             if (tr.state === 'summary') {

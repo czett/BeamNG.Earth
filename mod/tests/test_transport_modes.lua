@@ -47,11 +47,13 @@ tm.castRay = function(x, y, zTop, maxDist) rayCalls = rayCalls + 1; return fakeR
 tm.readDamage = function() return fakeDamage end
 
 -- 1. Pure request validation
-T.check(tm.validateRequest('taxi', 'neighborhood'), 'valid taxi tier')
+T.check(tm.validateRequest('taxi', 'short'), 'valid taxi short tier')
+T.check(tm.validateRequest('taxi', 'neighborhood'), 'legacy taxi neighborhood tier aliases to short')
+T.check(tm.validateRequest('taxi', 'long'), 'valid taxi long tier')
 T.check(tm.validateRequest('BUS', 'FULL'), 'case-insensitive bus tier')
 T.check(tm.validateRequest('logistics', 'long'), 'valid logistics tier')
 T.check(not tm.validateRequest('plane', 'city'), 'unknown mode rejected')
-T.check(not tm.validateRequest('taxi', 'long'), 'wrong tier rejected')
+T.check(not tm.validateRequest('taxi', 'express'), 'wrong tier rejected')
 
 -- 2. Pure stop dwell & bridge height guard
 do
@@ -222,6 +224,9 @@ do
   T.check(stD == 'complete' and dwD == 8.0 and dmD == 'bay' and tgtD == 8.0, 'stepBayStop honors 8.0 s dynamic dwellTargetS')
   T.check(tm.dwellStatusLabel('taxi', 'pickup', 'bay') == 'Passenger boarding', 'taxi pickup dwell label')
   T.check(tm.dwellStatusLabel('logistics', 'delivery', 'fallback') == 'Kerbside · Unloading cargo', 'logistics fallback dwell label')
+  T.check(tm.dwellStatusLabel('logistics', 'loading', 'bay', nil, 'loaded_trailer', 'staged') == 'Hooking up trailer', 'trailer pickup dwell label')
+  T.check(tm.dwellStatusLabel('logistics', 'delivery', 'bay', 'loaded_trailer') == 'Unhooking trailer', 'trailer delivery dwell label')
+  T.check(tm.dwellStatusLabel('logistics', 'deadhead', 'bay', 'deadhead') == 'Checking in at depot', 'deadhead arrival dwell label')
 
   -- Collision debounce: rapid multi-frame damage spikes within 1.25 s count as 1 collision, not 5
   fakeDamage = 0
@@ -316,11 +321,11 @@ do
     },
   })
   T.check(spawnCalls == 0, 'Phase 4: no trailer spawned at job start')
-  T.check(tm.hudPayload().legLabel == 'Deadhead · Drive to pickup' and tm.hudPayload().cargoKg == nil, 'Phase 4: en route to pickup shows deadhead and nil cargoKg')
+  T.check(tm.hudPayload().legKind == 'pickup_approach' and tm.hudPayload().legLabel == 'Pick up Dry Van Trailer (Containerized Dry Goods · 18.0 t)' and tm.hudPayload().cargoKg == nil, 'Phase 5: pickup approach shows trailer + cargo weight without leaking cargoKg')
   -- Approach < 160 m to Hub A -> stages trailer in bay
   local anchorLog = { geodeticToEnu = function(_, lat) return 0, (lat == 39.286) and 120 or 5000 end }
   tm.update(0.1, 0.1, anchorLog, { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }, false, false)
-  T.check(spawnCalls == 1 and tm.hudPayload().trailerState == 'staged' and tm.hudPayload().legLabel == 'Hook up Dry Van Trailer', 'Phase 4: approaching < 160 m stages trailer in pickup bay')
+  T.check(spawnCalls == 1 and tm.hudPayload().trailerState == 'staged' and tm.hudPayload().legLabel == 'Pick up Dry Van Trailer (Containerized Dry Goods · 18.0 t)', 'Phase 5: staged trailer keeps Pick up <Trailer> (<Cargo> · <Weight>) label')
   tm.cancelJob()
   T.check(#deleted == 1 and deleted[1] == 801, 'cancelJob deletes job-owned staged trailer')
   tm.playerVeh = origPlayerVeh
@@ -365,21 +370,19 @@ do
     { 10, 10, 10 }, { 10.2, 10.2, 10.2 }, { 10.5, 10.5, 10.5 }, { 10.8, 10.8, 10.8 }, { 11.0, 11.0, 11.0 }
   }
   T.check(math.abs(tm.sampleBayGridZ(grid, 0.5, 0.5, 0) - 10.5) < 1e-6, 'sampleBayGridZ bilinearly interpolates terrain')
-  local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end, 1, 1.0, {1,1,1,0.64}, {1,1,1,0.88}, {1,1,1,0.52}, {1,1,1,0.14})
-  local hasFloor, hasThinStrip, hasPad = false, true, false
+  local quads = tm.buildBayQuads(0, 0, 0, 1, 1, 0, tm.baySpec('bus', 'full'), function() return 10 end)
+  local onlyFrame, liftOk, widthOk = true, true, true
   for _, q in ipairs(quads) do
-    if q.kind == 'floor_tint' then
-      hasFloor = true
-      T.check(q.a >= 0.12 and q.a <= 0.22, 'floor_tint uses soft 12-22% alpha')
-    elseif q.kind == 'beacon_pad' then
-      hasPad = true
-    elseif q.widthM and q.widthM > 0.14 then
-      hasThinStrip = false
-    end
+    if q.kind ~= 'frame_rail' then onlyFrame = false end
+    if math.abs((q.p0.z or 0) - 10.10) > 1e-5 then liftOk = false end
+    if math.abs((q.widthM or 0) - 0.09) > 1e-5 then widthOk = false end
   end
-  T.check(#quads >= 20 and hasFloor and hasThinStrip and not hasPad, 'buildBayQuads emits thin RLS-style strips + soft floor tint without chunky pads')
-  T.check(tm.beaconAlpha(25) == 1.0 and tm.beaconAlpha(13) == 0.5 and tm.beaconAlpha(8) == 0.0, 'beaconAlpha fades smoothly < 18 m')
-  T.check(tm.buildBayBeacon(0, 0, 10, 1.0, 25, {1,1,1,0.75}) ~= nil and tm.buildBayBeacon(0, 0, 10, 1.0, 6, {1,1,1,0.75}) == nil, 'buildBayBeacon hides < 8 m')
+  T.check(#quads >= 28 and onlyFrame and liftOk and widthOk, 'Phase 5: buildBayQuads emits only 0.10 m elevated 0.09 m rounded frame_rail quads')
+  local cIdle = tm.bayFrameColor(false, false, 'none', nil, false)
+  local cGreen = tm.bayFrameColor(true, false, 'bay', 'attached', false)
+  local cAmber = tm.bayFrameColor(true, false, 'none', 'attached', true)
+  local cStaged = tm.bayFrameColor(false, false, 'none', 'staged', false)
+  T.check(cIdle == tm.BAY_IDLE_GREY and cGreen == tm.BAY_ALIGNED_GREEN and cAmber == tm.BAY_PARTIAL_AMBER and cStaged == tm.BAY_PARTIAL_AMBER, 'Phase 5: bayFrameColor transitions cleanly between grey, emerald green, and warm amber')
 
   -- Bus live passenger load, schedule text, nextStopName & Taxi nextPassenger() chaining
   T.check(tm.formatScheduleDelta(10) == 'On Time' and tm.formatScheduleDelta(70) == '+1m 10s', 'formatScheduleDelta formats On Time and +1m 10s')
@@ -507,13 +510,25 @@ do
   local pLeg1 = tm.hudPayload()
   T.check(pLeg1.stopIndex == 2 and pLeg1.cargoKg == 14200 and pLeg1.legLabel == 'Deliver Fresh Produce · 14.2 t', 'coupling applies 14.2 t and advances to delivery leg')
 
-  -- Deliver at Market -> uncouples, clears cargo on deadhead leg, and does NOT delete trailer while < 80 m
+  -- Phase 5: Detached trailer at loaded_trailer delivery bay blocks completion and shows Trailer missing alert
+  attachedId = nil
   playerPos = vec3(0, 500, 10)
-  trlPos = vec3(0, 500, 10)
+  trlPos = vec3(0, 250, 10)
   pl4.y = 500
-  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor4, pl4, false, false) end
+  for _ = 1, 4 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor4, pl4, false, false) end
+  local pMissing = tm.hudPayload()
+  T.check(pMissing.stopIndex == 2 and pMissing.dwellS == 0 and pMissing.trailerMissing == true and pMissing.bayHint == 'Trailer missing · Go back & hitch your trailer', 'Phase 5: detached trailer blocks delivery dwell and shows Trailer missing alert')
+
+  -- Re-hitching trailer clears block, shows Unhooking trailer, and completes delivery into deadhead
+  attachedId = 902
+  trlPos = vec3(0, 500, 10)
+  fakeNow = fakeNow + 0.5
+  tm.update(0.5, 0.5, anchor4, pl4, false, false)
+  local pUnhook = tm.hudPayload()
+  T.check(not pUnhook.trailerMissing and pUnhook.dwellLabel == 'Unhooking trailer' and pUnhook.dwellS > 0, 'Phase 5: re-hitched trailer resumes Unhooking trailer dwell')
+  for _ = 1, 4 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor4, pl4, false, false) end
   local pDead = tm.hudPayload()
-  T.check(pDead.stopIndex == 3 and pDead.legKind == 'deadhead' and pDead.cargoKg == nil and pDead.legLabel == 'Deadhead · Drive to pickup', 'deadhead leg clears previous cargo')
+  T.check(pDead.stopIndex == 3 and pDead.legKind == 'deadhead' and pDead.cargoKg == nil and pDead.cargoLabel == nil and pDead.legLabel == 'Deadhead · Empty transit (0 kg)', 'Phase 5: deadhead leg clears cargo and shows Empty transit (0 kg)')
   T.check(#deleted == 0, 'dropped trailer NOT deleted while player < 80 m away')
 
   -- Drive > 80 m away -> despawnQueue deletes dropped trailer

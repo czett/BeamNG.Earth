@@ -11,24 +11,25 @@ export const TRANSPORT_MODES = [
 
 export const TRANSPORT_TIERS = {
   taxi: [
-    { id: "neighborhood", label: "Neighborhood (1-3 km)" },
-    { id: "city", label: "City (4-12 km)" },
-    { id: "regional", label: "Regional (20-60 km)" },
+    { id: "short", label: "Short Ride (1-3.5 km)" },
+    { id: "city", label: "City Ride (4-12 km)" },
+    { id: "regional", label: "Regional Ride (20-50 km)" },
+    { id: "long", label: "Airport / Long Ride (55-110 km)" },
   ],
   bus: [
     { id: "partial", label: "Partial Route (4-6 stops)" },
     { id: "full", label: "Full Line (complete OSM route=bus)" },
   ],
   logistics: [
-    { id: "local", label: "Local Van (3 km, 3-4 stops)" },
-    { id: "city", label: "City Delivery (10 km, 5-8 stops)" },
-    { id: "regional", label: "Regional Haul (50 km, 2-3 stops)" },
+    { id: "local", label: "Local Van (3 km, 2-4 stops)" },
+    { id: "city", label: "City Delivery (10 km, 4-6 stops)" },
+    { id: "regional", label: "Regional Haul (50 km, 2-4 stops)" },
     { id: "long", label: "Long Haul (100 km+)" },
   ],
 }
 
 export const selectedMode = ref("taxi")
-export const selectedTiers = ref({ taxi: "neighborhood", bus: "partial", logistics: "local" })
+export const selectedTiers = ref({ taxi: "short", bus: "partial", logistics: "local" })
 export const transportState = ref(null)
 export const busy = ref(false)
 export const actionError = ref("")

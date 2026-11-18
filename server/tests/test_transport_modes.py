@@ -125,9 +125,18 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(req["tier"], "city")
         self.assertAlmostEqual(req["heading"], 90.0)
 
+        # Legacy "neighborhood" normalizes to "short"
+        req_s, err_s = tm.validate_request({"mode": "taxi", "tier": "neighborhood", "lat": 39.28, "lon": -76.61})
+        self.assertIsNone(err_s)
+        self.assertEqual(req_s["tier"], "short")
+
+        req_l, err_l = tm.validate_request({"mode": "taxi", "tier": "long", "lat": 39.28, "lon": -76.61})
+        self.assertIsNone(err_l)
+        self.assertEqual(req_l["tier"], "long")
+
         for bad in (
             {"mode": "plane", "tier": "city", "lat": 0, "lon": 0},
-            {"mode": "taxi", "tier": "long", "lat": 0, "lon": 0},
+            {"mode": "taxi", "tier": "express", "lat": 0, "lon": 0},
             {"mode": "bus", "tier": "partial", "lat": float("nan"), "lon": 0},
             {"mode": "logistics", "tier": "local", "lat": 91.0, "lon": 0},
         ):
@@ -161,10 +170,10 @@ class SnapToRoadTest(unittest.TestCase):
 
 
 class TaxiModeTest(unittest.TestCase):
-    def test_neighborhood_and_city_deterministic(self):
+    def test_short_and_city_deterministic(self):
         md = _seed_corridor_md()
-        r1 = tm.generate_job(md, None, mode="taxi", tier="neighborhood", lat=39.285, lon=-76.610, heading=20.0, seed=7)
-        r2 = tm.generate_job(md, None, mode="taxi", tier="neighborhood", lat=39.285, lon=-76.610, heading=20.0, seed=7)
+        r1 = tm.generate_job(md, None, mode="taxi", tier="short", lat=39.285, lon=-76.610, heading=20.0, seed=7)
+        r2 = tm.generate_job(md, None, mode="taxi", tier="short", lat=39.285, lon=-76.610, heading=20.0, seed=7)
         self.assertTrue(r1["ok"], r1)
         self.assertEqual(r1, r2)
         self.assertEqual(len(r1["stops"]), 2)
@@ -172,7 +181,7 @@ class TaxiModeTest(unittest.TestCase):
         self.assertEqual(r1["stops"][1]["kind"], "dropoff")
         d = tm.dist_m(r1["stops"][0]["lat"], r1["stops"][0]["lon"], r1["stops"][1]["lat"], r1["stops"][1]["lon"])
         self.assertGreaterEqual(d, 950.0)
-        self.assertLessEqual(d, 4000.0)
+        self.assertLessEqual(d, 4400.0)
 
         rc = tm.generate_job(md, None, mode="taxi", tier="city", lat=39.285, lon=-76.610, heading=20.0, seed=3)
         self.assertTrue(rc["ok"], rc)
@@ -180,19 +189,24 @@ class TaxiModeTest(unittest.TestCase):
         self.assertGreaterEqual(dc, 3800.0)
         self.assertLessEqual(dc, 15000.0)
 
-    def test_regional_uses_towns_globally(self):
+    def test_regional_and_long_use_towns_globally(self):
         # Southern hemisphere test location (Sydney area)
         base_lat, base_lon = -33.868, 151.209
         t_lat, t_lon = tm.offset_latlon(base_lat, base_lon, 35000.0, 40.0)
+        l_lat, l_lon = tm.offset_latlon(base_lat, base_lon, 80000.0, 40.0)
         md = FakeMapData()
-        for la, lo, nm in ((base_lat, base_lon, "George St"), (t_lat, t_lon, "Coast Hwy")):
+        for la, lo, nm in ((base_lat, base_lon, "George St"), (t_lat, t_lon, "Coast Hwy"), (l_lat, l_lon, "Airport Rd")):
             k = mapcells.cell_of(la, lo)
             md.put(k, "roads", FakeFeatures([_make_road(f"r_{nm}", la - 0.003, lo - 0.001, la + 0.005, lo + 0.001, cls="secondary", name=nm)]))
-        with mock.patch.object(tm.randomplace, "towns", return_value=[(t_lat, t_lon, "Gosford")]):
+        with mock.patch.object(tm.randomplace, "towns", return_value=[(t_lat, t_lon, "Gosford"), (l_lat, l_lon, "Newcastle Airport")]):
             r = tm.generate_job(md, None, mode="taxi", tier="regional", lat=base_lat, lon=base_lon, heading=40.0, seed=1)
+            rl = tm.generate_job(md, None, mode="taxi", tier="long", lat=base_lat, lon=base_lon, heading=40.0, seed=1)
         self.assertTrue(r["ok"], r)
         self.assertEqual(len(r["stops"]), 2)
         self.assertIn("Gosford", r["stops"][1]["address"] + " " + r["stops"][1]["name"])
+        self.assertTrue(rl["ok"], rl)
+        self.assertEqual(len(rl["stops"]), 2)
+        self.assertIn("Newcastle Airport", rl["stops"][1]["address"] + " " + rl["stops"][1]["name"])
 
 
 class BusModeTest(unittest.TestCase):
@@ -348,16 +362,21 @@ class CurbAndLoadingBayTest(unittest.TestCase):
 
 
 class LogisticsModeTest(unittest.TestCase):
-    def test_local_and_city_delivery(self):
+    def test_local_and_city_delivery_even_cycles(self):
         md = _seed_corridor_md()
-        rl = tm.generate_job(md, None, mode="logistics", tier="local", lat=39.285, lon=-76.610, heading=20.0, seed=4)
-        self.assertTrue(rl["ok"], rl)
-        self.assertTrue(3 <= len(rl["stops"]) <= 4)
-        self.assertEqual(rl["stops"][0]["kind"], "loading")
+        for seed in range(8):
+            rl = tm.generate_job(md, None, mode="logistics", tier="local", lat=39.285, lon=-76.610, heading=20.0, seed=seed)
+            self.assertTrue(rl["ok"], rl)
+            self.assertIn(len(rl["stops"]), (2, 4))
+            self.assertEqual(len(rl["stops"]) % 2, 0)
+            self.assertEqual(rl["stops"][0]["kind"], "loading")
+            self.assertEqual(rl["stops"][1]["kind"], "delivery")
 
-        rc = tm.generate_job(md, None, mode="logistics", tier="city", lat=39.285, lon=-76.610, heading=20.0, seed=4)
-        self.assertTrue(rc["ok"], rc)
-        self.assertTrue(5 <= len(rc["stops"]) <= 8)
+            rc = tm.generate_job(md, None, mode="logistics", tier="city", lat=39.285, lon=-76.610, heading=20.0, seed=seed)
+            self.assertTrue(rc["ok"], rc)
+            self.assertIn(len(rc["stops"]), (4, 6))
+            self.assertEqual(len(rc["stops"]) % 2, 0)
+            self.assertEqual(sum(s["cargoDeltaKg"] for s in rc["stops"]), 0)
 
     def test_regional_and_long_haul_no_overpass(self):
         base_lat, base_lon = 52.52, 13.405  # Berlin
@@ -378,7 +397,8 @@ class LogisticsModeTest(unittest.TestCase):
             rr = tm.generate_job(md, net, mode="logistics", tier="regional", lat=base_lat, lon=base_lon, heading=90.0, seed=1)
             rl = tm.generate_job(md, net, mode="logistics", tier="long", lat=base_lat, lon=base_lon, heading=90.0, seed=1)
         self.assertTrue(rr["ok"], rr)
-        self.assertTrue(2 <= len(rr["stops"]) <= 3)
+        self.assertIn(len(rr["stops"]), (2, 4))
+        self.assertEqual(len(rr["stops"]) % 2, 0)
         self.assertTrue(rl["ok"], rl)
         self.assertEqual(len(rl["stops"]), 2)
         self.assertGreater(rl["estimatedKm"], 95.0)
@@ -409,16 +429,21 @@ class Phase2CargoAndDwellTest(unittest.TestCase):
             self.assertEqual(sum(deltas), 0)
             for s in r["stops"]:
                 self.assertIn("dwellTargetS", s)
-                self.assertGreaterEqual(s["dwellTargetS"], 3.5)
+                if vclass == "semi":
+                    self.assertEqual(s["dwellTargetS"], 2.5)
+                else:
+                    self.assertTrue(3.5 <= s["dwellTargetS"] <= 8.0)
 
     def test_dynamic_dwell_targets_per_mode(self):
-        self.assertTrue(2.0 <= tm.compute_dwell_target_s("taxi", "neighborhood", "pickup", name="Central Cafe") <= 2.5)
+        self.assertTrue(2.0 <= tm.compute_dwell_target_s("taxi", "short", "pickup", name="Central Cafe") <= 2.5)
         self.assertEqual(tm.compute_dwell_target_s("taxi", "city", "dropoff", name="City Airport"), 3.0)
+        self.assertEqual(tm.compute_dwell_target_s("taxi", "long", "dropoff", name="Oak St"), 3.0)
         self.assertGreaterEqual(tm.compute_dwell_target_s("bus", "partial", "bus_stop", name="Union Station"), 4.5)
         self.assertTrue(3.0 <= tm.compute_dwell_target_s("bus", "partial", "bus_stop", name="Oak & 4th") <= 3.8)
-        self.assertTrue(3.5 <= tm.compute_dwell_target_s("logistics", "local", "loading", cargo_kg=800) <= 4.5)
-        self.assertTrue(6.0 <= tm.compute_dwell_target_s("logistics", "city", "delivery", cargo_kg=5000) <= 8.0)
-        self.assertTrue(9.0 <= tm.compute_dwell_target_s("logistics", "long", "loading", cargo_kg=24000) <= 12.0)
+        self.assertTrue(3.5 <= tm.compute_dwell_target_s("logistics", "local", "loading", cargo_kg=800, leg_kind="loaded_solo") <= 4.5)
+        self.assertTrue(6.0 <= tm.compute_dwell_target_s("logistics", "city", "delivery", cargo_kg=5000, leg_kind="loaded_solo") <= 8.0)
+        self.assertEqual(tm.compute_dwell_target_s("logistics", "long", "loading", cargo_kg=24000, leg_kind="loaded_trailer"), 2.5)
+        self.assertEqual(tm.compute_dwell_target_s("logistics", "city", "deadhead", cargo_kg=0, leg_kind="deadhead"), 2.5)
 
 
 class Phase3SemanticAndGameplayTest(unittest.TestCase):
@@ -443,8 +468,8 @@ class Phase3SemanticAndGameplayTest(unittest.TestCase):
         v = {"class": "van", "coupler": "towhitch", "hasTrailer": False}
         local_trailers = sum(1 for s in range(60) if tm.generate_cargo_manifest(v, "local", s)["useTrailer"])
         city_trailers = sum(1 for s in range(60) if tm.generate_cargo_manifest(v, "city", s)["useTrailer"])
-        self.assertTrue(10 <= local_trailers <= 32, f"local_trailers={local_trailers}")
-        self.assertTrue(24 <= city_trailers <= 48, f"city_trailers={city_trailers}")
+        self.assertTrue(24 <= local_trailers <= 48, f"local_trailers={local_trailers}")
+        self.assertTrue(34 <= city_trailers <= 56, f"city_trailers={city_trailers}")
         for s in range(20):
             m = tm.generate_cargo_manifest(v, "local", s)
             if not m["useTrailer"]:
