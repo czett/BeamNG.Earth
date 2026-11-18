@@ -425,6 +425,83 @@ def classify_poi_cargo_domain(cat="", tax="", bld_class="", tags=None, name=""):
     return "general"
 
 
+_SECTOR_TOKEN_RULES = (
+    ("Train / Transit Station", frozenset({
+        "train_station", "subway_station", "metro_station", "light_rail_station",
+        "railway_station", "station", "halt", "ferry_terminal", "airport",
+        "aerodrome", "bus_station", "public_transport",
+    })),
+    ("Bus Stop", frozenset({"bus_stop", "platform", "stop_position"})),
+    ("Supermarket", frozenset({"supermarket", "grocery_store", "hypermarket"})),
+    ("Bakery", frozenset({"bakery"})),
+    ("Pharmacy", frozenset({"pharmacy", "chemist"})),
+    ("Hospital / Clinic", frozenset({"hospital", "clinic", "doctors", "medical_center"})),
+    ("Fuel Station", frozenset({"fuel", "gas_station", "charging_station", "petrol_station"})),
+    ("Hotel", frozenset({"hotel", "motel", "hostel", "resort", "lodging", "guest_house"})),
+    ("Restaurant / Inn", frozenset({
+        "restaurant", "fast_food", "fast_food_restaurant", "casual_eatery",
+        "cafe", "coffee_shop", "bar", "pub", "biergarten", "bistro", "inn",
+    })),
+    ("Workshop / Hardware", frozenset({
+        "hardware_store", "doityourself", "building_supply_store", "auto_repair",
+        "car_repair", "auto_parts_store", "workshop", "garage", "carpenter", "craft",
+    })),
+    ("Logistics Depot", frozenset({
+        "warehouse", "depot", "freight_forwarding_service", "logistics_service",
+        "distribution_service", "courier_service", "industrial", "factory",
+        "manufacture", "storage", "hangar", "wholesale", "wholesale_store",
+    })),
+    ("Retail Store", frozenset({
+        "convenience_store", "department_store", "shopping_mall", "furniture_store",
+        "electronics_store", "retail", "commercial", "mall", "market",
+        "farmers_market", "deli", "post_office",
+    })),
+)
+
+_SECTOR_NAME_KEYWORDS = (
+    ("Train / Transit Station", ("bahnhof", "station", "terminal", "airport", "ferry")),
+    ("Pharmacy", ("pharmacy", "apotheke", "chemist")),
+    ("Bakery", ("bakery", "bäckerei", "backerei", "boulangerie", "patisserie")),
+    ("Supermarket", ("supermarket", "grocery", "edeka", "rewe", "aldi", "lidl", "kaufland")),
+    ("Fuel Station", ("fuel", "petrol", "shell", "aral", "esso", "total", "tankstelle")),
+    ("Hotel", ("hotel", "motel", "hostel", "resort")),
+    ("Restaurant / Inn", ("restaurant", "gasthof", "wirtshaus", "bistro", "cafe", "café", "pizzeria")),
+    ("Workshop / Hardware", ("hardware", "workshop", "werkstatt", "garage", "auto parts", "bauhaus", "obi")),
+    ("Logistics Depot", ("warehouse", "logistics", "freight", "depot", "spedition", "industrial")),
+)
+
+
+def derive_sector_label(cat="", tax="", bld_class="", tags=None, name="", kind="", stop_type=""):
+    """Derive a clean human-readable business/POI sector label from Overture/OSM metadata."""
+    tokens = []
+    for v in (cat, tax, bld_class):
+        s = str(v or "").strip().lower()
+        if s:
+            tokens.append(s)
+    if isinstance(tags, dict):
+        for k in ("amenity", "shop", "craft", "industrial", "landuse", "healthcare",
+                  "tourism", "railway", "public_transport", "aeroway"):
+            val = str(tags.get(k) or "").strip().lower()
+            if val:
+                tokens.append(val)
+
+    for label, tok_set in _SECTOR_TOKEN_RULES:
+        if any(t in tok_set for t in tokens):
+            return label
+
+    nm = str(name or "").strip().lower()
+    if nm:
+        for label, words in _SECTOR_NAME_KEYWORDS:
+            if any(w in nm for w in words):
+                return label
+
+    if kind == "bus_stop":
+        return "Bus Stop"
+    if stop_type == "loading_bay" and kind in ("loading", "delivery"):
+        return "Logistics Depot"
+    return ""
+
+
 def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
     """Select realistic, destination-matched cargo type and tonnage for the player's vehicle."""
     v = vehicle or {"class": "van", "coupler": "none", "hasTrailer": False}
@@ -1236,7 +1313,93 @@ def _snap_logistics_spot(md, poi_lat, poi_lon, deadline, road_cells=None, bld_ce
     return curb
 
 
-def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None, poi_domain=None):
+def _resolve_locality(md, lat, lon, deadline, town_hint="", cell_cache=None):
+    """Resolve nearest town/village and optional district/suburb (e.g. 'Sindelsdorf' or 'Penzberg · Dittenried')."""
+    keys = _cells_around(lat, lon, 1200.0, max_cells=4)
+
+    def _get_layer(k, layer):
+        if cell_cache is not None:
+            ck = (k, layer)
+            if ck in cell_cache:
+                return cell_cache[ck]
+        f = _cell_layer(md, k, layer, deadline) if (md is not None and (md.has(k, layer) or time.monotonic() <= deadline)) else None
+        if cell_cache is not None:
+            cell_cache[(k, layer)] = f
+        return f
+
+    best_town = None    # (dist_m, name)
+    best_suburb = None  # (dist_m, name)
+    for k in keys:
+        tp = _get_layer(k, "town_points")
+        if tp is not None and len(getattr(tp, "ids", ())):
+            attrs = getattr(tp, "attrs", {}) or {}
+            n = len(tp.ids)
+            names = _col(attrs, "name", n)
+            subtypes = _col(attrs, "subtype", n)
+            for i in range(n):
+                nm = _clean(names[i])
+                if not nm:
+                    continue
+                pt = _feature_center(tp, i)
+                if not pt:
+                    continue
+                d = dist_m(lat, lon, pt[0], pt[1])
+                st = str(subtypes[i] or "").strip().lower()
+                if st in ("neighborhood", "macrohood", "hamlet") and d <= 2500.0:
+                    if best_suburb is None or d < best_suburb[0]:
+                        best_suburb = (d, nm)
+                elif d <= 8000.0:
+                    if best_town is None or d < best_town[0]:
+                        best_town = (d, nm)
+
+        hd = _get_layer(k, "hoods")
+        if hd is not None and len(getattr(hd, "ids", ())):
+            attrs = getattr(hd, "attrs", {}) or {}
+            n = len(hd.ids)
+            names = _col(attrs, "name", n)
+            for i in range(n):
+                nm = _clean(names[i])
+                if not nm:
+                    continue
+                pt = _feature_center(hd, i)
+                if not pt:
+                    continue
+                d = dist_m(lat, lon, pt[0], pt[1])
+                if d <= 2500.0 and (best_suburb is None or d < best_suburb[0]):
+                    best_suburb = (d, nm)
+
+    town_name = best_town[1] if best_town else _clean(town_hint)
+    if not town_name:
+        best_ne = None
+        for tlat, tlon, tname in (randomplace.towns() or ()):
+            d = dist_m(lat, lon, tlat, tlon)
+            if d <= 15000.0 and (best_ne is None or d < best_ne[0]):
+                best_ne = (d, tname)
+        if best_ne:
+            town_name = _clean(best_ne[1])
+
+    suburb_name = best_suburb[1] if best_suburb else ""
+    if town_name and suburb_name and town_name.lower() != suburb_name.lower():
+        return f"{town_name} · {suburb_name}"
+    return town_name or suburb_name or ""
+
+
+def _enrich_stops_locality(md, stops, deadline):
+    """Populate optional 'locality' on every stop in-place using a shared cell cache."""
+    if not stops:
+        return stops
+    cache = {}
+    for s in stops:
+        hint = s.get("locality") or ""
+        loc = _resolve_locality(md, s["lat"], s["lon"], deadline, town_hint=hint, cell_cache=cache)
+        if loc:
+            s["locality"] = loc
+        else:
+            s.pop("locality", None)
+    return stops
+
+
+def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None, poi_domain=None, locality="", sector_label=""):
     road = snapped.get("road") or ""
     road_cls = str(snapped.get("roadClass") or "").strip().lower()
     addr = address or road or f"{snapped['lat']:.5f}, {snapped['lon']:.5f}"
@@ -1260,6 +1423,12 @@ def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type
         stop["dwellTargetS"] = round(float(dwell_target_s), 1)
     if poi_domain:
         stop["_poiDomain"] = poi_domain
+    loc_clean = _clean(locality)
+    if loc_clean:
+        stop["locality"] = loc_clean
+    sec_clean = _clean(sector_label)
+    if sec_clean:
+        stop["sectorLabel"] = sec_clean
     return stop
 
 
@@ -1285,13 +1454,15 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
         d = dist_m(ref_lat, ref_lon, p["lat"], p["lon"])
         if min_m <= d <= max_m:
             prio = 2 if (p["cat"] in TAXI_PLACE_CATS or p["tax"] in TAXI_PLACE_CATS) else 1
-            candidates.append((prio, p["conf"], d, p["lat"], p["lon"], p["name"], p["cat"]))
+            sec = derive_sector_label(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((prio, p["conf"], d, p["lat"], p["lon"], p["name"], sec))
     for b in bld_out:
         if not b["name"]:
             continue
         d = dist_m(ref_lat, ref_lon, b["lat"], b["lon"])
         if min_m <= d <= max_m:
-            candidates.append((0, 0.5, d, b["lat"], b["lon"], b["name"], b["class"]))
+            sec = derive_sector_label("", "", b["class"], b.get("tags"), b["name"])
+            candidates.append((0, 0.5, d, b["lat"], b["lon"], b["name"], sec))
 
     candidates.sort(key=lambda c: (-c[0], -c[1], c[5], c[3]))
     if candidates:
@@ -1301,7 +1472,10 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
             snapped = snap_to_road(md, pick[3], pick[4], radius_m=280.0, deadline=deadline, road_cells=road_cells)
             if snapped and min_m <= dist_m(ref_lat, ref_lon, snapped["lat"], snapped["lon"]) <= max_m * 1.25:
                 bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
-                return pick[5], _apply_curb_offset(snapped, pick[3], pick[4], snapped["lat"], snapped["lon"], bld_polys)
+                curb = _apply_curb_offset(snapped, pick[3], pick[4], snapped["lat"], snapped["lon"], bld_polys)
+                if pick[6]:
+                    curb["_sector"] = pick[6]
+                return pick[5], curb
 
     # Fallback directly onto drivable ground roads inside the target box
     rc = _road_candidates(md, ref_lat, ref_lon, min_m, max_m, deadline=deadline) if anchor_lat == ref_lat and anchor_lon == ref_lon else []
@@ -1385,7 +1559,7 @@ def _generate_taxi(md, req, deadline):
         bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
         pickup = (snapped["road"] or "Roadside Pickup", _apply_curb_offset(snapped, lat, lon, snapped["lat"], snapped["lon"], bld_polys))
     pu_name, pu_snap = pickup
-    pu_stop = _make_stop(1, "pickup", pu_name, pu_snap, zone_radius=12.0)
+    pu_stop = _make_stop(1, "pickup", pu_name, pu_snap, zone_radius=12.0, sector_label=pu_snap.get("_sector", ""))
 
     # 2. Drop-off in the selected distance tier
     dropoff = None
@@ -1450,7 +1624,8 @@ def _generate_taxi(md, req, deadline):
     do_addr = do_snap.get("road") or ""
     if town_suffix:
         do_addr = f"{do_addr}, {town_suffix}" if do_addr else town_suffix
-    do_stop = _make_stop(2, "dropoff", do_name, do_snap, address=do_addr, zone_radius=12.0)
+    do_stop = _make_stop(2, "dropoff", do_name, do_snap, address=do_addr, zone_radius=12.0,
+                         locality=town_suffix or "", sector_label=do_snap.get("_sector", ""))
     stops = [pu_stop, do_stop]
     for s in stops:
         s["dwellTargetS"] = compute_dwell_target_s("taxi", tier, s["kind"], s["stopType"], s["name"], seed=seed, idx=s["index"])
@@ -1747,6 +1922,7 @@ def _generate_bus(md, net, req, deadline):
             snapped_stops.append(_make_stop(
                 idx, "bus_stop", s["name"] or f"Stop {idx}", snapped, zone_radius=14.0, stop_type="kerbside",
                 dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
+                sector_label=derive_sector_label(name=s["name"], kind="bus_stop", stop_type="kerbside"),
             ))
         if len(snapped_stops) >= 4:
             bus_meta = _apply_bus_passengers_and_schedule(snapped_stops, lat, lon, tier, seed)
@@ -1777,6 +1953,7 @@ def _generate_bus(md, net, req, deadline):
             stops.append(_make_stop(
                 idx, "bus_stop", s["name"], snapped, zone_radius=14.0, stop_type="kerbside",
                 dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", s["name"], seed=seed, idx=idx),
+                sector_label=derive_sector_label(name=s["name"], kind="bus_stop", stop_type="kerbside"),
             ))
         bus_meta = _apply_bus_passengers_and_schedule(stops, lat, lon, tier, seed)
         return {
@@ -1812,6 +1989,7 @@ def _generate_bus(md, net, req, deadline):
             stops.append(_make_stop(
                 idx, "bus_stop", nm, curb, zone_radius=14.0, stop_type="kerbside",
                 dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", nm, seed=seed, idx=idx),
+                sector_label="Bus Stop",
             ))
             base_brg = bearing_deg(cur_lat, cur_lon, curb["lat"], curb["lon"])
             cur_lat, cur_lon = curb["lat"], curb["lon"]
@@ -1872,14 +2050,16 @@ def _generate_logistics_short(md, req, deadline):
         if 200.0 <= d <= max_r_m:
             retail = 2 if _is_retail_place(p["cat"], p["tax"]) else 1
             dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
-            candidates.append((retail, p["conf"], p["lat"], p["lon"], p["name"], dom))
+            sec = derive_sector_label(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((retail, p["conf"], p["lat"], p["lon"], p["name"], dom, sec))
     for b in bld_out:
         if not b["name"]:
             continue
         d = dist_m(lat, lon, b["lat"], b["lon"])
         if 200.0 <= d <= max_r_m and b["class"] in (LOGISTICS_COMMERCIAL_CLASSES | LOGISTICS_HUB_CLASSES):
             dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), b["name"])
-            candidates.append((1, 0.6, b["lat"], b["lon"], b["name"], dom))
+            sec = derive_sector_label("", "", b["class"], b.get("tags"), b["name"])
+            candidates.append((1, 0.6, b["lat"], b["lon"], b["name"], dom, sec))
 
     candidates.sort(key=lambda c: (-c[0], -c[1], c[4], c[2]))
     # Pick spread-out stops sequentially by nearest neighbor from player
@@ -1902,7 +2082,8 @@ def _generate_logistics_short(md, req, deadline):
         if snapped:
             stop_idx = len(picked) + 1
             kind = "loading" if (stop_idx % 2 == 1) else "delivery"
-            picked.append(_make_stop(stop_idx, kind, nxt[4], snapped, zone_radius=13.0, poi_domain=nxt[5]))
+            sec = nxt[6] or derive_sector_label(name=nxt[4], kind=kind, stop_type=snapped.get("stopType", ""))
+            picked.append(_make_stop(stop_idx, kind, nxt[4], snapped, zone_radius=13.0, poi_domain=nxt[5], sector_label=sec))
             cur_lat, cur_lon = snapped["lat"], snapped["lon"]
 
     # Road-chain fallback if sparse; always target an even stop count (complete Pickup -> Delivery pairs)
@@ -1952,22 +2133,27 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
         prio = 4 if lu["class"] == "industrial" else 2
         nm = lu["name"] or (f"{fallback_label} Industrial Park" if lu["class"] == "industrial" else f"{fallback_label} Commercial Zone")
         dom = classify_poi_cargo_domain("", "", lu["class"], lu.get("tags"), nm)
-        candidates.append((prio, lu["lat"], lu["lon"], nm, dom))
+        sec = derive_sector_label("", "", lu["class"], lu.get("tags"), nm)
+        candidates.append((prio, lu["lat"], lu["lon"], nm, dom, sec))
     for b in bld_out:
         if b["class"] in LOGISTICS_HUB_CLASSES:
             nm = b["name"] or f"{fallback_label} Warehouse"
             dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), nm)
-            candidates.append((3, b["lat"], b["lon"], nm, dom))
+            sec = derive_sector_label("", "", b["class"], b.get("tags"), nm)
+            candidates.append((3, b["lat"], b["lon"], nm, dom, sec))
         elif b["class"] in LOGISTICS_COMMERCIAL_CLASSES and b["name"]:
             dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), b["name"])
-            candidates.append((1, b["lat"], b["lon"], b["name"], dom))
+            sec = derive_sector_label("", "", b["class"], b.get("tags"), b["name"])
+            candidates.append((1, b["lat"], b["lon"], b["name"], dom, sec))
     for p in places_out:
         if p["cat"] in LOGISTICS_HUB_CATS or p["tax"] in LOGISTICS_HUB_CATS:
             dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
-            candidates.append((3, p["lat"], p["lon"], p["name"], dom))
+            sec = derive_sector_label(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((3, p["lat"], p["lon"], p["name"], dom, sec))
         elif _is_retail_place(p["cat"], p["tax"]):
             dom = classify_poi_cargo_domain(p["cat"], p["tax"], "", p.get("tags"), p["name"])
-            candidates.append((1, p["lat"], p["lon"], p["name"], dom))
+            sec = derive_sector_label(p["cat"], p["tax"], "", p.get("tags"), p["name"])
+            candidates.append((1, p["lat"], p["lon"], p["name"], dom, sec))
 
     candidates.sort(key=lambda c: (-c[0], c[3], c[1]))
     if candidates:
@@ -1980,7 +2166,7 @@ def _find_freight_hub(md, alat, alon, seed, tag, deadline, fallback_label):
                 infra_cells=infra_cells, land_cells=land_cells,
             )
             if snapped:
-                return pick[3], {**snapped, "_poiDomain": pick[4]}
+                return pick[3], {**snapped, "_poiDomain": pick[4], "_sector": pick[5]}
     snapped = snap_to_road(md, alat, alon, radius_m=1500.0, classes=LOGISTICS_FALLBACK_CLASSES,
                            deadline=deadline, road_cells=road_cells)
     if snapped:
@@ -2004,7 +2190,8 @@ def _generate_logistics_haul(md, req, deadline):
     if not origin:
         return {"ok": False, "error": "No drivable road found near origin"}
     o_name, o_snap = origin
-    stops = [_make_stop(1, "loading", o_name, o_snap, zone_radius=15.0, poi_domain=o_snap.get("_poiDomain"))]
+    stops = [_make_stop(1, "loading", o_name, o_snap, zone_radius=15.0, poi_domain=o_snap.get("_poiDomain"),
+                        sector_label=o_snap.get("_sector", ""))]
 
     # 2. Destination hub from targeted towns in [min_km, max_km] (zero Overpass!)
     dest = None
@@ -2044,14 +2231,18 @@ def _generate_logistics_haul(md, req, deadline):
             p2_lat, p2_lon = offset_latlon(mid_del[1]["lat"], mid_del[1]["lon"], 950.0, brg_next)
             mid_load = _find_freight_hub(md, p2_lat, p2_lon, seed, "log_mid_load", deadline, "Midpoint Depot")
             if mid_load and dist_m(mid_del[1]["lat"], mid_del[1]["lon"], mid_load[1]["lat"], mid_load[1]["lon"]) >= 300.0:
-                stops.append(_make_stop(2, "delivery", mid_del[0], mid_del[1], zone_radius=15.0, poi_domain=mid_del[1].get("_poiDomain")))
-                stops.append(_make_stop(3, "loading", mid_load[0], mid_load[1], zone_radius=15.0, poi_domain=mid_load[1].get("_poiDomain")))
+                stops.append(_make_stop(2, "delivery", mid_del[0], mid_del[1], zone_radius=15.0,
+                                        poi_domain=mid_del[1].get("_poiDomain"), sector_label=mid_del[1].get("_sector", "")))
+                stops.append(_make_stop(3, "loading", mid_load[0], mid_load[1], zone_radius=15.0,
+                                        poi_domain=mid_load[1].get("_poiDomain"), sector_label=mid_load[1].get("_sector", "")))
 
     d_name, d_snap = dest
     d_addr = d_snap.get("road") or ""
     if dest_town:
         d_addr = f"{d_addr}, {dest_town}" if d_addr else dest_town
-    stops.append(_make_stop(len(stops) + 1, "delivery", d_name, d_snap, address=d_addr, zone_radius=15.0, poi_domain=d_snap.get("_poiDomain")))
+    stops.append(_make_stop(len(stops) + 1, "delivery", d_name, d_snap, address=d_addr, zone_radius=15.0,
+                            poi_domain=d_snap.get("_poiDomain"), locality=dest_town,
+                            sector_label=d_snap.get("_sector", "")))
     return {
         "ok": True,
         "mode": "logistics",
@@ -2219,6 +2410,8 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
             else:
                 res = _generate_logistics_haul(md, req, deadline)
             res = _apply_logistics_cargo_and_dwell(res, req)
+        if res.get("ok") and res.get("stops"):
+            _enrich_stops_locality(md, res["stops"], deadline)
     except Exception as e:
         log.warning("transport job %s/%s failed: %s: %s", req["mode"], req["tier"], type(e).__name__, e)
         res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}

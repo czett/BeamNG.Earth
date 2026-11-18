@@ -40,16 +40,17 @@ angular.module('beamng.apps')
           '</div>' +
           '<div ng-if="tr.state === \'active\'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:5px;">' +
-              '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
+              '<div style="display:flex;align-items:center;gap:5px;min-width:0;flex-wrap:wrap;">' +
                 '<span ng-style="{color: modeStyle.color, background: modeStyle.bg, borderColor: modeStyle.border}" ' +
                   'style="padding:1px 6px;border-radius:3px;border:1px solid transparent;font-weight:700;font-size:10px;letter-spacing:0.05em;text-transform:uppercase;">{{ tr.mode }}</span>' +
                 '<span ng-style="{color: stopTypeColor, background: stopTypeBg}" ' +
                   'style="padding:1px 6px;border-radius:3px;font-weight:600;font-size:10px;letter-spacing:0.02em;white-space:nowrap;">{{ stopTypeLabel }}</span>' +
+                '<span ng-if="stopSectorLabel" style="padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;color:#b4c5d6;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);white-space:nowrap;">{{ stopSectorLabel }}</span>' +
               '</div>' +
               '<span style="font-weight:600;font-size:11px;color:#b8c4d0;white-space:nowrap;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
             '</div>' +
             '<div style="font-weight:600;font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopName }}</div>' +
-            '<div ng-if="tr.stopAddress" style="font-size:11px;color:#93a0ad;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopAddress }}</div>' +
+            '<div ng-if="stopSubtitle" style="font-size:11px;color:#93a0ad;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stopSubtitle }}</div>' +
             '<div ng-if="subText" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:#cdd6df;' + NUM + '">' +
               '<span>{{ subText }}</span>' +
               '<span ng-if="subBadge" ng-style="tr.trailerMissing ? {background:\'rgba(235,173,71,0.22)\',color:\'#f0b856\'} : {}" style="padding:1px 5px;border-radius:3px;background:rgba(61,220,132,0.16);color:#6ae696;font-size:10px;font-weight:600;">{{ subBadge }}</span>' +
@@ -113,6 +114,8 @@ angular.module('beamng.apps')
       scope.dwellBarColor = '#3ddc84'
       scope.subText = ''
       scope.subBadge = ''
+      scope.stopSubtitle = ''
+      scope.stopSectorLabel = ''
       scope.summaryDist = ''
       scope.summaryTime = ''
 
@@ -152,6 +155,14 @@ angular.module('beamng.apps')
             scope.stopTypeLabel = isBay ? 'Loading Bay' : 'Kerbside Stop'
             scope.stopTypeColor = isBay ? '#7ce2ff' : '#b4c5d6'
             scope.stopTypeBg = isBay ? 'rgba(54,185,255,0.16)' : 'rgba(255,255,255,0.09)'
+            scope.stopSectorLabel = tr.stopSectorLabel || ''
+            var addr = (tr.stopAddress || '').trim()
+            var loc = (tr.stopLocality || '').trim()
+            if (addr && loc) {
+              scope.stopSubtitle = addr.toLowerCase().indexOf(loc.toLowerCase()) >= 0 ? addr : (addr + ' · ' + loc)
+            } else {
+              scope.stopSubtitle = addr || loc
+            }
             scope.distText = fmtDist(tr.distM, !!tr.metric)
             scope.etaText = tr.etaS != null ? fmtDur(tr.etaS) : ''
             scope.dwellPct = Math.round(Math.max(0, Math.min(1, tr.dwellFrac || 0)) * 100)

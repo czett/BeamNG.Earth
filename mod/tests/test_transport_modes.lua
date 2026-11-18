@@ -584,4 +584,25 @@ do
   scenetree, core_vehicles, be, core_trailerRespawn = oldScenetree, oldCv, oldBe, oldTr
 end
 
+-- 11. Locality & Business Sector metadata forwarding (uiState + hudPayload)
+do
+  tm.cancelJob()
+  tm.startJob('taxi', 'short')
+  local reqId = sentReqs[#sentReqs].id
+  tm.onJobResult({
+    id = reqId, ok = true, mode = 'taxi', tier = 'short', title = 'Test Ride',
+    stops = {
+      { index = 1, kind = 'pickup', stopType = 'kerbside', name = 'Edeka', address = 'Penzberger Straße', locality = 'Sindelsdorf', sectorLabel = 'Supermarket', lat = 47.713, lon = 11.383 },
+      { index = 2, kind = 'dropoff', stopType = 'kerbside', name = 'Bahnhof', address = 'Bahnhofplatz', locality = 'Penzberg · Dittenried', sectorLabel = 'Train / Transit Station', lat = 47.750, lon = 11.370 },
+    },
+  })
+  local ui = tm.uiState()
+  T.check(ui.active and ui.active.stops[1].locality == 'Sindelsdorf' and ui.active.stops[1].sectorLabel == 'Supermarket', 'uiState preserves stop locality and sectorLabel')
+  T.check(ui.active.stops[2].locality == 'Penzberg · Dittenried' and ui.active.stops[2].sectorLabel == 'Train / Transit Station', 'uiState preserves upcoming stop locality and sectorLabel')
+  local hp = tm.hudPayload()
+  T.check(hp.stopLocality == 'Sindelsdorf' and hp.stopSectorLabel == 'Supermarket', 'hudPayload forwards active stopLocality and stopSectorLabel')
+  T.check(hp.nextStopLocality == 'Penzberg · Dittenried' and hp.nextStopSectorLabel == 'Train / Transit Station', 'hudPayload forwards nextStopLocality and nextStopSectorLabel')
+  tm.cancelJob()
+end
+
 T.done('test_transport_modes')

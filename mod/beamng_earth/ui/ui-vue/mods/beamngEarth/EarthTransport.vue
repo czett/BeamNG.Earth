@@ -21,9 +21,12 @@
         <div class="tm-current">
           <div class="tm-stop-header">
             <div class="tm-stop-name">{{ currentStop ? currentStop.name : "Next stop" }}</div>
-            <span v-if="currentStop && currentStop.kind" class="tm-kind-tag">{{ stopKindLabel(currentStop.kind) }}</span>
+            <div class="tm-stop-tags">
+              <span v-if="currentStop && currentStop.sectorLabel" class="tm-sector-tag">{{ currentStop.sectorLabel }}</span>
+              <span v-if="currentStop && currentStop.kind" class="tm-kind-tag">{{ stopKindLabel(currentStop.kind) }}</span>
+            </div>
           </div>
-          <div v-if="currentStop && currentStop.address" class="tm-stop-addr">{{ currentStop.address }}</div>
+          <div v-if="stopSubtitle" class="tm-stop-addr">{{ stopSubtitle }}</div>
           <div v-if="active.mode === 'taxi'" class="tm-subline">
             <span class="tm-pill" :class="{ on: active.passengerOnBoard }">
               {{ active.passengerOnBoard ? (active.paxCount || 1) + ' pax on board' : 'En route to pickup (' + (active.paxCount || 1) + ' pax)' }}
@@ -93,7 +96,7 @@
             @click="$emit('focus-stop', s)"
           >
             <span class="tm-stop-num tm-num">{{ idx + 1 < active.stopIndex ? '✓' : idx + 1 }}</span>
-            <span class="tm-stop-label">{{ s.name }}</span>
+            <span class="tm-stop-label">{{ s.name }}<span v-if="s.locality" class="tm-stop-loc"> · {{ s.locality }}</span></span>
             <span class="tm-stop-kind">{{ s.stopType === 'loading_bay' ? 'Bay' : stopKindLabel(s.kind) }}</span>
           </div>
         </div>
@@ -203,6 +206,16 @@ const stops = computed(() => active.value ? toArray(active.value.stops) : [])
 const currentStop = computed(() => {
   if (!active.value || !stops.value.length) return null
   return stops.value[(active.value.stopIndex || 1) - 1] || null
+})
+const stopSubtitle = computed(() => {
+  const s = currentStop.value
+  if (!s) return ""
+  const addr = String(s.address || "").trim()
+  const loc = String(s.locality || "").trim()
+  if (addr && loc) {
+    return addr.toLowerCase().includes(loc.toLowerCase()) ? addr : `${addr} · ${loc}`
+  }
+  return addr || loc
 })
 const dwellLabel = computed(() => {
   if (!active.value) return "Hold in bay"
@@ -382,6 +395,21 @@ const errText = computed(() => actionError.value || st.value.error || "")
   gap: 8px;
 }
 .tm-stop-name { font-weight: 600; font-size: 13.5px; color: #fff; min-width: 0; }
+.tm-stop-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.tm-sector-tag {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+  color: #b4c5d6;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
 .tm-kind-tag {
   font-size: 10px;
   text-transform: uppercase;
@@ -389,6 +417,7 @@ const errText = computed(() => actionError.value || st.value.error || "")
   color: #8c99a6;
   flex-shrink: 0;
 }
+.tm-stop-loc { color: #8c99a6; font-weight: 400; font-size: 11px; }
 .tm-stop-addr { font-size: 11px; color: #93a0ad; }
 .tm-metrics {
   display: flex;

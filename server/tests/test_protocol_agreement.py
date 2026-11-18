@@ -510,6 +510,16 @@ SERVER_TO_MOD = {
 }
 WEATHER_NESTED = {"cover": {"total", "low", "mid", "high"}, "wind": {"ms", "fromDeg", "gustMs"},
                   "aloft": {"ms", "fromDeg"}}
+TRANSPORT_STOP_FIELDS = {
+    "index": F(int), "kind": F(str), "stopType": F(str), "name": F(str),
+    "address": F(str), "lat": F(NUM), "lon": F(NUM),
+    "road": F(str), "roadClass": F(str), "bidirectional": F(bool),
+    "bearing": F(NUM), "zoneRadius": F(NUM),
+    "dwellTargetS": F(NUM, OPT), "cargoDeltaKg": F(NUM, OPT),
+    "paxBoard": F(int, OPT), "paxAlight": F(int, OPT),
+    "targetArrivalS": F(NUM, OPT),
+    "locality": F(str, OPT), "sectorLabel": F(str, OPT),
+}
 # message types the plain session cannot produce (each has its own session test below)
 EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs map data (roads tests)
                        "space_clouds",                               # the clouds from space: NASA GIBS (test_spaceclouds)

@@ -571,6 +571,54 @@ class Phase4MultiLegLogisticsTest(unittest.TestCase):
             self.assertIn(lg["legKind"], ("loaded_solo", "deadhead"))
             self.assertIsNone(lg["trailerModel"])
 
+    def test_derive_sector_label(self):
+        self.assertEqual(tm.derive_sector_label(cat="supermarket", name="Edeka"), "Supermarket")
+        self.assertEqual(tm.derive_sector_label(cat="bakery", name="Bäckerei"), "Bakery")
+        self.assertEqual(tm.derive_sector_label(tags={"amenity": "pharmacy"}, name="Apotheke"), "Pharmacy")
+        self.assertEqual(tm.derive_sector_label(cat="restaurant", name="Gasthof"), "Restaurant / Inn")
+        self.assertEqual(tm.derive_sector_label(cat="hotel", name="Hotel Post"), "Hotel")
+        self.assertEqual(tm.derive_sector_label(tags={"shop": "hardware"}, name="Bauhaus"), "Workshop / Hardware")
+        self.assertEqual(tm.derive_sector_label(tags={"amenity": "fuel"}, name="Shell"), "Fuel Station")
+        self.assertEqual(tm.derive_sector_label(cat="train_station", name="Bahnhof"), "Train / Transit Station")
+        self.assertEqual(tm.derive_sector_label(bld_class="warehouse", name="Hub"), "Logistics Depot")
+        self.assertEqual(tm.derive_sector_label(kind="bus_stop", name="Stop 1"), "Bus Stop")
+        self.assertEqual(tm.derive_sector_label(name="Main Street"), "")
+
+    def test_resolve_locality_and_stop_enrichment(self):
+        md = _seed_corridor_md(base_lat=47.713, base_lon=11.383)
+        k = mapcells.cell_of(47.713, 11.383)
+        md.put(k, "town_points", FakeFeatures([{
+            "id": "tp_1",
+            "attrs": {"name": "Penzberg", "subtype": "locality"},
+            "parts": [[np.array([[11.383, 47.713]], np.float64)]],
+        }]))
+        md.put(k, "hoods", FakeFeatures([{
+            "id": "hd_1",
+            "attrs": {"name": "Dittenried", "subtype": "neighborhood"},
+            "parts": [[np.array([[11.384, 47.714]], np.float64)]],
+        }]))
+        loc = tm._resolve_locality(md, 47.7135, 11.3835, deadline=1e12)
+        self.assertEqual(loc, "Penzberg · Dittenried")
+
+        # Single town without hood
+        md2 = FakeMapData()
+        md2.put(k, "town_points", FakeFeatures([{
+            "id": "tp_2",
+            "attrs": {"name": "Sindelsdorf", "subtype": "village"},
+            "parts": [[np.array([[11.383, 47.713]], np.float64)]],
+        }]))
+        self.assertEqual(tm._resolve_locality(md2, 47.7135, 11.3835, deadline=1e12), "Sindelsdorf")
+
+        # Graceful empty fallback when neither town_points, hoods, nor randomplace.towns() match
+        with mock.patch.object(tm.randomplace, "towns", return_value=[]):
+            self.assertEqual(tm._resolve_locality(FakeMapData(), 47.7135, 11.3835, deadline=1e12), "")
+
+        # End-to-end taxi job carries locality and sectorLabel on stops
+        res = tm.generate_job(md, None, mode="taxi", tier="short", lat=47.713, lon=11.383, heading=20.0, seed=1)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(any(s.get("locality") == "Penzberg · Dittenried" for s in res["stops"]))
+        self.assertTrue(any(s.get("sectorLabel") for s in res["stops"]))
+
 
 if __name__ == "__main__":
     unittest.main()
