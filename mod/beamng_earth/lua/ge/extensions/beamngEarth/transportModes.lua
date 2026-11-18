@@ -302,9 +302,9 @@ function M.baySpec(mode, tier)
   mode = type(mode) == 'string' and mode:lower() or ''
   tier = type(tier) == 'string' and tier:lower() or ''
   if mode == 'bus' or (mode == 'logistics' and tier ~= 'local') then
-    return { width = 3.8, length = 14.0, halfW = 1.9, halfL = 7.0, latTol = M.BAY_LAT_TOL_M, longTol = 7.75 }
+    return { width = 3.2, length = 11.5, halfW = 1.60, halfL = 5.75, latTol = M.BAY_LAT_TOL_M, longTol = 7.75 }
   end
-  return { width = 3.4, length = 8.5, halfW = 1.7, halfL = 4.25, latTol = M.BAY_LAT_TOL_M, longTol = M.BAY_LONG_TOL_M }
+  return { width = 2.7, length = 6.2, halfW = 1.35, halfL = 3.10, latTol = M.BAY_LAT_TOL_M, longTol = M.BAY_LONG_TOL_M }
 end
 
 -- Pure: ENU forward (fx, fy) and right-hand lateral (rx, ry) unit axes for compass bearingDeg given local north (nx, ny).
@@ -2020,12 +2020,20 @@ function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
 end
 
 M.BAY_FLOAT_H = 0.10
-M.BAY_CORNER_R = 0.65
+M.BAY_TOP_H = 0.65
+M.BAY_CORNER_R = 0.55
 M.BAY_CORNER_SEGS = 6
-M.BAY_LINE_W = 0.09
-M.BAY_IDLE_GREY = { 0.72, 0.74, 0.78, 0.34 }
-M.BAY_ALIGNED_GREEN = { 0.25, 0.85, 0.52, 0.55 }
-M.BAY_PARTIAL_AMBER = { 0.92, 0.68, 0.28, 0.48 }
+M.BAY_CORNER_W = 0.12
+M.BAY_BAR_W = 0.16
+M.BAY_BAR_H = 0.14
+M.BAY_CORNER_BANDS = {
+  { 0.10, 0.24 },
+  { 0.305, 0.445 },
+  { 0.51, 0.65 },
+}
+M.BAY_IDLE_GREY = { 0.78, 0.80, 0.84, 0.44 }
+M.BAY_ALIGNED_GREEN = { 0.25, 0.85, 0.52, 0.62 }
+M.BAY_PARTIAL_AMBER = { 0.92, 0.68, 0.28, 0.55 }
 
 local function lerp(a, b, t) return a + (b - a) * t end
 
@@ -2060,98 +2068,140 @@ function M.sampleBayGridZ(grid, u, v, zFallback)
   return lerp(lerp(z00, z01, tv), lerp(z10, z11, tv), tu)
 end
 
--- Pure: build minimalist rounded-rectangle floating frame suspended ~0.10 m above terrain (no pole, ring, floor tint, or chevrons).
-function M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, col, radiusM, lineW)
+-- Pure: build compact 3D stacked corner-bracket + segmented floating enclosure suspended >= 0.10 m above terrain.
+function M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, col, radiusM, cornerW)
   local hl, hw = spec.halfL, spec.halfW
   local r = math.min(tonumber(radiusM) or M.BAY_CORNER_R, hw - 0.15, hl - 0.15)
-  local w = tonumber(lineW) or M.BAY_LINE_W
-  local halfW = w * 0.5
+  local cw = tonumber(cornerW) or M.BAY_CORNER_W
   local segs = M.BAY_CORNER_SEGS
-  local lift = M.BAY_FLOAT_H
   local c = col or M.BAY_IDLE_GREY
   local ihl, ihw = hl - r, hw - r
 
-  local function pt(along, across)
-    local z = zFn(along, across) + lift
+  local function clamp01(v) return math.max(0, math.min(1, v)) end
+  local function pt(along, across, z)
     return { x = sx + along * fx + across * rx, y = sy + along * fy + across * ry, z = z }
   end
 
-  local ring = {}
-  local function addPt(a, cr)
-    if #ring > 0 then
-      local prev = ring[#ring]
-      if math.abs(prev.a - a) < 1e-5 and math.abs(prev.c - cr) < 1e-5 then return end
-    end
-    ring[#ring + 1] = { a = a, c = cr }
-  end
-  local function addArc(ca, cc, ang0, ang1)
-    for i = 0, segs do
-      local ang = ang0 + (i / segs) * (ang1 - ang0)
-      addPt(ca + r * math.cos(ang), cc + r * math.sin(ang))
-    end
-  end
-  local function addEdge(a0, c0, a1, c1)
-    local len = math.sqrt((a1 - a0) ^ 2 + (c1 - c0) ^ 2)
-    local n = math.max(1, math.ceil(len / 1.5))
-    for i = 1, n do
-      local t = i / n
-      addPt(a0 + (a1 - a0) * t, c0 + (c1 - c0) * t)
-    end
-  end
-
-  addArc(ihl, ihw, 0, math.pi * 0.5)
-  addEdge(ihl, hw, -ihl, hw)
-  addArc(-ihl, ihw, math.pi * 0.5, math.pi)
-  addEdge(-hl, ihw, -hl, -ihw)
-  addArc(-ihl, -ihw, math.pi, math.pi * 1.5)
-  addEdge(-ihl, -hw, ihl, -hw)
-  addArc(ihl, -ihw, math.pi * 1.5, math.pi * 2.0)
-  addEdge(hl, -ihw, hl, ihw)
-  if #ring > 1 and math.abs(ring[#ring].a - ring[1].a) < 1e-5 and math.abs(ring[#ring].c - ring[1].c) < 1e-5 then
-    ring[#ring] = nil
-  end
-
-  local n = #ring
-  if n < 3 then return {} end
-  local outer, inner = {}, {}
-  for i = 1, n do
-    local prev = ring[((i - 2) % n) + 1]
-    local cur = ring[i]
-    local nxt = ring[(i % n) + 1]
-    local d1a, d1c = cur.a - prev.a, cur.c - prev.c
-    local l1 = math.max(1e-6, math.sqrt(d1a * d1a + d1c * d1c))
-    local n1a, n1c = d1c / l1, -d1a / l1
-    local d2a, d2c = nxt.a - cur.a, nxt.c - cur.c
-    local l2 = math.max(1e-6, math.sqrt(d2a * d2a + d2c * d2c))
-    local n2a, n2c = d2c / l2, -d2a / l2
-    local ma, mc = n1a + n2a, n1c + n2c
-    local ml = math.sqrt(ma * ma + mc * mc)
-    if ml < 1e-5 then
-      ma, mc = n1a, n1c
-    else
-      ma, mc = ma / ml, mc / ml
-      local dot = ma * n1a + mc * n1c
-      local scale = math.min(1.8, 1.0 / math.max(0.4, dot))
-      ma, mc = ma * scale, mc * scale
-    end
-    outer[i] = pt(cur.a + ma * halfW, cur.c + mc * halfW)
-    inner[i] = pt(cur.a - ma * halfW, cur.c - mc * halfW)
-  end
-
   local quads = {}
-  for i = 1, n do
-    local j = (i % n) + 1
-    quads[i] = {
-      kind = 'frame_rail',
-      widthM = w,
-      liftM = lift,
-      p0 = outer[i],
-      p1 = outer[j],
-      p2 = inner[j],
-      p3 = inner[i],
-      r = c[1], g = c[2], b = c[3], a = c[4],
+  local function emitQuad(p0, p1, p2, p3, kind, face, shade, meta)
+    quads[#quads + 1] = {
+      kind = kind,
+      face = face,
+      band = meta.band,
+      corner = meta.corner,
+      edge = meta.edge,
+      segmentId = meta.segmentId,
+      widthM = meta.widthM,
+      heightM = meta.heightM,
+      liftM = meta.liftM,
+      topM = meta.topM,
+      p0 = p0,
+      p1 = p1,
+      p2 = p2,
+      p3 = p3,
+      r = clamp01(c[1] * shade),
+      g = clamp01(c[2] * shade),
+      b = clamp01(c[3] * shade),
+      a = c[4],
     }
   end
+
+  local function extrudeStrip(pts, widthM, z0, z1, kind, baseShade, meta)
+    local n = #pts
+    if n < 2 then return end
+    local halfT = widthM * 0.5
+    local ob, ot, ib, it = {}, {}, {}, {}
+    for i = 1, n do
+      local p = pts[i]
+      local gz = zFn(p.a, p.c)
+      local zb, zt = gz + z0, gz + z1
+      ob[i] = pt(p.a + p.na * halfT, p.c + p.nc * halfT, zb)
+      ot[i] = pt(p.a + p.na * halfT, p.c + p.nc * halfT, zt)
+      ib[i] = pt(p.a - p.na * halfT, p.c - p.nc * halfT, zb)
+      it[i] = pt(p.a - p.na * halfT, p.c - p.nc * halfT, zt)
+    end
+    meta.widthM = widthM
+    meta.heightM = z1 - z0
+    meta.liftM = z0
+    meta.topM = z1
+    for i = 1, n - 1 do
+      local j = i + 1
+      emitQuad(ob[i], ob[j], ot[j], ot[i], kind, 'outer', baseShade, meta)
+      emitQuad(ib[j], ib[i], it[i], it[j], kind, 'inner', baseShade * 0.86, meta)
+      emitQuad(ot[i], ot[j], it[j], it[i], kind, 'top', baseShade * 1.08, meta)
+    end
+    emitQuad(ib[1], ob[1], ot[1], it[1], kind, 'cap', baseShade * 0.92, meta)
+    emitQuad(ob[n], ib[n], it[n], ot[n], kind, 'cap', baseShade * 0.92, meta)
+  end
+
+  -- 1. Four rounded 3D corner posts with 3 stacked bands (0.10 m -> 0.65 m)
+  local corners = {
+    { id = 'fl', ca = ihl,  cc = ihw,  ang0 = 0,              ang1 = math.pi * 0.5 },
+    { id = 'bl', ca = -ihl, cc = ihw,  ang0 = math.pi * 0.5,  ang1 = math.pi },
+    { id = 'br', ca = -ihl, cc = -ihw, ang0 = math.pi,        ang1 = math.pi * 1.5 },
+    { id = 'fr', ca = ihl,  cc = -ihw, ang0 = math.pi * 1.5,  ang1 = math.pi * 2.0 },
+  }
+  local bandShades = { 0.92, 1.00, 1.06 }
+  for _, cn in ipairs(corners) do
+    local pts = {}
+    for i = 0, segs do
+      local ang = cn.ang0 + (i / segs) * (cn.ang1 - cn.ang0)
+      local nx, nc = math.cos(ang), math.sin(ang)
+      pts[i + 1] = { a = cn.ca + r * nx, c = cn.cc + r * nc, na = nx, nc = nc }
+    end
+    for bi, bnd in ipairs(M.BAY_CORNER_BANDS) do
+      extrudeStrip(pts, cw, bnd[1], bnd[2], 'corner_band', bandShades[bi] or 1.0, {
+        band = bi,
+        corner = cn.id,
+        segmentId = cn.id .. '_b' .. bi,
+      })
+    end
+  end
+
+  -- 2. Disconnected segmented 3D bars along left, right, front, and rear edges
+  local edges = {
+    { id = 'left',  a0 = ihl,  c0 = hw,   a1 = -ihl, c1 = hw,   na = 0,  nc = 1 },
+    { id = 'rear',  a0 = -hl,  c0 = ihw,  a1 = -hl,  c1 = -ihw, na = -1, nc = 0 },
+    { id = 'right', a0 = -ihl, c0 = -hw,  a1 = ihl,  c1 = -hw,  na = 0,  nc = -1 },
+    { id = 'front', a0 = hl,   c0 = -ihw, a1 = hl,   c1 = ihw,  na = 1,  nc = 0 },
+  }
+  local barW = M.BAY_BAR_W
+  local barZ0 = M.BAY_FLOAT_H
+  local barZ1 = M.BAY_FLOAT_H + M.BAY_BAR_H
+  for _, ed in ipairs(edges) do
+    local da, dc = ed.a1 - ed.a0, ed.c1 - ed.c0
+    local edgeLen = math.sqrt(da * da + dc * dc)
+    local cornerGap = math.min(0.42, edgeLen * 0.22)
+    local avail = edgeLen - 2 * cornerGap
+    if avail >= 0.45 then
+      local nBars = math.max(1, math.floor((avail + 0.42) / 1.50))
+      local gap = (nBars > 1) and math.min(0.45, (avail * 0.36) / (nBars - 1)) or 0
+      local barLen = (avail - gap * (nBars - 1)) / nBars
+      if barLen >= 0.35 then
+        for bi = 1, nBars do
+          local s0 = cornerGap + (bi - 1) * (barLen + gap)
+          local s1 = s0 + barLen
+          local t0, t1 = s0 / edgeLen, s1 / edgeLen
+          local nSub = barLen > 1.2 and 2 or 1
+          local pts = {}
+          for k = 0, nSub do
+            local t = t0 + (t1 - t0) * (k / nSub)
+            pts[k + 1] = {
+              a = ed.a0 + da * t,
+              c = ed.c0 + dc * t,
+              na = ed.na,
+              nc = ed.nc,
+            }
+          end
+          extrudeStrip(pts, barW, barZ0, barZ1, 'edge_bar', 0.96, {
+            edge = ed.id,
+            segmentId = ed.id .. '_' .. bi,
+          })
+        end
+      end
+    end
+  end
+
   return quads
 end
 
