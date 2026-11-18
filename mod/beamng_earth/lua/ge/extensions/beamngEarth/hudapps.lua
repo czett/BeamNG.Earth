@@ -52,6 +52,7 @@ local function transportKey(tr)
   return table.concat({
     tostring(tr.state or ''), tostring(tr.mode or ''), tostring(tr.tier or ''),
     tostring(tr.stopIndex or ''), tostring(tr.stopCount or ''), tostring(tr.stopName or ''),
+    tostring(tr.stopLocality or ''), tostring(tr.stopSectorLabel or ''),
     tostring(tr.stopKind or ''), tostring(tr.stopType or ''),
     tostring(tr.distM or ''), tostring(tr.etaS or ''),
     tostring(tr.dwellMode or ''), tostring(tr.dwellTargetS or ''), tostring(tr.dwellLabel or ''),
@@ -60,6 +61,7 @@ local function transportKey(tr)
     tostring(tr.score or ''), tostring(tr.fare or ''), tostring(tr.passengerOnBoard or ''),
     tostring(tr.rideArchetype or ''), tostring(tr.paxCount or ''), tostring(tr.paxCapacity or ''),
     tostring(tr.scheduleText or ''), tostring(tr.nextStopName or ''),
+    tostring(tr.nextStopLocality or ''), tostring(tr.nextStopSectorLabel or ''),
     tostring(tr.cargoKg or ''), tostring(tr.cargoCurrentKg or ''), tostring(tr.cargoLabel or ''),
     tostring(tr.legKind or ''), tostring(tr.legLabel or ''), tostring(tr.trailerLabel or ''), tostring(tr.trailerState or ''),
     tostring(tr.trailerMissing or ''), tostring(tr.bayHint or ''),
