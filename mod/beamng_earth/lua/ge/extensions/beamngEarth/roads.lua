@@ -679,6 +679,9 @@ local function updateCollideRange()
     if reloads >= d[1] then dirtyAt[sq] = nil
     elseif M.collideNear({ cx = d[2], cy = d[3] }, M.TILE_M) then dirtyAt[sq] = nil; markDirty('spot') end
   end
+  local pos = veh and veh.getPosition and veh:getPosition() or nil
+  local deEnh = require('beamngEarth/deEnhancer')
+  local deOn = deEnh.isEnabled()
   local dropped = nil       -- ids of colliders dropped here (BEHIND / UNCOLLIDE_M): none of them is due any more
   for key, t in pairs(tiles) do
     if t.colDirty then      -- deferred collider dirt (markTileCollider): solid after any rebuild, promoted near
@@ -695,6 +698,24 @@ local function updateCollideRange()
       end
       t.cq = nil
     end
+    if deOn and pos and t.cx and (t.destreets or t.deshops) then
+      local dx, dy = pos.x - t.cx, pos.y - t.cy
+      local d2 = dx * dx + dy * dy
+      local halfTile = (M.TILE_M or 256) * 0.5
+      for _, w in ipairs({ 'destreets', 'deshops' }) do
+        local id = t[w]
+        if id then
+          local lim = (deEnh.cullDistance(w) or 160) + halfTile
+          local hide = d2 > lim * lim
+          local hk = '_' .. w .. 'Hidden'
+          if t[hk] ~= hide then
+            local o = scenetree.findObjectById(id)
+            if o then o:setHidden(hide) end
+            t[hk] = hide
+          end
+        end
+      end
+    end
   end
   if dropped and #newColliders > 0 then
     local keep = {}
@@ -710,7 +731,7 @@ local function isCollider(o)
 end
 
 -- collide: true ('Visible Mesh Final'), a collision type name, or false / nil (render only)
-local function createWalk(walk, collide)
+local function createWalk(walk, collide, noShadow)
   require('beamngEarth/texdbg').log('shape', walk.shape)
   local o = createObject('TSStatic')
   o:setField('shapeName', 0, walk.shape)
@@ -719,6 +740,7 @@ local function createWalk(walk, collide)
   o:setField('collisionType', 0, type(collide) == 'string' and collide or (collide and 'Visible Mesh Final' or 'None'))
   o:setField('decalType', 0, 'None')
   o:setField('dynamic', 0, 'true')    -- no redraw of the cached sun shadow map for each tile (farfield.lua spawn)
+  if noShadow then o:setField('castShadows', 0, 'false') end
   o.canSave = false
   o:setPosition(vec3(walk.pos[1], walk.pos[2], walk.pos[3]))
   o:registerObject('')
@@ -2462,7 +2484,9 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
       local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
       -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
       local collide = (q.what == 'bldcol' or q.what == 'walkcol' or q.what == 'railcol' or q.what == 'buscol') and 'Collision Mesh' or not isRoad
-      local ok, id = pcall(createWalk, walk, staged and 'None' or collide)
+      local deEnh = require('beamngEarth/deEnhancer')
+      local noShadow = deEnh.NO_SHADOW_WHATS and deEnh.NO_SHADOW_WHATS[q.what] == true
+      local ok, id = pcall(createWalk, walk, staged and 'None' or collide, noShadow)
       if ok then slotMade(id, walk.shape, (q.what == 'deck' or q.what == 'tunnel') and t.waterguard or nil) end
       if staged and not ok then                    -- (a shape that cannot be made: the swap must not commit)
         swapState.failed = 'staged ' .. tostring(q.what) .. ': ' .. tostring(id)

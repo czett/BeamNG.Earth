@@ -2955,7 +2955,7 @@ def _concat(meshes):
 
 
 @profile_step('Building mesh assembly')
-def build_parts(specs_and_ground, lite=False, max_verts=MAX_MESH_VERTS, with_lod=False):
+def build_parts(specs_and_ground, lite=False, max_verts=MAX_MESH_VERTS, with_lod=False, de_detail=None):
     """build() split into meshes of at most max_verts vertices each (whole buildings per mesh): a list, [] if empty.
     Each building is built once (build draws them one by one) and the meshes joined. with_lod: each mesh carries the
     lite mesh of its buildings as a 7th element (write: the shape's coarse detail). A building alone past VERTS_MAX
@@ -2974,7 +2974,7 @@ def build_parts(specs_and_ground, lite=False, max_verts=MAX_MESH_VERTS, with_lod
             parts.append(mesh + (_concat(cur_lite) if cur_lite else None,) if with_lod and not lite else mesh)
 
     for i, item in enumerate(specs_and_ground):
-        one = prepared[i][0] if prepared is not None else build([item], lite)
+        one = prepared[i][0] if prepared is not None else build([item], lite, de_detail=de_detail)
         if one is None:
             continue
         if len(one[0]) > VERTS_MAX:
@@ -3245,7 +3245,7 @@ GARAGE_DRIVE_W = 6.5        # m: a garage entrance's two lanes
 GARAGE_DRIVE_MAX_M = 25.0   # m from the outline to a road's edge at most
 
 
-def build(specs_and_ground, lite=False):
+def build(specs_and_ground, lite=False, de_detail=None):
     """The tile's mesh from [(Spec, ground z min, ground z max)] with rings in the tile's local frame:
     (positions, uvs, tris, tri material indices, MATERIALS) or None if empty. lite (far tiles): no
     cornices, whole walls instead of one quad per bay."""
@@ -3301,7 +3301,7 @@ def build(specs_and_ground, lite=False):
                 z_top = z_eave - (spec.floors - 1) * spec.floor_h if spec.floors > 1 else z_eave
             _signs(bm, spec, ring, z_top, mat_idx)
         if de_flag:
-            de_enhancer.bake_building_depth(bm, spec, gmin, gmax, z_eave, lite, mat_idx)
+            de_enhancer.bake_building_depth(bm, spec, gmin, gmax, z_eave, lite, mat_idx, de_detail=de_detail)
             m.append_mesh(bm)
     if m.n == 0:
         return None
@@ -7054,6 +7054,7 @@ def road_tile(
     entries=None,
     radii=None,
     before_parts=None,
+    de_detail=None,
 ):
     """The buildings of road tile (tx, ty) (roads.TILE squares of the anchor frame): ((mesh, collider boxes,
     collision mesh), [b3dmr entries]). The first element is None without any procedural buildings. md:
@@ -7084,7 +7085,7 @@ def road_tile(
         props.extend(doors(items, lines, x0, y0))
     if before_parts is not None:
         before_parts(items)
-    meshes = build_parts(items, with_lod=True)
+    meshes = build_parts(items, with_lod=True, de_detail=de_detail)
     bld = (
         (meshes, collider_boxes(items, x0, y0), collision_mesh(items))
         if meshes

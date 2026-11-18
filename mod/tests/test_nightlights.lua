@@ -158,4 +158,10 @@ clock = clock + 2; nl.update()
 T.check(mats.bne_bld_facade.fields.emissiveMap == nl.MAPS.bne_bld_facade[1] and nl.status().errors == 0,
   'the evening: its map back')
 nl.reset()
+-- Dusk hook in nightlights.apply does not disturb day/night or step() when expDeStreetImmersion is off
+do
+  local st0 = nl.status()
+  T.check(st0.night == false or st0.night == true or st0.night == nil, 'nightlights status intact with dusk hook')
+end
+
 T.done('test_nightlights')

@@ -967,4 +967,27 @@ do
   roads.COLLIDE_CHECK_S, roads.BEHIND_JUMP_M = check, jump
   getPlayerVehicle = nil
 end
+-- destreets and deshops TSStatics disable castShadows while bld / walk keep default
+do
+  roads.clear()
+  files['/t/deshad.json'] = '{ chunks = { }, ' ..
+    'bld = { shape = "/t/bld_shad.cdae", pos = { 0, 0, 0 } }, ' ..
+    'destreets = { shape = "/t/destreets_shad.cdae", pos = { 0, 0, 0 } }, ' ..
+    'deshops = { shape = "/t/deshops_shad.cdae", pos = { 0, 0, 0 } } }'
+  roads.onTile({ anchorId = 11, key = '0_0', path = '/t/deshad.json', n = 0 }, 11)
+  for _ = 1, 6 do roads.update(gov, 11) end
+  local byShape = {}
+  for _, o in pairs(S.objects) do
+    if o.class == 'TSStatic' and o.fields and o.fields.shapeName then
+      byShape[o.fields.shapeName] = o
+    end
+  end
+  T.check(byShape['/t/bld_shad.cdae'] and byShape['/t/bld_shad.cdae']:getField('castShadows', 0) == nil,
+    'bld keeps default castShadows')
+  T.check(byShape['/t/destreets_shad.cdae'] and byShape['/t/destreets_shad.cdae']:getField('castShadows', 0) == 'false',
+    'destreets disables castShadows')
+  T.check(byShape['/t/deshops_shad.cdae'] and byShape['/t/deshops_shad.cdae']:getField('castShadows', 0) == 'false',
+    'deshops disables castShadows')
+  roads.clear()
+end
 T.done('test_roads')

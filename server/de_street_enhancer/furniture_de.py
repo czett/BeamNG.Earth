@@ -50,6 +50,8 @@ MIN_ISLAND_WIDTH_M = 3.00
 BOLLARD_KERB_CLEAR_M = 0.35
 DOOR_CLEAR_M = 2.50
 MAX_PROC_CABINETS_PER_TILE = 2
+DE_MAX_SLOPE_DEG = 22.0
+DE_MAX_SLOPE_TAN = math.tan(math.radians(DE_MAX_SLOPE_DEG))
 
 
 @dataclass(frozen=True)
@@ -423,6 +425,8 @@ def plan_de_street_furniture(
     ty: int | None = None,
     arms_map: dict | None = None,
     rings_arr: list[np.ndarray] | None = None,
+    level: str = "medium",
+    fast_pass: bool = False,
 ) -> FurniturePlan:
     """Plan German bus stops, Stromkästen, Packstationen, Altglascontainer, and corner bollards."""
     empty = FurniturePlan((), (), (), (), (), ())
@@ -649,17 +653,25 @@ def plan_de_street_furniture(
                 continue
             proc_cab_cands.append((min_j + _hash01(fid, side, int(station)), pos, tang, -away))
 
+    skip_micro = (level == "low") or bool(fast_pass)
+    if skip_micro:
+        cab_raw.clear()
+        lock_raw.clear()
+        rec_raw.clear()
+
+    max_cabs = 1 if level == "medium" else MAX_PROC_CABINETS_PER_TILE
     proc_cab_cands.sort(key=lambda c: c[0])
     proc_added = 0
-    for _sc, pos, tang, toward in proc_cab_cands:
-        if proc_added >= MAX_PROC_CABINETS_PER_TILE:
-            break
-        px, py = float(pos[0]), float(pos[1])
-        if any(math.hypot(px - ox, py - oy) < 10.0 for ox, oy in occupied_xy):
-            continue
-        cab_raw.append((pos, tang, toward))
-        occupied_xy.append((px, py))
-        proc_added += 1
+    if not skip_micro:
+        for _sc, pos, tang, toward in proc_cab_cands:
+            if proc_added >= max_cabs:
+                break
+            px, py = float(pos[0]), float(pos[1])
+            if any(math.hypot(px - ox, py - oy) < 10.0 for ox, oy in occupied_xy):
+                continue
+            cab_raw.append((pos, tang, toward))
+            occupied_xy.append((px, py))
+            proc_added += 1
 
     # Corner sidewalk bollards (`Poller`) placed ONLY on real outer sidewalk polygons >= 0.35 m behind kerb.
     bollard_raw: list[np.ndarray] = []
@@ -683,58 +695,61 @@ def plan_de_street_furniture(
         bollard_raw.append(b_pt)
         return True
 
-    # 1. Prefer explicit `corner` curb-return sidewalk polygons from `walks`.
-    for wk in walks or ():
-        if "corner" not in wk or wk.get("median"):
-            continue
-        c = wk["corner"]
-        arc = _finite_2d(c.get("arc"), min_pts=2)
-        inward = _finite_2d(c.get("inward"), min_pts=2)
-        if arc is None or inward is None or len(arc) != len(inward):
-            continue
-        mid_i = len(arc) // 2
-        if not any(math.hypot(float(arc[mid_i, 0]) - jx, float(arc[mid_i, 1]) - jy) < 22.0 for jx, jy in junc_pts):
-            continue
-        for idx_c in sorted({max(0, mid_i - 1), mid_i, min(len(arc) - 1, mid_i + 1)}):
-            in_v = inward[idx_c]
-            in_l = float(np.hypot(in_v[0], in_v[1]))
-            if in_l < 1e-4:
+    max_bol_corner = 2 if level == "medium" else 3
+    if not skip_micro:
+        # 1. Prefer explicit `corner` curb-return sidewalk polygons from `walks`.
+        for wk in walks or ():
+            if "corner" not in wk or wk.get("median"):
                 continue
-            _try_add_bollard(arc[idx_c] + (in_v / in_l) * 0.55)
-
-    # 2. Fallback for 3+ arm junctions with `pts` sidewalks (sort ALL arms so reflex/primary arms are never skipped).
-    if not bollard_raw:
-        for _k, arms in arms_map.items():
-            if len(arms) < 3:
+            c = wk["corner"]
+            arc = _finite_2d(c.get("arc"), min_pts=2)
+            inward = _finite_2d(c.get("inward"), min_pts=2)
+            if arc is None or inward is None or len(arc) != len(inward):
                 continue
-            if sum(1 for a in arms if getattr(a[1], "cls", "") in ("residential", "tertiary", "secondary", "unclassified")) < 2:
+            mid_i = len(arc) // 2
+            if not any(math.hypot(float(arc[mid_i, 0]) - jx, float(arc[mid_i, 1]) - jy) < 22.0 for jx, jy in junc_pts):
                 continue
-            p = np.asarray(arms[0][3], dtype=np.float64)
-            jx, jy = float(p[0]), float(p[1])
-            if not roadsmod.box_owns(box, jx, jy):
-                continue
-            ordered = sorted(arms, key=lambda a: math.atan2(float(a[2][1]), float(a[2][0])))
-            placed_at_j = 0
-            for a_idx in range(len(ordered)):
-                if placed_at_j >= 4:
-                    break
-                a0 = ordered[a_idx]
-                a1 = ordered[(a_idx + 1) % len(ordered)]
-                th0 = math.atan2(float(a0[2][1]), float(a0[2][0]))
-                th1 = math.atan2(float(a1[2][1]), float(a1[2][0]))
-                dth = (th1 - th0) % (2.0 * math.pi)
-                if dth < 0.35 or dth > math.pi - 0.15:
+            for idx_c in sorted({max(0, mid_i - 1), mid_i, min(len(arc) - 1, mid_i + 1)})[:max_bol_corner]:
+                in_v = inward[idx_c]
+                in_l = float(np.hypot(in_v[0], in_v[1]))
+                if in_l < 1e-4:
                     continue
-                bis_th = th0 + dth * 0.5
-                bis = np.array([math.cos(bis_th), math.sin(bis_th)], dtype=np.float64)
-                hw_max = max(float(getattr(a0[1], "width", 6.0) or 6.0), float(getattr(a1[1], "width", 6.0) or 6.0)) * 0.5
-                corner_pt = np.array([jx, jy], dtype=np.float64) + bis * (hw_max * 1.414 + 0.75)
-                tang_c = np.array([-bis[1], bis[0]], dtype=np.float64)
-                for s_off in (-0.95, 0.0, 0.95):
-                    if _try_add_bollard(corner_pt + tang_c * s_off):
-                        placed_at_j += 1
+                _try_add_bollard(arc[idx_c] + (in_v / in_l) * 0.55)
 
-    # Filter all points strictly inside DE and sample ground heights in a single batch.
+        # 2. Fallback for 3+ arm junctions with `pts` sidewalks (sort ALL arms so reflex/primary arms are never skipped).
+        if not bollard_raw:
+            s_offs = (-0.75, 0.75) if level == "medium" else (-0.95, 0.0, 0.95)
+            for _k, arms in arms_map.items():
+                if len(arms) < 3:
+                    continue
+                if sum(1 for a in arms if getattr(a[1], "cls", "") in ("residential", "tertiary", "secondary", "unclassified")) < 2:
+                    continue
+                p = np.asarray(arms[0][3], dtype=np.float64)
+                jx, jy = float(p[0]), float(p[1])
+                if not roadsmod.box_owns(box, jx, jy):
+                    continue
+                ordered = sorted(arms, key=lambda a: math.atan2(float(a[2][1]), float(a[2][0])))
+                placed_at_j = 0
+                for a_idx in range(len(ordered)):
+                    if placed_at_j >= 4:
+                        break
+                    a0 = ordered[a_idx]
+                    a1 = ordered[(a_idx + 1) % len(ordered)]
+                    th0 = math.atan2(float(a0[2][1]), float(a0[2][0]))
+                    th1 = math.atan2(float(a1[2][1]), float(a1[2][0]))
+                    dth = (th1 - th0) % (2.0 * math.pi)
+                    if dth < 0.35 or dth > math.pi - 0.15:
+                        continue
+                    bis_th = th0 + dth * 0.5
+                    bis = np.array([math.cos(bis_th), math.sin(bis_th)], dtype=np.float64)
+                    hw_max = max(float(getattr(a0[1], "width", 6.0) or 6.0), float(getattr(a1[1], "width", 6.0) or 6.0)) * 0.5
+                    corner_pt = np.array([jx, jy], dtype=np.float64) + bis * (hw_max * 1.414 + 0.75)
+                    tang_c = np.array([-bis[1], bis[0]], dtype=np.float64)
+                    for s_off in s_offs:
+                        if _try_add_bollard(corner_pt + tang_c * s_off):
+                            placed_at_j += 1
+
+    # Filter all points strictly inside DE and sample ground heights (+ slope probes for wide props) in a single batch.
     all_pts: list[np.ndarray] = (
         [x[0] for x in bus_raw]
         + [x[0] for x in cab_raw]
@@ -745,10 +760,33 @@ def plan_de_street_furniture(
     )
     if not all_pts:
         return empty
-    xs = np.array([float(p[0]) for p in all_pts], dtype=np.float64)
-    ys = np.array([float(p[1]) for p in all_pts], dtype=np.float64)
-    in_de = germany.de_at(frame, xs, ys)
+    n_base = len(all_pts)
+    wide_start = len(bus_raw)
+    wide_end = wide_start + len(cab_raw) + len(lock_raw) + len(rec_raw)
+    xs_list = [float(p[0]) for p in all_pts]
+    ys_list = [float(p[1]) for p in all_pts]
+    if ground is not None and wide_end > wide_start:
+        d_probe = 0.75
+        for wi in range(wide_start, wide_end):
+            wx, wy = xs_list[wi], ys_list[wi]
+            xs_list.extend((wx - d_probe, wx + d_probe, wx, wx))
+            ys_list.extend((wy, wy, wy - d_probe, wy + d_probe))
+
+    xs = np.array(xs_list, dtype=np.float64)
+    ys = np.array(ys_list, dtype=np.float64)
+    in_de = germany.de_at(frame, xs[:n_base], ys[:n_base])
     zs = np.asarray(ground(xs, ys), dtype=np.float64) if ground is not None else np.zeros(len(xs), dtype=np.float64)
+
+    def _wide_slope_ok(idx: int) -> bool:
+        if ground is None:
+            return True
+        p0 = n_base + (idx - wide_start) * 4
+        zw, ze, z_s, zn = zs[p0], zs[p0 + 1], zs[p0 + 2], zs[p0 + 3]
+        if not (np.isfinite(zw) and np.isfinite(ze) and np.isfinite(z_s) and np.isfinite(zn)):
+            return True
+        dz_dx = (float(ze) - float(zw)) / 1.5
+        dz_dy = (float(zn) - float(z_s)) / 1.5
+        return math.hypot(dz_dx, dz_dy) <= DE_MAX_SLOPE_TAN
 
     cur = 0
     bus_out: list[BusStopItem] = []
@@ -758,17 +796,17 @@ def plan_de_street_furniture(
         cur += 1
     cab_out: list[BoxPropItem] = []
     for pos, along, toward in cab_raw:
-        if in_de[cur] and np.isfinite(zs[cur]):
+        if in_de[cur] and np.isfinite(zs[cur]) and _wide_slope_ok(cur):
             cab_out.append(BoxPropItem("stromkasten", pos, float(zs[cur]), along, toward))
         cur += 1
     lock_out: list[BoxPropItem] = []
     for pos, along, toward in lock_raw:
-        if in_de[cur] and np.isfinite(zs[cur]):
+        if in_de[cur] and np.isfinite(zs[cur]) and _wide_slope_ok(cur):
             lock_out.append(BoxPropItem("packstation", pos, float(zs[cur]), along, toward))
         cur += 1
     rec_out: list[BoxPropItem] = []
     for pos, along, toward in rec_raw:
-        if in_de[cur] and np.isfinite(zs[cur]):
+        if in_de[cur] and np.isfinite(zs[cur]) and _wide_slope_ok(cur):
             rec_out.append(BoxPropItem("altglas", pos, float(zs[cur]), along, toward))
         cur += 1
     fuel_out: list[FuelPylonItem] = []
@@ -798,6 +836,7 @@ def append_furniture_geometry(
     plan: FurniturePlan,
     uv_map: dict[str, tuple[float, float, float, float]],
     macro_only: bool = False,
+    fuel_mat_idx: int | None = None,
 ) -> None:
     """Append watertight closed prisms & posts for all planned German street furniture into `_MeshBuilder`."""
     if not plan.has_any:
@@ -864,34 +903,37 @@ def append_furniture_geometry(
         for cab in plan.cabinets:
             ax = np.array([float(cab.along[0]), float(cab.along[1]), 0.0], dtype=np.float64)
             ay = np.array([float(cab.toward_road[0]), float(cab.toward_road[1]), 0.0], dtype=np.float64)
-            mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.04]), ax, ay, axis_z, 0.48, 0.22, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1)
-            mb.add_box(np.array([cab.xy[0], cab.xy[1], cab.z + 0.68]), ax, ay, axis_z, 0.46, 0.20, 0.56, cab_uv, cab_uv, body_mat=1, face_mat=1)
+            cx, cy = float(cab.xy[0]), float(cab.xy[1])
+            mb.add_box((cx, cy, cab.z - 0.02), ax, ay, axis_z, 0.48, 0.22, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1, skip_bottom=True)
+            mb.add_box((cx, cy, cab.z + 0.64), ax, ay, axis_z, 0.46, 0.20, 0.56, cab_uv, cab_uv, body_mat=1, face_mat=1, skip_bottom=True)
 
         # 3. DHL `Packstationen`
         lock_uv = sw("packstation")
         for lk in plan.lockers:
             ax = np.array([float(lk.along[0]), float(lk.along[1]), 0.0], dtype=np.float64)
             ay = np.array([float(lk.toward_road[0]), float(lk.toward_road[1]), 0.0], dtype=np.float64)
-            mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 1.02]), ax, ay, axis_z, 1.20, 0.34, 1.08, lock_uv, lock_uv, body_mat=1, face_mat=1)
-            mb.add_box(np.array([lk.xy[0], lk.xy[1], lk.z + 2.12]), ax, ay, axis_z, 1.24, 0.38, 0.04, steel_uv, steel_uv, body_mat=1, face_mat=1)
+            lx, ly = float(lk.xy[0]), float(lk.xy[1])
+            mb.add_box((lx, ly, lk.z + 0.96), ax, ay, axis_z, 1.20, 0.34, 1.08, lock_uv, lock_uv, body_mat=1, face_mat=1, skip_bottom=True)
+            mb.add_box((lx, ly, lk.z + 2.06), ax, ay, axis_z, 1.24, 0.38, 0.04, steel_uv, steel_uv, body_mat=1, face_mat=1)
 
         # 4. `Altglascontainer` Trio (Weiss / Braun / Grün)
         alt_uvs = (sw("altglas_w"), sw("altglas_b"), sw("altglas_g"))
         for rc in plan.recyclers:
             ax = np.array([float(rc.along[0]), float(rc.along[1]), 0.0], dtype=np.float64)
             ay = np.array([float(rc.toward_road[0]), float(rc.toward_road[1]), 0.0], dtype=np.float64)
+            rx, ry = float(rc.xy[0]), float(rc.xy[1])
             for idx_b, b_off in enumerate((-0.92, 0.0, 0.92)):
-                c_bin = np.array([rc.xy[0] + ax[0] * b_off, rc.xy[1] + ax[1] * b_off, rc.z + 0.72])
-                mb.add_box(c_bin, ax, ay, axis_z, 0.40, 0.44, 0.76, alt_uvs[idx_b], alt_uvs[idx_b], body_mat=1, face_mat=1)
+                mb.add_box((rx + ax[0] * b_off, ry + ax[1] * b_off, rc.z + 0.66), ax, ay, axis_z, 0.40, 0.44, 0.76, alt_uvs[idx_b], alt_uvs[idx_b], body_mat=1, face_mat=1, skip_bottom=True)
 
         # 5. Corner Sidewalk `Poller`
         pol_uv = sw("poller")
         ax_default = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         ay_default = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         for bol in plan.bollards:
-            mb.add_box(np.array([bol.xy[0], bol.xy[1], bol.z + 0.40]), ax_default, ay_default, axis_z, 0.055, 0.055, 0.48, pol_uv, pol_uv, body_mat=1, face_mat=1)
+            mb.add_box((float(bol.xy[0]), float(bol.xy[1]), bol.z + 0.40), ax_default, ay_default, axis_z, 0.055, 0.055, 0.48, pol_uv, pol_uv, body_mat=1, face_mat=1, skip_bottom=True)
 
     # 6. Fuel Station Price Pylons (`Preistafel`, ~1.20 m x 0.25 m x 3.80 m)
+    fp_face_mat = 1 if fuel_mat_idx is None else int(fuel_mat_idx)
     for fp in plan.fuel_pylons:
         fp_key = f"fuel|{fp.brand_key}|{fp.e10}|{fp.e5}|{fp.diesel}"
         fp_uv = uv_map.get(fp_key)
@@ -899,6 +941,7 @@ def append_furniture_geometry(
             continue
         ax = np.array([float(fp.along[0]), float(fp.along[1]), 0.0], dtype=np.float64)
         ay = np.array([float(fp.toward_road[0]), float(fp.toward_road[1]), 0.0], dtype=np.float64)
+        fx, fy = float(fp.xy[0]), float(fp.xy[1])
         # Concrete footing plinth + main price totem
-        mb.add_box(np.array([fp.xy[0], fp.xy[1], fp.z + 0.02]), ax, ay, axis_z, 0.64, 0.16, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1)
-        mb.add_box(np.array([fp.xy[0], fp.xy[1], fp.z + 1.90]), ax, ay, axis_z, 0.60, 0.125, 1.90, fp_uv, fp_uv, body_mat=0, face_mat=1)
+        mb.add_box((fx, fy, fp.z - 0.02), ax, ay, axis_z, 0.64, 0.16, 0.14, conc_uv, conc_uv, body_mat=1, face_mat=1, skip_bottom=True)
+        mb.add_box((fx, fy, fp.z + 1.90), ax, ay, axis_z, 0.60, 0.125, 1.90, fp_uv, fp_uv, body_mat=0, face_mat=fp_face_mat)
