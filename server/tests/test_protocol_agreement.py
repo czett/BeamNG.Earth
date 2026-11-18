@@ -199,6 +199,8 @@ MOD_TO_SERVER = {
     # road wear (roadwear.py; additive): the settings page's Road surface detail ('off' / 'basic' / 'full'), sent
     # after every hello and on a change
     "road_wear": {"value": F(str)},
+    # German street detail level (earthd.py / de_enhancer.py; additive): 'low' / 'medium' / 'high'
+    "de_detail": {"value": F(str)},
     # the settings page's graphics (Connection.set_graphics; additive): sent after every hello and on a change; the
     # far field's terrain detail (K x lodScale), the tree tiles' and far buildings' reach, the ground photo's px, the
     # far field's screen-space LOD (lodPx: the largest pop on screen, px; 0: off)

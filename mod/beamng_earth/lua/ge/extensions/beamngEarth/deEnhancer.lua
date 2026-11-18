@@ -14,11 +14,27 @@ M.FIELDS = {
 M.FALLBACK_COLOR = '0.08 0.22 0.45 1'
 M.DEFAULT_GLOW_COLOR = '1 0.94 0.84'
 M.DEFAULT_GLOW_NITS = 35
+M.DUSK_GLOW_COLOR = '1 0.82 0.56'
+M.DUSK_SHOP_NITS = 22
+M.DUSK_PYLON_NITS = 34
+M.DUSK_WIN_NITS = 14
+M.CHECK_S = 1.0
+
+M.NO_SHADOW_WHATS = { destreets = true, deshops = true }
+M.CULL_DIST = {
+  low = { deshops = 85, destreets = 135, hedge = 0 },
+  medium = { deshops = 95, destreets = 160, hedge = 160 },
+  high = { deshops = 120, destreets = 185, hedge = 180 },
+}
 
 local mats = {}          -- matName -> { refs, texture, emissive, glowColor, nits }
 local byTile = {}        -- tileKey -> { matName, ... }
 local pendingDel = {}    -- matName -> true
 local savedBldPbr = {}   -- matName -> { field -> origVal_or_false }
+local savedDuskShop = nil
+local duskMatState = {}  -- matName -> true when dusk emissive applied
+local duskActive = false
+local lastDuskCheck = -1e9
 local settingsMod = nil
 local nightlightsMod = nil
 M.count = 0
@@ -26,23 +42,23 @@ M.pbrActive = false
 
 M.BLD_PBR = {
   bne_bld_facade = {
-    clearCoatMap = '/assets/materials/trim/plaster/t_highrise_plaster/t_highrise_plaster_m.data.png',
-    clearCoatFactor = '0.95',
-    clearCoatRoughnessFactor = '0.045',
-    metallicFactor = '0.2',
-    roughnessFactor = '1',
-    normalMapStrength = '1',
-    dynamicCubemap = 'true',
+    metallicFactor = '0',
+    roughnessFactor = '0.92',
+    normalMapStrength = '1.15',
   },
   bne_bld_shop = {
     metallicFactor = '0.75',
     roughnessFactor = '1',
     dynamicCubemap = 'true',
+    clearCoatFactor = '0.45',
+    clearCoatRoughnessFactor = '0.08',
   },
   bne_bld_office = {
     metallicFactor = '0.75',
     roughnessFactor = '1',
     dynamicCubemap = 'true',
+    clearCoatFactor = '0.45',
+    clearCoatRoughnessFactor = '0.08',
   },
   bne_bld_roof_flat = {
     normalMap = '/assets/materials/tileable/roofing/asphalt_roof/t_asphalt_roof_nm.normal.png',
@@ -54,20 +70,22 @@ M.BLD_PBR = {
     normalMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_nm.normal.png',
     roughnessMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_r.data.png',
     ambientOcclusionMap = '/assets/materials/tileable/concrete/concrete_precast1/t_concrete_precast1_ao.data.png',
-    roughnessFactor = '1',
+    roughnessFactor = '0.90',
   },
   bne_bld_metalwall = {
     normalMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_nm.normal.png',
     roughnessMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_r.data.png',
     ambientOcclusionMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_ao.data.png',
     metallicMap = '/assets/materials/tileable/metal/m_metal_wall_corrugate/t_metal_wall_corrugated_m.data.png',
-    roughnessFactor = '1',
-    metallicFactor = '0.75',
+    roughnessFactor = '0.88',
+    metallicFactor = '0.65',
   },
   bne_bld_lobby = {
     metallicFactor = '0.65',
     roughnessFactor = '1',
     dynamicCubemap = 'true',
+    clearCoatFactor = '0.45',
+    clearCoatRoughnessFactor = '0.08',
   },
 }
 
@@ -81,6 +99,52 @@ function M.isEnabled()
     settingsMod = (ok and type(s) == 'table') and s or false
   end
   return settingsMod ~= false and type(settingsMod.get) == 'function' and settingsMod.get('expDeStreetImmersion') == true
+end
+
+function M.detailLevel()
+  if settingsMod == nil then
+    local ok, s = pcall(require, 'beamngEarth/settings')
+    settingsMod = (ok and type(s) == 'table') and s or false
+  end
+  local v = settingsMod ~= false and type(settingsMod.get) == 'function' and settingsMod.get('expDeDetailLevel') or nil
+  if v == 'low' or v == 'medium' or v == 'high' then return v end
+  return 'medium'
+end
+
+function M.setDetailLevel(level)
+  local lvl = (level == 'low' or level == 'medium' or level == 'high') and level or 'medium'
+  local ok, trees = pcall(require, 'beamngEarth/trees')
+  if ok and type(trees) == 'table' and type(trees.setDeHedgeMaxM) == 'function' then
+    trees.setDeHedgeMaxM(M.CULL_DIST[lvl].hedge)
+  end
+  return lvl
+end
+
+function M.cullDistance(what)
+  local row = M.CULL_DIST[M.detailLevel()]
+  return row and row[what] or nil
+end
+
+function M.applyStaticOpts(obj, what)
+  if obj and M.NO_SHADOW_WHATS[what] and obj.setField then
+    obj:setField('castShadows', 0, 'false')
+  end
+end
+
+function M.isDusk(isNight)
+  if not M.isEnabled() then return false end
+  local env = rawget(_G, 'core_environment')
+  if type(env) ~= 'table' or type(env.getTimeOfDay) ~= 'function' then return false end
+  if isNight == nil and type(env.getLightState) == 'function' then
+    local ok, st = pcall(env.getLightState)
+    if ok and type(st) == 'table' then isNight = (st.isNight == true) end
+  end
+  if isNight == true then return false end
+  local ok, tod = pcall(env.getTimeOfDay)
+  if not ok or type(tod) ~= 'table' then return false end
+  local t = tonumber(tod.time)
+  if not t then return false end
+  return (t >= 0.21 and t <= 0.28) or (t >= 0.72 and t <= 0.79)
 end
 
 local function applyBldPbr()
@@ -129,11 +193,90 @@ local function restoreBldPbr()
   M.pbrActive = false
 end
 
+local function restoreDuskGlow(isNight)
+  if not duskActive and not savedDuskShop and next(duskMatState) == nil then return end
+  if scenetree and type(scenetree.findObject) == 'function' then
+    if savedDuskShop then
+      local m = scenetree.findObject('bne_bld_shop')
+      if m then
+        for k, v in pairs(savedDuskShop) do
+          m:setField(k, 0, v == false and '' or v)
+        end
+        pcall(m.flush, m)
+        pcall(m.reload, m)
+      end
+    end
+    if not isNight then
+      for name in pairs(duskMatState) do
+        local m = scenetree.findObject(name)
+        if m then
+          m:setField('emissiveFactor', 0, '0 0 0')
+          m:setField('emissiveIntensityNits', 0, '-1')
+          pcall(m.flush, m)
+          pcall(m.reload, m)
+        end
+      end
+    end
+  end
+  savedDuskShop = nil
+  duskMatState = {}
+  duskActive = false
+end
+
+function M.syncDuskGlow(isNight, force)
+  local now = (os and type(os.clockhp) == 'function') and os.clockhp() or 0
+  if not force and (now - lastDuskCheck) < M.CHECK_S then return duskActive end
+  lastDuskCheck = now
+
+  local active = M.isEnabled() and next(byTile) ~= nil and not isNight and M.isDusk(isNight)
+  if not active then
+    restoreDuskGlow(isNight)
+    return false
+  end
+  if not scenetree or type(scenetree.findObject) ~= 'function' then return false end
+
+  if not duskActive then
+    local mShop = scenetree.findObject('bne_bld_shop')
+    if mShop then
+      savedDuskShop = {
+        emissiveFactor = mShop:getField('emissiveFactor', 0) or false,
+        emissiveIntensityNits = mShop:getField('emissiveIntensityNits', 0) or false,
+      }
+      if savedDuskShop.emissiveFactor == '' then savedDuskShop.emissiveFactor = false end
+      if savedDuskShop.emissiveIntensityNits == '' then savedDuskShop.emissiveIntensityNits = false end
+      mShop:setField('emissiveFactor', 0, M.DUSK_GLOW_COLOR)
+      mShop:setField('emissiveIntensityNits', 0, tostring(M.DUSK_WIN_NITS))
+      pcall(mShop.flush, mShop)
+      pcall(mShop.reload, mShop)
+    end
+  end
+
+  for name, entry in pairs(mats) do
+    if entry.emissive and not duskMatState[name] then
+      local m = scenetree.findObject(name)
+      if m then
+        local nits = name:sub(1, 10) == 'bne_de_fp_' and M.DUSK_PYLON_NITS or M.DUSK_SHOP_NITS
+        m:setField('emissiveFactor', 0, M.DUSK_GLOW_COLOR)
+        m:setField('emissiveIntensityNits', 0, tostring(nits))
+        pcall(m.flush, m)
+        pcall(m.reload, m)
+        duskMatState[name] = true
+      end
+    end
+  end
+
+  duskActive = true
+  return true
+end
+
 function M.syncBuildingMaterials()
   if M.isEnabled() and next(byTile) ~= nil then
     applyBldPbr()
-  elseif M.pbrActive or next(savedBldPbr) ~= nil then
-    restoreBldPbr()
+  else
+    restoreDuskGlow(false)
+    if M.pbrActive or next(savedBldPbr) ~= nil then
+      restoreBldPbr()
+    end
   end
 end
 
@@ -279,19 +422,21 @@ end
 
 -- Clear all tracked runtime materials (level unload / extension reset).
 function M.clearAll()
+  restoreDuskGlow(false)
   for name in pairs(mats) do
     syncNightlights(name, nil, false)
     local m = scenetree.findObject(name)
     if m then m:delete() end
   end
   mats, byTile, pendingDel, M.count = {}, {}, {}, 0
+  lastDuskCheck = -1e9
   restoreBldPbr()
 end
 
 function M.status()
   local active = 0
   for _ in pairs(mats) do active = active + 1 end
-  return { count = M.count, active = active, pbrActive = M.pbrActive }
+  return { count = M.count, active = active, pbrActive = M.pbrActive, duskActive = duskActive }
 end
 
 return M

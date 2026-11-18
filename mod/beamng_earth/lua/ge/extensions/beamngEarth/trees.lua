@@ -426,7 +426,7 @@ function M.hedgeScale(h, refH)
 end
 M.GROUP_MAX_M.fr_hedge = 350
 M.GROUP_MAX_M.fr_fence_hedge = 350
-M.GROUP_MAX_M.de_hedge = 350
+M.GROUP_MAX_M.de_hedge = 160
 M.ONE_SPELLING.de_hedge = true
 M.NO_COLLIDE.fr_hedge = true
 M.NO_COLLIDE.fr_fence_hedge = true
@@ -1362,6 +1362,14 @@ bandCapsUpdate = function()
   for _, cap in pairs(M.GROUP_MAX_M) do n = n + 1; bandCaps[n] = cap end
   for i = n + 1, #bandCaps do bandCaps[i] = nil end
   table.sort(bandCaps, function(a, b) return a > b end)
+end
+function M.setDeHedgeMaxM(distM)
+  local d = math.max(0, math.min(350, tonumber(distM) or 160))
+  if M.GROUP_MAX_M.de_hedge ~= d then
+    M.GROUP_MAX_M.de_hedge = d
+    bandCapsUpdate()
+  end
+  return d
 end
 groupBand = function(t, d)
   if bandCaps[1] == nil then bandCapsUpdate() end

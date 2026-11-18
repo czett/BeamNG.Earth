@@ -452,7 +452,7 @@ LOD_TOP_SIZE = 2.0          # px: the size of the one (or the last, coarsest) de
 @profile_step('Native shape encoding')
 def encode(positions, tris, normals=None, uvs=None, material="bngEarthDae", uvs2=None,
            tangent_uvs=None, object_name="tile", tri_materials=None, colors=None, collision_only=False, lods=None,
-           collisions=None, close=False, open_tris=None, packed=None, parts=None):
+           collisions=None, close=False, open_tris=None, packed=None, parts=None, min_visible_px=None):
     """Shape bytes for one static mesh, laid out exactly as the engine writes a compiled
     Collada file with the same geometry.
 
@@ -553,8 +553,9 @@ def encode(positions, tris, normals=None, uvs=None, material="bngEarthDae", uvs2
         cols.append((bc, ntc))
     if cols and (collision_only or lods):
         raise CdaeError("collisions: not with collision_only or lods")
-    # each level is drawn from the next coarser level's size up: the finest from lods[0]'s size, the last from 2 px
-    sizes = [float(lv[0]) for lv in levels[1:]] + [LOD_TOP_SIZE]
+    # each level is drawn from the next coarser level's size up: the finest from lods[0]'s size, the last from top_size px
+    top_size = float(min_visible_px) if min_visible_px is not None else LOD_TOP_SIZE
+    sizes = [float(lv[0]) for lv in levels[1:]] + [top_size]
 
     center = ((lo + hi) * np.float32(0.5)).astype(np.float32)
     half = ((hi - lo) * np.float32(0.5)).astype(np.float32)
@@ -605,7 +606,7 @@ def encode(positions, tris, normals=None, uvs=None, material="bngEarthDae", uvs2
         "details": details,
     }
     out = bytearray()
-    for v in (LOD_TOP_SIZE, len(levels) - 1 if not collision_only else 0, radius, radius, centre, bounds):
+    for v in (top_size, len(levels) - 1 if not collision_only else 0, radius, radius, centre, bounds):
         _pack(out, v)       # smallestVisibleSize/DL, radius, tubeRadius
     for name in SHAPE_VECTORS:
         n, size, data = shape_vecs.get(name, _empty(SHAPE_VECTOR_ELEM[name]))

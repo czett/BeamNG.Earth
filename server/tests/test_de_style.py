@@ -314,6 +314,21 @@ class TestDeStyleContract(unittest.TestCase):
         # Only 1 street-facing edge (edge 0): 2 upper floors * 7 boxes * 24 verts + canopy (3 * 24) = 408 verts (vs 744 with rear edge)
         self.assertEqual(m_bal.n, 408, "balconies should only be placed on street-facing edge 0, not rear edge 2")
 
+        # 4. Quality tiers on balconies & roof details
+        m_low = buildings.Mesh()
+        facade_style._add_entrance_canopy_and_balconies(m_low, spec_st, 0.0, 0.0, 8.4, mat_idx, level="low")
+        self.assertEqual(m_low.n, 72, "low tier keeps entrance canopy (72 verts) and skips balconies")
+
+        m_fast = buildings.Mesh()
+        facade_style._add_entrance_canopy_and_balconies(m_fast, spec_st, 0.0, 0.0, 8.4, mat_idx, fast_pass=True)
+        self.assertEqual(m_fast.n, 72, "fast_pass keeps entrance canopy and skips balconies")
+
+        # 5. Off-switch-no-change: BNE_DE_STREET_IMMERSION=off
+        import de_enhancer
+        import geodesy
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "off"}):
+            self.assertEqual(de_enhancer.cache_parts(geodesy.EnuFrame(48.137, 11.576), (-128.0, -128.0, 128.0, 128.0)), ())
+
 
 def math_hypot(dx, dy):
     return float(np.hypot(dx, dy))

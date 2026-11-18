@@ -21,6 +21,7 @@ def prepare_commercial_fascias(
     items: list,
     out_dir: str | None,
     vfs_dir: str | None,
+    de_detail=None,
 ) -> tuple[dict | None, bytes | None, set[int]]:
     """Build Germany (`DE`) illuminated shopfront fascia mesh & atlas for one tile.
 
@@ -31,16 +32,18 @@ def prepare_commercial_fascias(
     Returns:
         `(face_entry, shop_cdae_bytes, suppressed_spec_ids)`.
     """
+    import de_enhancer
     import roads as roadsmod
 
     if not items or out_dir is None or vfs_dir is None:
         return None, None, set()
 
+    level, fast_pass = de_enhancer.normalize_detail(de_detail)
     x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
     cells = roadsmod.cells_of_tile(frame, tx, ty, 35.0)
     tile_pois = classifier.load_tile_pois(md, frame, cells, x0, y0)
     targets, suppress_ids = classifier.classify_commercial_buildings(items, tile_pois, frame, x0, y0)
-    hn_targets = classifier.collect_housenumbers(items, suppress_ids=suppress_ids)
+    hn_targets = [] if (level == "low" or fast_pass) else classifier.collect_housenumbers(items, suppress_ids=suppress_ids)
     if not targets and not hn_targets:
         return None, None, set()
 
@@ -128,9 +131,13 @@ def build_streets_and_yards(
     ground,
     out_dir: str | None,
     vfs_dir: str | None,
+    de_detail=None,
 ) -> tuple[dict | None, bytes | None, list[list]]:
     """Build Feature A (street name signs `.cdae` bytes + atlas) and Feature C (residential yard props)."""
+    import de_enhancer
     import furniture
+
+    level, fast_pass = de_enhancer.normalize_detail(de_detail)
 
     x0, y0, _, _ = box
     street_face = None
@@ -172,6 +179,8 @@ def build_streets_and_yards(
             ty=ty,
             arms_map=arms_map,
             rings_arr=rings_arr,
+            level=level,
+            fast_pass=fast_pass,
         )
         if furn_plan.suppressed_recycle_xy and isinstance(props, list):
             props[:] = [
@@ -193,11 +202,14 @@ def build_streets_and_yards(
                 entries.append((furniture_de.FURNITURE_SWATCH_KEY, ("swatch", None, None)))
                 for stop in furn_plan.bus_stops:
                     entries.append((f"busstop|{stop.name}", ("busstop", stop.name, None)))
-                for fp in furn_plan.fuel_pylons:
-                    entries.append((
-                        f"fuel|{fp.brand_key}|{fp.e10}|{fp.e5}|{fp.diesel}",
-                        ("fuel", fp, None),
-                    ))
+
+            fuel_entries: list[tuple[str, object]] = [
+                (
+                    f"fuel|{fp.brand_key}|{fp.e10}|{fp.e5}|{fp.diesel}",
+                    ("fuel", fp, None),
+                )
+                for fp in furn_plan.fuel_pylons
+            ]
 
             def _render_street_slot(item):
                 kind, a, b = item
@@ -217,10 +229,35 @@ def build_streets_and_yards(
                 prefix="st",
                 skip_render_if_cached=True,
             )
+            fp_mat_name = None
+            fp_vfs_tex = None
+            if mat_name and vfs_tex and fuel_entries:
+                fp_mat_name, _fp_dds, fp_vfs_tex, fp_uv_map, _fp_img = texture_atlas.pack_atlas(
+                    fuel_entries,
+                    _render_street_slot,
+                    out_dir,
+                    vfs_dir,
+                    prefix="fp",
+                    skip_render_if_cached=True,
+                )
+                if fp_mat_name and fp_vfs_tex and fp_uv_map:
+                    uv_map.update(fp_uv_map)
+                else:
+                    fp_mat_name = None
+                    fp_vfs_tex = None
             if mat_name and vfs_tex:
-                street_blob = placement.encode_streets_and_furniture_mesh(posts, furn_plan, mat_name, uv_map, (x0, y0, 0.0))
+                street_blob = placement.encode_streets_and_furniture_mesh(
+                    posts, furn_plan, mat_name, uv_map, (x0, y0, 0.0), fuel_mat=fp_mat_name
+                )
                 if street_blob is not None:
                     street_face = {mat_name: {"texture": vfs_tex, "emissive": False}}
+                    if fp_mat_name and fp_vfs_tex:
+                        street_face[fp_mat_name] = {
+                            "texture": fp_vfs_tex,
+                            "emissive": True,
+                            "nits": 48,
+                            "glowColor": "1 0.88 0.66",
+                        }
 
     yard_rows: list[list] = []
     if items and near_roads:
@@ -236,6 +273,8 @@ def build_streets_and_yards(
             ground,
             md=md,
             rings_arr=rings_arr,
+            level=level,
+            fast_pass=fast_pass,
         )
 
     return street_face, street_blob, yard_rows

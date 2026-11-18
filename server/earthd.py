@@ -1572,6 +1572,7 @@ class Server:
                                     # on by default since 2026-11-10, the user's call)
         self.road_wear = None       # the settings page's Road detail (roadwear.tier_of: 'off' / 'basic' / 'full', the
                                     # quality presets'; None: roadwear.DEFAULT_TIER; BNE_ROAD_WEAR forces it)
+        self.de_detail_level = "medium"  # German street detail level ('low' / 'medium' / 'high')
         if self.gas_stations and surface is not None and hasattr(surface, "gas_pads"):
             surface.gas_pads = True     # their forecourts painted asphalt (surface.Surface.fuel_pads)
         self.traffic = bool(traffic) and mapdata is not None   # the AI road graph around the player (navgraph.py)
@@ -2933,7 +2934,7 @@ class Server:
             self.vfs_dir, self.sidewalks, DETAIL_ROAD_LIFT if self.near_visual == "detail" else 0.0,
             self.buildings, lh, mph, self.anchor_q(anchor) if skin else None, self.gas_stations, buried, lamps,
             country, content, skin, exact, Server.pole_profile(self), designsmod.enabled(self.dej_on),
-            Server.towns_enabled(self), Server.wear_arg(self))
+            Server.towns_enabled(self), Server.wear_arg(self), Server.de_detail_arg(self))
         t0, waited = time.perf_counter(), []
         try:
             res = poolsmod.result_running(fut, ROAD_TILE_TIMEOUT_S, waited, abandon=lambda: Server.is_abandoned(self, aid)
@@ -2986,7 +2987,8 @@ class Server:
                                             de_junctions=designsmod.enabled(self.dej_on),
                                             towns_on=Server.towns_enabled(self), wear=Server.wear_arg(self),
                                             rules=Server.ground_rules(self),
-                                            cache_dir=getattr(self.mapdata, "cache_dir", None))
+                                            cache_dir=getattr(self.mapdata, "cache_dir", None),
+                                            de_detail=Server.de_detail_arg(self))
 
     def ground_rules(self):
         """This server's ground rules fingerprint (blockcache.ground_rules), as its road processes make it
@@ -3223,7 +3225,7 @@ class Server:
                 self.vfs_dir, self.sidewalks, DETAIL_ROAD_LIFT if self.near_visual == "detail" else 0.0,
                 self.buildings, self.left_hand(anchor), self.mph(anchor), self.anchor_q(anchor),
                 self.gas_stations, self.buried(anchor), self.lamp_region(anchor), self.country(anchor), Server.pole_profile(self, anchor),
-                designsmod.enabled(self.dej_on), Server.towns_enabled(self), Server.wear_arg(self))
+                designsmod.enabled(self.dej_on), Server.towns_enabled(self), Server.wear_arg(self), Server.de_detail_arg(self))
             try:
                 # bounded: a worker that never answered held this thread and its roads.Tracker slot for good (4
                 # slots: four hung tiles and no road tile ever again, the loading line at "roads & buildings 0/26")
@@ -3528,17 +3530,19 @@ class Server:
                     items=items, origin=(x0, y0))
                 custom_entries = _baked_entries
 
+            de_detail = Server.de_detail_arg(self)
+
             def _before_de_parts(cur_items):
                 nonlocal de_shops_blob
                 sf, sb, _ = de_enhancer.prepare_shops(self.mapdata, anchor.frame, tx, ty, cur_items,
-                                                      self.out_dir, self.vfs_dir)
+                                                      self.out_dir, self.vfs_dir, de_detail=de_detail)
                 if sf:
                     de_faces_map.update(sf)
                 de_shops_blob = sb
 
             bld, _ = buildingsmod.road_tile(anchor.frame, tx, ty, self.mapdata, elev, None, None,
                                             items, entries=_baked_entries, radii=_baked_radii,
-                                            before_parts=_before_de_parts)
+                                            before_parts=_before_de_parts, de_detail=de_detail)
             garage_sound = buildingsmod.garage_sound_boxes(items, *roadsmod.tile_bbox(tx, ty)[:2],
                                                            roadsmod.SOUND_GARAGE)
             oil_wells = oilwells.tile_wells(anchor.frame, tx, ty, elev)     # (the mod's pump jacks)
@@ -3651,6 +3655,7 @@ class Server:
                 ),
                 self.out_dir,
                 self.vfs_dir,
+                de_detail=de_detail,
             )
             if st_face:
                 de_faces_map.update(st_face)
@@ -3708,6 +3713,30 @@ class Server:
         if changed:
             log.info("road wear tier %d (settings)", Server.wear_tier(self))
         return changed
+
+    DE_FAST_PASS_V = 30.0
+
+    def set_de_detail(self, value):
+        """German street detail level ('low' / 'medium' / 'high'): True when changed."""
+        v = str(value).strip().lower() if value is not None else ""
+        if v not in {"low", "medium", "high"}:
+            return False
+        before = getattr(self, "de_detail_level", "medium")
+        self.de_detail_level = v
+        changed = v != before
+        if changed:
+            log.info("DE detail level %s (settings)", v)
+        return changed
+
+    def de_detail_arg(self):
+        """Return `{'level': ..., 'fast': ...}` for DE tile builds, or `None` when DE immersion is off."""
+        import de_enhancer
+        if not de_enhancer.enabled():
+            return None
+        lvl = getattr(self, "de_detail_level", "medium")
+        if lvl not in {"low", "medium", "high"}:
+            lvl = "medium"
+        return {"level": lvl, "fast": bool(getattr(self, "speed", 0.0) > Server.DE_FAST_PASS_V)}
 
     def set_towns(self, on):
         """The settings page's Town signs switch (message town_signs): True when it changed (the road tiles and the
@@ -3784,7 +3813,8 @@ class Server:
         Per-anchor parts (the height quantum, country, lamp rules, driving side) are the place's, not settings."""
         im = self.imagery
         md = self.mapdata.versions() if self.mapdata is not None and hasattr(self.mapdata, "versions") else None
-        return {
+        import de_enhancer
+        sig = {
             # road tiles (blockworker._roads_tile_cached)
             "sidewalks": bool(self.sidewalks),
             "lift": float(DETAIL_ROAD_LIFT if self.near_visual == "detail" else 0.0),
@@ -3805,6 +3835,9 @@ class Server:
             # road plans (plancache.for_grader's signature)
             "plans": f"w{int(self.road_widths is not None)}s{int(self.sea is not None)}",
         }
+        if de_enhancer.enabled():
+            sig["de_detail"] = getattr(self, "de_detail_level", "medium")
+        return sig
 
     def set_base_px(self, px):
         """The ground photo's size (px) the mod's terrain texture set has (its graphics setting groundPhoto, applied at
@@ -9401,6 +9434,11 @@ class Connection:
                 self.signs.refresh()
         elif kind == "road_wear":               # the settings page's Road detail: the road tiles again, worn or not
             if self.s.set_road_wear(msg.get("value")):
+                self.roads.close()
+                self.roads = road_tracker(self)
+        elif kind == "de_detail":               # German street detail level ('low' / 'medium' / 'high')
+            import de_enhancer
+            if self.s.set_de_detail(msg.get("value")) and de_enhancer.enabled():
                 self.roads.close()
                 self.roads = road_tracker(self)
         elif kind == "graphics":                # the settings page's graphics knobs (set_graphics)

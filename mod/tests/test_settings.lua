@@ -721,6 +721,19 @@ do
   settings.load()
 end
 
+-- expDeDetailLevel enum schema, order, and uiSet validation
+do
+  local s = settings.SCHEMA.expDeDetailLevel
+  T.check(s and s.kind == 'enum' and s.default == 'medium', 'expDeDetailLevel is enum with default medium')
+  local inOrder = false
+  for _, k in ipairs(settings.ORDER) do if k == 'expDeDetailLevel' then inOrder = true end end
+  T.check(inOrder and not settings.HIDDEN.expDeDetailLevel, 'expDeDetailLevel is in ORDER and not hidden')
+  T.check(settings.uiState().settings.expDeDetailLevel == 'medium', 'uiState exposes expDeDetailLevel')
+  T.check(settings.uiSet('expDeDetailLevel', 'low').ok == true and settings.get('expDeDetailLevel') == 'low', 'uiSet accepts low')
+  T.check(settings.uiSet('expDeDetailLevel', 'invalid').ok == false, 'uiSet rejects invalid expDeDetailLevel')
+  settings.set('expDeDetailLevel', 'medium')
+end
+
 -- the map's preload of a place: picked (the box) or pointed at (hover: the light part), to core.preloadPlace
 do
   local calls = {}

@@ -154,6 +154,7 @@ M.SCHEMA = {
   expCanadaLidar = { kind = 'bool', default = false, label = 'Detailed Canadian lidar' },
   expStaleRevisit = { kind = 'bool', default = false, label = 'Show the older world while rebuilding' },
   expDeStreetImmersion = { kind = 'bool', default = false, label = 'German street details' },
+  expDeDetailLevel = { kind = 'enum', default = 'medium', values = { 'low', 'medium', 'high' }, label = 'German street detail level' },
   -- in Germany: the German right-of-way signs and markings at junctions, 30-zone signs and traffic that gives way
   -- accordingly (server designs.py; the message german_junctions)
   germanJunctionSigns = { kind = 'bool', default = false, label = 'German junction signs' },
@@ -221,7 +222,7 @@ M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'groundPhoto', 'groundGrid', 't
   'expNlRoadSigns', 'expEuScenery', 'expDropRails', 'expEntranceFlares', 'expPriorityStops', 'expRoadBumps', 'expRoughDirt',
   'expWearStrips', 'expGradeGuard', 'expPhotoSurface', 'expTerrainBumps', 'expCliffWalls', 'expTunnelLids', 'expSubseaTunnels',
   'expAiTunnels', 'expRailCollide', 'expCatenary', 'expRailCrossings', 'expRailTunnels', 'expRailCurves', 'expWatertight',
-  'expCanadaLidar', 'expStaleRevisit', 'expDeStreetImmersion' }
+  'expCanadaLidar', 'expStaleRevisit', 'expDeStreetImmersion', 'expDeDetailLevel' }
 
 -- Stored but not on the settings page
 M.HIDDEN = { welcomeSeen = true, updateDismissed = true, devNoticeSeen = true, qualityDetected = true, telemetryChoice = true }
@@ -639,6 +640,14 @@ M.APPLY = {
   roadDetail = function(v)
     local core = ext('beamngEarth_core')
     if core and core.setRoadWear then core.setRoadWear(v) end
+  end,
+  expDeStreetImmersion = function()
+    require('beamngEarth/deEnhancer').syncBuildingMaterials()
+  end,
+  expDeDetailLevel = function(v)
+    require('beamngEarth/deEnhancer').setDetailLevel(v)
+    local core = ext('beamngEarth_core')
+    if core and core.setDeDetailLevel then core.setDeDetailLevel(v) end
   end,
   townSigns = function(v)
     local core = ext('beamngEarth_core')

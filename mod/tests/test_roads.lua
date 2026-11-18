@@ -967,7 +967,6 @@ do
   roads.COLLIDE_CHECK_S, roads.BEHIND_JUMP_M = check, jump
   getPlayerVehicle = nil
 end
-
 do -- Highway speed (>= HIGH_SPEED_MS): hasDueForward detects waiting forward road surface,
    -- and surfaceKeys samples every TILE_M/2 out to URGENT_SURFACE_FAST_S * v
   roads.clear()
@@ -1009,6 +1008,29 @@ do -- Highway speed (>= HIGH_SPEED_MS): hasDueForward detects waiting forward ro
   T.check(sk['9:1_1'] == true and sk['9:1_0'] == true, 'surfaceKeys covers flanking curved highway tile keys')
   roads.SURFACE_FIRST = prevSF
   getPlayerVehicle = nil
+  roads.clear()
+end
+-- destreets and deshops TSStatics disable castShadows while bld / walk keep default
+do
+  roads.clear()
+  files['/t/deshad.json'] = '{ chunks = { }, ' ..
+    'bld = { shape = "/t/bld_shad.cdae", pos = { 0, 0, 0 } }, ' ..
+    'destreets = { shape = "/t/destreets_shad.cdae", pos = { 0, 0, 0 } }, ' ..
+    'deshops = { shape = "/t/deshops_shad.cdae", pos = { 0, 0, 0 } } }'
+  roads.onTile({ anchorId = 11, key = '0_0', path = '/t/deshad.json', n = 0 }, 11)
+  for _ = 1, 6 do roads.update(gov, 11) end
+  local byShape = {}
+  for _, o in pairs(S.objects) do
+    if o.class == 'TSStatic' and o.fields and o.fields.shapeName then
+      byShape[o.fields.shapeName] = o
+    end
+  end
+  T.check(byShape['/t/bld_shad.cdae'] and byShape['/t/bld_shad.cdae']:getField('castShadows', 0) == nil,
+    'bld keeps default castShadows')
+  T.check(byShape['/t/destreets_shad.cdae'] and byShape['/t/destreets_shad.cdae']:getField('castShadows', 0) == 'false',
+    'destreets disables castShadows')
+  T.check(byShape['/t/deshops_shad.cdae'] and byShape['/t/deshops_shad.cdae']:getField('castShadows', 0) == 'false',
+    'deshops disables castShadows')
   roads.clear()
 end
 T.done('test_roads')

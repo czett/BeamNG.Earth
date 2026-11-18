@@ -122,19 +122,22 @@ deEnhancer.clearAll()
 settings.set('expDeStreetImmersion', true)
 deEnhancer.retain('0:10_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
 T.check(deEnhancer.status().pbrActive == true, 'PBR active when expDeStreetImmersion=true and DE tile active')
-T.check(mFacade:getField('dynamicCubemap', 0) == 'true', 'bne_bld_facade gets dynamicCubemap=true')
-T.check(mFacade:getField('clearCoatFactor', 0) == '0.95', 'bne_bld_facade gets clearCoatFactor=0.95')
+T.check(mFacade:getField('dynamicCubemap', 0) == nil, 'bne_bld_facade no longer sets dynamicCubemap')
+T.check(mFacade:getField('clearCoatFactor', 0) == nil, 'bne_bld_facade no longer sets clearCoatFactor')
+T.check(mFacade:getField('normalMapStrength', 0) == '1.15', 'bne_bld_facade gets normalMapStrength=1.15')
+T.check(mFacade:getField('roughnessFactor', 0) == '0.92', 'bne_bld_facade gets roughnessFactor=0.92')
 T.check(mShop:getField('metallicFactor', 0) == '0.75', 'bne_bld_shop gets metallicFactor=0.75')
 T.check(mShop:getField('dynamicCubemap', 0) == 'true', 'bne_bld_shop gets dynamicCubemap=true')
-T.check(mMetal:getField('roughnessFactor', 0) == '1', 'bne_bld_metalwall gets roughnessFactor=1')
-T.check(mMetal:getField('metallicFactor', 0) == '0.75', 'bne_bld_metalwall gets metallicFactor=0.75')
+T.check(mShop:getField('clearCoatFactor', 0) == '0.45', 'bne_bld_shop gets clearCoatFactor=0.45')
+T.check(mMetal:getField('roughnessFactor', 0) == '0.88', 'bne_bld_metalwall gets roughnessFactor=0.88')
+T.check(mMetal:getField('metallicFactor', 0) == '0.65', 'bne_bld_metalwall gets metallicFactor=0.65')
 
 -- 8c. Releasing last DE tile restores original material fields
 deEnhancer.release('0:10_0')
 deEnhancer.sweep()
 T.check(deEnhancer.status().pbrActive == false, 'PBR deactivated when last DE tile released')
-T.check(mFacade:getField('dynamicCubemap', 0) == '', 'bne_bld_facade dynamicCubemap restored to empty')
-T.check(mFacade:getField('clearCoatFactor', 0) == '', 'bne_bld_facade clearCoatFactor restored to empty')
+T.check(mFacade:getField('normalMapStrength', 0) == '', 'bne_bld_facade normalMapStrength restored to empty')
+T.check(mFacade:getField('roughnessFactor', 0) == '', 'bne_bld_facade roughnessFactor restored to empty')
 T.check(mMetal:getField('roughnessFactor', 0) == '0.85', 'bne_bld_metalwall roughnessFactor restored to 0.85')
 T.check(mMetal:getField('metallicFactor', 0) == '0', 'bne_bld_metalwall metallicFactor restored to 0')
 
@@ -162,5 +165,61 @@ deEnhancer.retain('0:21_0', { bne_de_st_aaa111 = defs1.bne_de_st_aaa111 })
 T.check(flushCount == 1, 'second DE tile does not redundantly re-flush bne_bld_facade')
 mFacade.flush = origFlush
 deEnhancer.clearAll()
+
+-- 10. Static shadow opt-out, detail level culling, and dusk warmth
+do
+  local ts = createObject('TSStatic')
+  deEnhancer.applyStaticOpts(ts, 'bld')
+  T.check(ts:getField('castShadows', 0) == nil, 'bld keeps default castShadows')
+  deEnhancer.applyStaticOpts(ts, 'destreets')
+  T.check(ts:getField('castShadows', 0) == 'false', 'destreets disables castShadows')
+  local ts2 = createObject('TSStatic')
+  deEnhancer.applyStaticOpts(ts2, 'deshops')
+  T.check(ts2:getField('castShadows', 0) == 'false', 'deshops disables castShadows')
+
+  settings.set('expDeDetailLevel', 'low')
+  deEnhancer.setDetailLevel('low')
+  T.check(deEnhancer.detailLevel() == 'low' and deEnhancer.cullDistance('deshops') == 85 and trees.GROUP_MAX_M.de_hedge == 0,
+    'low detail sets 85m deshops cull and 0m de_hedge')
+  settings.set('expDeDetailLevel', 'medium')
+  deEnhancer.setDetailLevel('medium')
+  T.check(deEnhancer.detailLevel() == 'medium' and deEnhancer.cullDistance('destreets') == 160 and trees.GROUP_MAX_M.de_hedge == 160,
+    'medium detail sets 160m destreets/de_hedge cull')
+
+  -- Dusk warmth in [0.21..0.28] when expDeStreetImmersion=true and DE tiles active
+  local fakeTod = 0.24
+  fakeNight = false
+  core_environment = {
+    getLightState = function() return { isNight = fakeNight } end,
+    getTimeOfDay = function() return { time = fakeTod } end,
+  }
+  settings.set('expDeStreetImmersion', false)
+  T.check(deEnhancer.isDusk(false) == false, 'isDusk is false when expDeStreetImmersion=false')
+  settings.set('expDeStreetImmersion', true)
+  T.check(deEnhancer.isDusk(false) == true, 'isDusk is true at tod.time=0.24 when enabled')
+  deEnhancer.retain('0:30_0', {
+    bne_de_sh_bbb222 = defs1.bne_de_sh_bbb222,
+    bne_de_fp_ccc333 = { texture = '/temp/beamngEarth/s1/de_st_aaa111.dds', emissive = true, nits = 48, glowColor = '1 0.88 0.66' },
+  })
+  clock = clock + 2.0
+  T.check(deEnhancer.syncDuskGlow(false) == true and deEnhancer.status().duskActive == true, 'syncDuskGlow activates at dusk')
+  local mDuskSh = scenetree.findObject('bne_de_sh_bbb222')
+  local mDuskFp = scenetree.findObject('bne_de_fp_ccc333')
+  T.check(mDuskSh.fields.emissiveFactor == deEnhancer.DUSK_GLOW_COLOR and mDuskSh.fields.emissiveIntensityNits == tostring(deEnhancer.DUSK_SHOP_NITS),
+    'shop fascia gets warm dusk nits')
+  T.check(mDuskFp.fields.emissiveIntensityNits == tostring(deEnhancer.DUSK_PYLON_NITS),
+    'fuel pylon gets warm dusk pylon nits')
+  T.check(mShop:getField('emissiveIntensityNits', 0) == tostring(deEnhancer.DUSK_WIN_NITS),
+    'bne_bld_shop gets warm dusk window nits')
+
+  -- Leaving dusk (or turning off) restores shop window & turns off dusk glow
+  fakeTod = 0.48
+  T.check(deEnhancer.isDusk(false) == false, 'tod.time=0.48 is outside dusk window')
+  clock = clock + 2.0
+  T.check(deEnhancer.syncDuskGlow(false) == false and deEnhancer.status().duskActive == false, 'syncDuskGlow deactivates outside dusk')
+  T.check(mShop:getField('emissiveIntensityNits', 0) == '', 'bne_bld_shop emissive restored outside dusk')
+  deEnhancer.clearAll()
+  settings.set('expDeStreetImmersion', false)
+end
 
 T.done('test_de_enhancer')

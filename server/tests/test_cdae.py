@@ -281,3 +281,13 @@ class LodTest(unittest.TestCase):
         self.assertEqual([(s[2], s[3], s[6]) for s in sizes], [(0, 300.0, 2), (1, 2.0, 1)])
         self.assertEqual(len(d["meshes"]), 2)
         self.assertEqual(d["bounds"][3:5], [2.0, 2.0], "the bounds cover every detail")
+
+    def test_min_visible_px(self):
+        P = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float)
+        b = cdae.encode(P, [[0, 1, 2]], min_visible_px=120.0)
+        d = cdae.decode(b)
+        self.assertEqual(d["smallestVisibleSize"], 120.0)
+        n, _, raw = d["details"]
+        self.assertEqual(n, 1)
+        sz = struct.unpack_from("<3i3fi", raw, 0)[3]
+        self.assertEqual(sz, 120.0)

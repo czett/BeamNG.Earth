@@ -133,6 +133,14 @@ export const settingsSchema = [
         note: RESTART_NOTE },
       { id: "expDeStreetImmersion", type: "bool", default: false, name: "German street details", desc: "Experimental. In Germany: blue street name signs at intersections, illuminated German commercial shopfront fascias, and residential front-yard hedges and fences.",
         note: RESTART_NOTE },
+      { id: "expDeDetailLevel", type: "select", default: "medium", name: "German street detail level",
+        desc: "Controls density and draw distance for German street-level details. Low skips residential hedges, dormers/balconies, and sub-meter micro-props while keeping shop fascias, fuel pylons, bus shelters, and facade materials. Medium (default) balances density with 160 m hedge culling. High enables full residential hedges, dormers, balconies, and street furniture. Applies at once.",
+        showIf: c => c.expDeStreetImmersion === true,
+        options: [
+          { label: "Low", value: "low" },
+          { label: "Medium (default)", value: "medium" },
+          { label: "High", value: "high" },
+        ] },
     ],
   },
   {

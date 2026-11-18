@@ -67,7 +67,9 @@ DE_DOOR_GAP_HALF_M = 0.70
 DE_HEDGE_GROUP = "de_hedge"
 DE_HEDGE_STEP_M = 0.75
 DE_YARD_MIN_SPAN_M = 0.50
-DE_HEDGE_Z_SEAT_M = -0.04
+DE_HEDGE_Z_SEAT_M = -0.12
+DE_MAX_SLOPE_DEG = 22.0
+DE_MAX_SLOPE_TAN = math.tan(math.radians(DE_MAX_SLOPE_DEG))
 
 
 @dataclass(frozen=True)
@@ -211,7 +213,10 @@ class _MeshBuilder:
 
     def __init__(self, materials: list[str], origin=(0.0, 0.0, 0.0)):
         self.materials = list(materials)
-        self.origin = np.asarray(origin, dtype=np.float64)
+        self.ox = float(origin[0])
+        self.oy = float(origin[1])
+        self.oz = float(origin[2])
+        self.origin = np.array([self.ox, self.oy, self.oz], dtype=np.float64)
         self.pos: list[tuple[float, float, float]] = []
         self.norms: list[tuple[float, float, float]] = []
         self.uvs: list[tuple[float, float]] = []
@@ -223,11 +228,15 @@ class _MeshBuilder:
         base = len(self.pos)
         u0, v0, u1, v1 = uv_rect
         n_tup = (float(normal[0]), float(normal[1]), float(normal[2]))
-        for pt in (p0, p1, p2, p3):
-            rel = pt - self.origin
-            self.pos.append((float(rel[0]), float(rel[1]), float(rel[2])))
-            self.norms.append(n_tup)
-        self.uvs.extend([(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
+        ox, oy, oz = self.ox, self.oy, self.oz
+        self.pos.extend((
+            (float(p0[0]) - ox, float(p0[1]) - oy, float(p0[2]) - oz),
+            (float(p1[0]) - ox, float(p1[1]) - oy, float(p1[2]) - oz),
+            (float(p2[0]) - ox, float(p2[1]) - oy, float(p2[2]) - oz),
+            (float(p3[0]) - ox, float(p3[1]) - oy, float(p3[2]) - oz),
+        ))
+        self.norms.extend((n_tup, n_tup, n_tup, n_tup))
+        self.uvs.extend(((u0, v0), (u1, v0), (u1, v1), (u0, v1)))
         self.tris.append((base, base + 1, base + 2))
         self.tris.append((base, base + 2, base + 3))
         self.tm.extend((mat_idx, mat_idx))
@@ -245,76 +254,111 @@ class _MeshBuilder:
         back_uv: tuple[float, float, float, float] | None,
         body_mat: int,
         face_mat: int | None = None,
+        skip_bottom: bool = False,
     ):
-        """Add watertight closed 6-face prism with crisp split normals."""
-        ex = axis_x * hx
-        ey = axis_y * hy
-        ez = axis_z * hz
+        """Add watertight closed 6-face prism (or 5-face ground-embedded prism) with crisp split normals."""
+        cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
+        exx, exy, exz = float(axis_x[0]) * hx, float(axis_x[1]) * hx, float(axis_x[2]) * hx
+        eyx, eyy, eyz = float(axis_y[0]) * hy, float(axis_y[1]) * hy, float(axis_y[2]) * hy
+        ezx, ezy, ezz = float(axis_z[0]) * hz, float(axis_z[1]) * hz, float(axis_z[2]) * hz
         neutral_uv = (0.0, 0.0, 1.0, 1.0)
-
-        # BeamNG/ENU convention: axis_y points toward front viewer (`out_normal`).
-        # Looking at front (`-axis_y`), right is `+axis_x`, up is `+axis_z` (since `axis_x x axis_z = -axis_y`! wait):
-        # Verify: if d_along = axis_x and out = (d_along_y, -d_along_x, 0),
-        # then out x axis_z = (d_along_y, -d_along_x, 0) x (0, 0, 1) = (-d_along_x, -d_along_y, 0) = -axis_x!
-        # Wait: axis_x x axis_z = (d_x, d_y, 0) x (0, 0, 1) = (d_y, -d_x, 0) = +out !!
-        # Therefore (-axis_x) x axis_z = -out (faces toward viewer on front = -axis_x is wrong: right_vec x up_vec MUST equal outward normal)!
-        # Let's check: we want r x u == n_out!
-        # For n_out = +axis_y (= out): r = +axis_x, u = +axis_z -> axis_x x axis_z = +axis_y = +n_out! Exact!
-        # Wait: let's double check right-hand rule:
-        # Take axis_x = (1, 0, 0), axis_z = (0, 0, 1), then axis_x x axis_z = (0, -1, 0).
-        # Compare with out = (d_along[1], -d_along[0]) -> for d_along=(1,0), out=(0,-1,0)!
-        # YES! axis_x x axis_z IS (0, -1, 0) == +out!
-        # So standing at y = -10 looking at the front wall toward +y: right on screen is +x (= +axis_x), up is +z (= +axis_z), outward normal towards camera is (0, -1, 0) == +axis_y == out!
 
         f_mat = face_mat if (front_uv is not None and face_mat is not None) else body_mat
         b_mat = face_mat if (back_uv is not None and face_mat is not None) else body_mat
 
-        # +Y (front face toward `axis_y`, right=`axis_x`, up=`axis_z`)
-        fc = center + ey
-        self.add_quad(fc - ex - ez, fc + ex - ez, fc + ex + ez, fc - ex + ez, axis_y, front_uv or neutral_uv, f_mat)
+        # +Y (front face toward `axis_y`)
+        fcx, fcy, fcz = cx + eyx, cy + eyy, cz + eyz
+        self.add_quad(
+            (fcx - exx - ezx, fcy - exy - ezy, fcz - exz - ezz),
+            (fcx + exx - ezx, fcy + exy - ezy, fcz + exz - ezz),
+            (fcx + exx + ezx, fcy + exy + ezy, fcz + exz + ezz),
+            (fcx - exx + ezx, fcy - exy + ezy, fcz - exz + ezz),
+            axis_y, front_uv or neutral_uv, f_mat,
+        )
 
-        # -Y (back face toward `-axis_y`, right=`-axis_x`, up=`axis_z`)
-        bc = center - ey
-        self.add_quad(bc + ex - ez, bc - ex - ez, bc - ex + ez, bc + ex + ez, -axis_y, back_uv or neutral_uv, b_mat)
+        # -Y (back face toward `-axis_y`)
+        bcx, bcy, bcz = cx - eyx, cy - eyy, cz - eyz
+        self.add_quad(
+            (bcx + exx - ezx, bcy + exy - ezy, bcz + exz - ezz),
+            (bcx - exx - ezx, bcy - exy - ezy, bcz - exz - ezz),
+            (bcx - exx + ezx, bcy - exy + ezy, bcz - exz + ezz),
+            (bcx + exx + ezx, bcy + exy + ezy, bcz + exz + ezz),
+            (-axis_y[0], -axis_y[1], -axis_y[2]), back_uv or neutral_uv, b_mat,
+        )
 
-        # +X side: r = -axis_y, u = axis_z -> (-axis_y) x axis_z = -(-axis_x) = +axis_x
-        rc = center + ex
-        self.add_quad(rc + ey - ez, rc - ey - ez, rc - ey + ez, rc + ey + ez, axis_x, neutral_uv, body_mat)
+        # +X side
+        rcx, rcy, rcz = cx + exx, cy + exy, cz + exz
+        self.add_quad(
+            (rcx + eyx - ezx, rcy + eyy - ezy, rcz + eyz - ezz),
+            (rcx - eyx - ezx, rcy - eyy - ezy, rcz - eyz - ezz),
+            (rcx - eyx + ezx, rcy - eyy + ezy, rcz - eyz + ezz),
+            (rcx + eyx + ezx, rcy + eyy + ezy, rcz + eyz + ezz),
+            axis_x, neutral_uv, body_mat,
+        )
 
-        # -X side: r = +axis_y, u = axis_z -> axis_y x axis_z = -axis_x
-        lc = center - ex
-        self.add_quad(lc - ey - ez, lc + ey - ez, lc + ey + ez, lc - ey + ez, -axis_x, neutral_uv, body_mat)
+        # -X side
+        lcx, lcy, lcz = cx - exx, cy - exy, cz - exz
+        self.add_quad(
+            (lcx - eyx - ezx, lcy - eyy - ezy, lcz - eyz - ezz),
+            (lcx + eyx - ezx, lcy + eyy - ezy, lcz + eyz - ezz),
+            (lcx + eyx + ezx, lcy + eyy + ezy, lcz + eyz + ezz),
+            (lcx - eyx + ezx, lcy - eyy + ezy, lcz - eyz + ezz),
+            (-axis_x[0], -axis_x[1], -axis_x[2]), neutral_uv, body_mat,
+        )
 
-        # +Z top: r = +axis_x, u = -axis_y -> axis_x x (-axis_y) = +axis_z
-        tc = center + ez
-        self.add_quad(tc - ex + ey, tc + ex + ey, tc + ex - ey, tc - ex - ey, axis_z, neutral_uv, body_mat)
+        # +Z top
+        tcx, tcy, tcz = cx + ezx, cy + ezy, cz + ezz
+        self.add_quad(
+            (tcx - exx + eyx, tcy - exy + eyy, tcz - exz + eyz),
+            (tcx + exx + eyx, tcy + exy + eyy, tcz + exz + eyz),
+            (tcx + exx - eyx, tcy + exy - eyy, tcz + exz - eyz),
+            (tcx - exx - eyx, tcy - exy - eyy, tcz - exz - eyz),
+            axis_z, neutral_uv, body_mat,
+        )
 
-        # -Z bottom: r = +axis_x, u = +axis_y -> axis_x x axis_y = -axis_z
-        dc = center - ez
-        self.add_quad(dc - ex - ey, dc + ex - ey, dc + ex + ey, dc - ex + ey, -axis_z, neutral_uv, body_mat)
+        # -Z bottom
+        if not skip_bottom:
+            dcx, dcy, dcz = cx - ezx, cy - ezy, cz - ezz
+            self.add_quad(
+                (dcx - exx - eyx, dcy - exy - eyy, dcz - exz - eyz),
+                (dcx + exx - eyx, dcy + exy - eyy, dcz + exz - eyz),
+                (dcx + exx + eyx, dcy + exy + eyy, dcz + exz + eyz),
+                (dcx - exx + eyx, dcy - exy + eyy, dcz - exz + eyz),
+                (-axis_z[0], -axis_z[1], -axis_z[2]), neutral_uv, body_mat,
+            )
 
     def add_post(self, xy: np.ndarray, z0: float, z1: float, radius: float, mat_idx: int, sides: int = 6):
         """Add closed hexagonal galvanized metal pole prism."""
-        ring = [
-            np.array([xy[0] + radius * math.cos(2 * math.pi * i / sides), xy[1] + radius * math.sin(2 * math.pi * i / sides), 0.0])
-            for i in range(sides)
-        ]
+        px, py = float(xy[0]), float(xy[1])
+        ox, oy, oz = self.ox, self.oy, self.oz
+        step = 2.0 * math.pi / sides
+        ring = [(px + radius * math.cos(step * i), py + radius * math.sin(step * i)) for i in range(sides)]
+
         # Side quads
         for i in range(sides):
             j = (i + 1) % sides
-            p0 = np.array([ring[i][0], ring[i][1], z0])
-            p1 = np.array([ring[j][0], ring[j][1], z0])
-            p2 = np.array([ring[j][0], ring[j][1], z1])
-            p3 = np.array([ring[i][0], ring[i][1], z1])
-            mid = 0.5 * (ring[i] + ring[j]) - np.array([xy[0], xy[1], 0.0])
-            nm = mid / max(float(np.linalg.norm(mid)), 1e-6)
-            self.add_quad(p0, p1, p2, p3, nm, (0.0, 0.0, 1.0, 1.0), mat_idx)
+            rx0, ry0 = ring[i]
+            rx1, ry1 = ring[j]
+            mx = 0.5 * (rx0 + rx1) - px
+            my = 0.5 * (ry0 + ry1) - py
+            ml = max(math.hypot(mx, my), 1e-6)
+            self.add_quad(
+                (rx0, ry0, z0),
+                (rx1, ry1, z0),
+                (rx1, ry1, z1),
+                (rx0, ry0, z1),
+                (mx / ml, my / ml, 0.0),
+                (0.0, 0.0, 1.0, 1.0),
+                mat_idx,
+            )
 
         # Top & bottom triangle caps
         bot_c = len(self.pos)
-        for pt in (np.array([xy[0], xy[1], z0]), *(np.array([r[0], r[1], z0]) for r in ring)):
-            rel = pt - self.origin
-            self.pos.append((float(rel[0]), float(rel[1]), float(rel[2])))
+        self.pos.append((px - ox, py - oy, z0 - oz))
+        self.norms.append((0.0, 0.0, -1.0))
+        self.uvs.append((0.0, 0.0))
+        for rx, ry in ring:
+            self.pos.append((rx - ox, ry - oy, z0 - oz))
             self.norms.append((0.0, 0.0, -1.0))
             self.uvs.append((0.0, 0.0))
         for i in range(sides):
@@ -323,9 +367,11 @@ class _MeshBuilder:
             self.tm.append(mat_idx)
 
         top_c = len(self.pos)
-        for pt in (np.array([xy[0], xy[1], z1]), *(np.array([r[0], r[1], z1]) for r in ring)):
-            rel = pt - self.origin
-            self.pos.append((float(rel[0]), float(rel[1]), float(rel[2])))
+        self.pos.append((px - ox, py - oy, z1 - oz))
+        self.norms.append((0.0, 0.0, 1.0))
+        self.uvs.append((0.0, 0.0))
+        for rx, ry in ring:
+            self.pos.append((rx - ox, ry - oy, z1 - oz))
             self.norms.append((0.0, 0.0, 1.0))
             self.uvs.append((0.0, 0.0))
         for i in range(sides):
@@ -336,14 +382,25 @@ class _MeshBuilder:
     def empty(self) -> bool:
         return not self.tris
 
+    def bounding_radius(self) -> float:
+        if not self.pos:
+            return 1.0
+        xs = [p[0] for p in self.pos]
+        ys = [p[1] for p in self.pos]
+        zs = [p[2] for p in self.pos]
+        dx = max(xs) - min(xs)
+        dy = max(ys) - min(ys)
+        dz = max(zs) - min(zs)
+        return max(1.0, 0.5 * math.sqrt(dx * dx + dy * dy + dz * dz))
+
     def _arrays(self):
         if self.empty() or not self.pos:
             raise ValueError("Cannot encode empty DE enhancer mesh")
-        pos = np.ascontiguousarray(np.asarray(self.pos, dtype=np.float64).reshape(-1, 3), dtype=np.float64)
-        tris = np.ascontiguousarray(np.asarray(self.tris, dtype=np.int64).reshape(-1, 3), dtype=np.int64)
-        norms = np.ascontiguousarray(np.asarray(self.norms, dtype=np.float64).reshape(-1, 3), dtype=np.float64)
-        uvs = np.ascontiguousarray(np.asarray(self.uvs, dtype=np.float64).reshape(-1, 2), dtype=np.float64)
-        tm = np.ascontiguousarray(np.asarray(self.tm, dtype=np.int64).reshape(-1), dtype=np.int64)
+        pos = np.array(self.pos, dtype=np.float64).reshape(-1, 3)
+        tris = np.array(self.tris, dtype=np.int64).reshape(-1, 3)
+        norms = np.array(self.norms, dtype=np.float64).reshape(-1, 3)
+        uvs = np.array(self.uvs, dtype=np.float64).reshape(-1, 2)
+        tm = np.array(self.tm, dtype=np.int64).reshape(-1)
         if pos.shape[0] == 0 or tris.shape[0] == 0 or tm.shape[0] != tris.shape[0]:
             raise ValueError("Invalid mesh array shapes for cdae encoding")
         return pos, tris, norms, uvs, tm
@@ -352,7 +409,7 @@ class _MeshBuilder:
         pos, tris, _norms, uvs, tm = self._arrays()
         return {"positions": pos, "tris": tris, "uvs": uvs, "tri_materials": tm}
 
-    def encode(self, lods=None) -> bytes:
+    def encode(self, lods=None, min_visible_px: float | None = None) -> bytes:
         pos, tris, norms, uvs, tm = self._arrays()
         return cdae.encode(
             pos,
@@ -363,6 +420,7 @@ class _MeshBuilder:
             tri_materials=tm,
             close=False,
             lods=lods,
+            min_visible_px=min_visible_px,
         )
 
     def write(self, path: str) -> int:
@@ -625,6 +683,7 @@ def encode_streets_and_furniture_mesh(
     atlas_mat: str,
     uv_map: dict[str, tuple[float, float, float, float]],
     origin: tuple[float, float, float],
+    fuel_mat: str | None = None,
 ) -> bytes | None:
     """Encode batched `destreets.cdae` containing street signs + German transit stops & sidewalk micro-props."""
     from . import furniture_de
@@ -632,7 +691,9 @@ def encode_streets_and_furniture_mesh(
     has_furn = furn_plan is not None and furn_plan.has_any
     if (not posts and not has_furn) or not atlas_mat or not uv_map:
         return None
-    mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=origin)
+    mats = [METAL_MATERIAL, atlas_mat] + ([fuel_mat] if fuel_mat else [])
+    fuel_mat_idx = 2 if fuel_mat else None
+    mb = _MeshBuilder(mats, origin=origin)
     axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
     for post in posts or ():
@@ -670,19 +731,25 @@ def encode_streets_and_furniture_mesh(
             )
 
     if has_furn:
-        furniture_de.append_furniture_geometry(mb, furn_plan, uv_map)
+        furniture_de.append_furniture_geometry(mb, furn_plan, uv_map, fuel_mat_idx=fuel_mat_idx)
 
     if mb.empty():
         return None
 
     lods = None
+    min_visible_px = None
     if has_furn and (furn_plan.fuel_pylons or furn_plan.bus_stops):
-        macro_mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=origin)
-        furniture_de.append_furniture_geometry(macro_mb, furn_plan, uv_map, macro_only=True)
+        macro_mb = _MeshBuilder(mats, origin=origin)
+        furniture_de.append_furniture_geometry(macro_mb, furn_plan, uv_map, macro_only=True, fuel_mat_idx=fuel_mat_idx)
         if not macro_mb.empty() and len(macro_mb.tris) < len(mb.tris):
-            lods = [(300.0, macro_mb._lod_dict())]
+            r_macro = macro_mb.bounding_radius()
+            lod_px = max(180.0, min(5000.0, 3500.0 * r_macro / 160.0))
+            lods = [(lod_px, macro_mb._lod_dict())]
+    else:
+        r_all = mb.bounding_radius()
+        min_visible_px = max(40.0, min(4500.0, 3500.0 * r_all / 160.0))
 
-    return mb.encode(lods=lods)
+    return mb.encode(lods=lods, min_visible_px=min_visible_px)
 
 
 def encode_street_signs_mesh(
@@ -772,8 +839,9 @@ def encode_shop_and_housenumbers_mesh(
         return None
 
     # Coarse LOD keeps illuminated shop fascias visible down the block while culling sub-meter
-    # house-number plaques beyond ~80-120 m.
+    # house-number plaques beyond ~85 m.
     lods = None
+    min_visible_px = None
     if targets and hn_targets:
         macro_mb = _MeshBuilder([METAL_MATERIAL, atlas_mat], origin=(0.0, 0.0, 0.0))
         for t in targets:
@@ -798,9 +866,14 @@ def encode_shop_and_housenumbers_mesh(
                 face_mat=1,
             )
         if not macro_mb.empty() and len(macro_mb.tris) < len(mb.tris):
-            lods = [(300.0, macro_mb._lod_dict())]
+            r_macro = macro_mb.bounding_radius()
+            lod_px = max(260.0, min(9000.0, 3500.0 * r_macro / 85.0))
+            lods = [(lod_px, macro_mb._lod_dict())]
+    elif not targets and hn_targets:
+        r_all = mb.bounding_radius()
+        min_visible_px = max(40.0, min(4500.0, 3500.0 * r_all / 85.0))
 
-    return mb.encode(lods=lods)
+    return mb.encode(lods=lods, min_visible_px=min_visible_px)
 
 
 def encode_shop_fascias_mesh(
@@ -969,6 +1042,8 @@ def place_residential_yards(
     ground,
     md=None,
     rings_arr: list[np.ndarray] | None = None,
+    level: str = "medium",
+    fast_pass: bool = False,
 ) -> list[list]:
     """Generate DE residential front-yard hedges & fences respecting driveways and sidewalks."""
     if not items or not near_roads:
@@ -1072,6 +1147,13 @@ def place_residential_yards(
 
         centre = q + offset * out
         yard_style = style
+        if yard_style == "hedge":
+            if level == "low":
+                continue
+            if fast_pass:
+                cls_low = (getattr(spec, "cls", None) or "").lower()
+                if cls_low in classifier.DE_UNTYPED_HOUSE or int(getattr(spec, "floors", 1) or 1) <= 1 or getattr(spec, "door", None) is None:
+                    continue
         if yard_style == "hedge" and (
             (first is not None and clearance < DE_YARD_HEDGE_MIN_CLEAR_M)
             or (first is None and (wall_offset - offset) < DE_YARD_HEDGE_WALL_CLEAR_M)
@@ -1107,14 +1189,15 @@ def place_residential_yards(
                         nxt.append((cut_hi, s1))
             intervals = nxt
 
+        hedge_step_m = 1.50 if (fast_pass and level == "high") else (1.05 if level == "medium" else DE_HEDGE_STEP_M)
         for s0, s1 in intervals:
             line = np.array([centre + s0 * tangent, centre + s1 * tangent], dtype=np.float64)
             span = float(np.linalg.norm(line[1] - line[0]))
             if yard_style == "hedge":
-                # Continuous overlapping German Liguster/Buchsbaum hedge line (0.75 m pitch, 1.15-1.40 m tall).
+                # Continuous overlapping German Liguster/Buchsbaum hedge line (1.15-1.40 m tall).
                 inset = min(0.28, span * 0.22)
                 usable = max(0.0, span - 2.0 * inset)
-                n_seg = max(1, int(math.floor(usable / DE_HEDGE_STEP_M)) + 1)
+                n_seg = max(1, int(math.floor(usable / hedge_step_m)) + 1)
                 for k in range(n_seg):
                     t_pos = 0.5 if n_seg == 1 else (inset + usable * (k / (n_seg - 1))) / max(span, 1e-6)
                     p = line[0] + (line[1] - line[0]) * t_pos
@@ -1188,9 +1271,36 @@ def place_residential_yards(
     if not cleared:
         return []
 
-    xs = np.array([r[1] for r in cleared], dtype=np.float64)
-    ys = np.array([r[2] for r in cleared], dtype=np.float64)
-    if xs.size == 0:
+    xs_list = [float(r[1]) for r in cleared]
+    ys_list = [float(r[2]) for r in cleared]
+    if not xs_list:
         return []
-    zs = _sample_ground(ground, xs, ys, fallback=0.0)
+    n_cleared = len(cleared)
+    if ground is not None:
+        d_probe = 0.75
+        for rx, ry in zip(xs_list[:n_cleared], ys_list[:n_cleared]):
+            xs_list.extend((rx - d_probe, rx + d_probe, rx, rx))
+            ys_list.extend((ry, ry, ry - d_probe, ry + d_probe))
+    xs = np.array(xs_list, dtype=np.float64)
+    ys = np.array(ys_list, dtype=np.float64)
+    zs_all = _sample_ground(ground, xs, ys, fallback=0.0)
+    if ground is not None:
+        kept_rows: list[tuple] = []
+        kept_zs: list[float] = []
+        for idx_c, row in enumerate(cleared):
+            p0 = n_cleared + idx_c * 4
+            zw, ze, z_s, zn = zs_all[p0], zs_all[p0 + 1], zs_all[p0 + 2], zs_all[p0 + 3]
+            if np.isfinite(zw) and np.isfinite(ze) and np.isfinite(z_s) and np.isfinite(zn):
+                dz_dx = (float(ze) - float(zw)) / 1.5
+                dz_dy = (float(zn) - float(z_s)) / 1.5
+                if math.hypot(dz_dx, dz_dy) > DE_MAX_SLOPE_TAN:
+                    continue
+            kept_rows.append(row)
+            kept_zs.append(float(zs_all[idx_c]))
+        if not kept_rows:
+            return []
+        cleared = kept_rows
+        zs = np.array(kept_zs, dtype=np.float64)
+    else:
+        zs = zs_all[:n_cleared]
     return fences._forest_rows(cleared, zs)

@@ -1363,6 +1363,14 @@ local function onMessage(msg)
       M.roadWear = type(v) == 'string' and v or M.roadWear
       if M.roadWear then net.send({ type = 'road_wear', value = M.roadWear }) end
     end
+    -- German street detail level (settings expDeDetailLevel: 'low' | 'medium' | 'high')
+    do
+      local settings = rawget(_G, 'beamngEarth_settings')
+      local v = settings and settings.get and settings.get('expDeDetailLevel')
+      if v == 'low' or v == 'medium' or v == 'high' then M.deDetailLevel = v
+      elseif M.deDetailLevel ~= 'low' and M.deDetailLevel ~= 'medium' and M.deDetailLevel ~= 'high' then M.deDetailLevel = 'medium' end
+      net.send({ type = 'de_detail', value = M.deDetailLevel })
+    end
     -- the graphics settings the server serves (terrain detail, tree and building reach, the ground photo's size)
     M.graphicsSent = nil
     M.sendGraphics()
@@ -4067,6 +4075,16 @@ function M.setRoadWear(v)
   if type(v) ~= 'string' or M.roadWear == v then return end
   M.roadWear = v
   if net.isConnected() then net.send({ type = 'road_wear', value = v }) end
+end
+
+M.deDetailLevel = 'medium'
+
+-- German street detail level ('low' / 'medium' / 'high'): the server rebuilds road tiles with the chosen tier.
+function M.setDeDetailLevel(v)
+  if v ~= 'low' and v ~= 'medium' and v ~= 'high' then return end
+  if M.deDetailLevel == v then return end
+  M.deDetailLevel = v
+  if net.isConnected() then net.send({ type = 'de_detail', value = v }) end
 end
 
 -- The town signs on / off (settings townSigns): the server builds the road and sign tiles again with or without them

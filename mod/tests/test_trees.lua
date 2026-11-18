@@ -977,6 +977,10 @@ do -- de_hedge uses non-uniform MatrixF column scaling (sxy=0.75, Z-boosted heig
   end
   T.check(foundHedge and lastMatrixCol2 and math.abs(lastMatrixCol2.z - 1.65) < 1e-4, 'de_hedge applies non-uniform Z-scale via setColumn with scalar 1')
   T.check(trees.ONE_SPELLING.fr_hedge == nil and trees.ONE_SPELLING.de_hedge == true, 'fr_hedge stays upstream while de_hedge uses ONE_SPELLING')
+  T.check(trees.GROUP_MAX_M.de_hedge == 160 and trees.GROUP_MAX_M.fr_hedge == 350, 'de_hedge defaults to 160m while fr_hedge stays 350m')
+  trees.setDeHedgeMaxM(0)
+  T.check(trees.GROUP_MAX_M.de_hedge == 0 and trees.GROUP_MAX_M.fr_hedge == 350, 'setDeHedgeMaxM updates de_hedge only')
+  trees.setDeHedgeMaxM(160)
   trees.dropKey('8:p0_0')
   trees.update(8, { x = 50, y = 50 })
 end

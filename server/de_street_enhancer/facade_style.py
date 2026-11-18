@@ -661,27 +661,43 @@ def offset_ring_safe(ring: np.ndarray, edge_oh: tuple[float, ...] | list[float])
 # Option B: Near-only horizontal quad split + linear-space vertex depth AO
 # ---------------------------------------------------------------------------
 
+class _EdgeGroundSampler:
+    """Precomputed footprint edge ground interpolator for a single building."""
+
+    def __init__(self, spec, gmin: float, gmax: float):
+        self.gmin = float(gmin)
+        self.gmax = float(gmax)
+        gr = getattr(spec, "gring", None)
+        ring = np.asarray(spec.ring, dtype=np.float64)[:, :2]
+        if gr is None or len(gr) != len(ring) or abs(self.gmax - self.gmin) < 0.04 or len(ring) < 3:
+            self.valid = False
+            return
+        self.valid = True
+        gr_arr = np.asarray(gr, dtype=np.float64)
+        b = np.roll(ring, -1, axis=0)
+        d = b - ring
+        self.a = ring
+        self.d = d
+        self.l2 = np.maximum((d * d).sum(axis=1), 1e-9)
+        self.gr = gr_arr
+        self.dg = np.roll(gr_arr, -1) - gr_arr
+
+    def sample(self, xy: np.ndarray) -> np.ndarray:
+        if not self.valid:
+            return np.full(len(xy), self.gmax, dtype=np.float64)
+        diff = xy[:, None, :] - self.a[None, :, :]
+        t = np.clip((diff * self.d[None, :, :]).sum(axis=2) / self.l2[None, :], 0.0, 1.0)
+        proj = self.a[None, :, :] + t[:, :, None] * self.d[None, :, :]
+        dist2 = ((xy[:, None, :] - proj) ** 2).sum(axis=2)
+        ei = np.argmin(dist2, axis=1)
+        ti = t[np.arange(len(xy)), ei]
+        gz = self.gr[ei] + ti * self.dg[ei]
+        return np.clip(gz, self.gmin, self.gmax)
+
+
 def _ground_at_xy(spec, gmin: float, gmax: float, xy: np.ndarray) -> np.ndarray:
     """Interpolate local ground elevation at `(V, 2)` points from `spec.gring` edges, clamped to [gmin, gmax]."""
-    gr = getattr(spec, "gring", None)
-    ring = np.asarray(spec.ring, dtype=np.float64)[:, :2]
-    if gr is None or len(gr) != len(ring) or abs(gmax - gmin) < 0.04 or len(ring) < 3:
-        return np.full(len(xy), float(gmax), dtype=np.float64)
-    gr = np.asarray(gr, dtype=np.float64)
-    a = ring
-    b = np.roll(ring, -1, axis=0)
-    d = b - a
-    l2 = np.maximum((d * d).sum(axis=1), 1e-9)
-    # Closest point projection onto each footprint edge (V, E)
-    diff = xy[:, None, :] - a[None, :, :]
-    t = np.clip((diff * d[None, :, :]).sum(axis=2) / l2[None, :], 0.0, 1.0)
-    proj = a[None, :, :] + t[:, :, None] * d[None, :, :]
-    dist2 = ((xy[:, None, :] - proj) ** 2).sum(axis=2)
-    ei = np.argmin(dist2, axis=1)
-    ti = t[np.arange(len(xy)), ei]
-    g_nxt = np.roll(gr, -1)
-    gz = gr[ei] + ti * (g_nxt[ei] - gr[ei])
-    return np.clip(gz, float(gmin), float(gmax))
+    return _EdgeGroundSampler(spec, gmin, gmax).sample(xy)
 
 
 def bake_building_depth(
@@ -692,13 +708,18 @@ def bake_building_depth(
     z_eave: float,
     lite: bool,
     mat_idx,
+    de_detail=None,
 ) -> None:
     """Split vertical wall quads (Option B on near tiles) and bake Sockel + under-eave AO in linear light."""
     import buildings as bld
+    import de_enhancer
 
+    level, fast_pass = de_enhancer.normalize_detail(de_detail)
     P, UV, T, M, C = mesh.raw_arrays()
     if not len(T):
         return
+
+    ground_sampler = _EdgeGroundSampler(spec, gmin, gmax)
 
     wall_exclude_arr = _wall_exclude_mats_arr(bld)
     white_facade_mi = mat_idx["bne_bld_fac_white"][0]
@@ -755,7 +776,7 @@ def bake_building_depth(
                 q_idx = cand[is_vert]
             if len(q_idx):
                 p_mid = 0.5 * (P[v0[q_idx], :2] + P[v0[q_idx] + 1, :2])
-                g_local = _ground_at_xy(spec, gmin, gmax, p_mid)
+                g_local = ground_sampler.sample(p_mid)
                 z_sockel_cuts = g_local + SOCKEL_HEIGHT_M
                 z_eave_cut = float(z_eave) - EAVE_AO_HEIGHT_M
 
@@ -845,12 +866,14 @@ def bake_building_depth(
 
     # Identify vertices sitting at the bottom vs top of each wall triangle (so shared cut boundary
     # at z_g + 0.75 m can keep a crisp plinth-top edge on the lower band without darkening the upper band).
-    tri_z_min = P[T, 2].min(axis=1)
-    tri_z_max = P[T, 2].max(axis=1)
+    pz = P[:, 2]
+    pz_t = pz[T]
+    tri_z_min = pz_t.min(axis=1)
+    tri_z_max = pz_t.max(axis=1)
     is_sockel_band_tri = np.zeros(len(T), dtype=bool)
     if has_ground_sockel:
         tri_mid_xy = P[T, :2].mean(axis=1)
-        tri_g = _ground_at_xy(spec, gmin, gmax, tri_mid_xy)
+        tri_g = ground_sampler.sample(tri_mid_xy)
         is_sockel_band_tri = is_wall_tri & (tri_z_max <= tri_g + SOCKEL_HEIGHT_M + 0.08)
     sockel_band_verts = np.zeros(len(P), dtype=bool)
     if is_sockel_band_tri.any():
@@ -860,7 +883,7 @@ def bake_building_depth(
     lin = np.power(C[wall_verts, :3].astype(np.float64) / 255.0, 2.2)
     pts_w = P[wall_verts]
     zw = pts_w[:, 2]
-    gz = _ground_at_xy(spec, gmin, gmax, pts_w[:, :2])
+    gz = ground_sampler.sample(pts_w[:, :2])
 
     scale = np.ones((len(wall_verts), 3), dtype=np.float64)
     stone_blend = np.zeros(len(wall_verts), dtype=np.float64)
@@ -951,8 +974,8 @@ def bake_building_depth(
     C[wall_verts, :3] = np.clip(np.round(np.power(lin, 1.0 / 2.2) * 255.0), 0, 255).astype(np.uint8)
     mesh.set_raw_arrays(P, UV, T, M, C)
     if not lite:
-        _add_entrance_canopy_and_balconies(mesh, spec, gmin, gmax, z_eave, mat_idx)
-        _add_de_roof_details(mesh, spec, z_eave, mat_idx)
+        _add_entrance_canopy_and_balconies(mesh, spec, gmin, gmax, z_eave, mat_idx, level=level, fast_pass=fast_pass)
+        _add_de_roof_details(mesh, spec, z_eave, mat_idx, level=level, fast_pass=fast_pass)
 
 
 _BALCONY_SKIP_CLS = frozenset({
@@ -986,7 +1009,16 @@ def _add_box_prism(mesh, center: np.ndarray, axis_x: np.ndarray, axis_y: np.ndar
         mesh.quad(dc - ex - ey, dc + ex - ey, dc + ex + ey, dc - ex + ey, *uv, mat_token)
 
 
-def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_eave: float, mat_idx) -> None:
+def _add_entrance_canopy_and_balconies(
+    mesh,
+    spec,
+    gmin: float,
+    gmax: float,
+    z_eave: float,
+    mat_idx,
+    level: str = "medium",
+    fast_pass: bool = False,
+) -> None:
     """Append batched 3D glass/metal entrance canopies (`Vordächer`) and residential balconies (`Balkone`)."""
     import buildings as bld
 
@@ -1006,7 +1038,7 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
         return
 
     # Vertex budget guard against `buildings.VERTS_MAX` (65535).
-    if mesh.n > 54000:
+    if mesh.n > 44000:
         return
 
     try:
@@ -1046,8 +1078,10 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
                         _add_box_prism(mesh, c_arm, ax, ay, axis_z, 0.03, 0.43, 0.025, steel_tok)
 
     # 2. Residential Balconies (`Balkone`) on upper floors (2 <= floors <= 5)
+    if level == "low" or fast_pass:
+        return
     area = abs(bld._area2(ring)) / 2.0
-    if not (2 <= floors <= 5) or area < 55.0 or mesh.n > 48000:
+    if not (2 <= floors <= 5) or area < 55.0 or mesh.n > 38000:
         return
 
     street_edges = set(int(e) for e in (getattr(spec, "street", None) or ()))
@@ -1076,7 +1110,7 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
         return
 
     cand_edges.sort(reverse=True)
-    max_stacks = 2 if street_edges else 1
+    max_stacks = 1 if level == "medium" else (2 if street_edges else 1)
     chosen = [ei for _sc, ei in cand_edges[:max_stacks]]
     bal_w = 2.8
     bal_d = 1.05
@@ -1091,7 +1125,7 @@ def _add_entrance_canopy_and_balconies(mesh, spec, gmin: float, gmax: float, z_e
         c_mid = (a + b) * 0.5
 
         for fl in range(1, floors):
-            if mesh.n + 240 > 58000:
+            if mesh.n + 240 > 46000:
                 return
             slab_z = base_z + fl * floor_h - 0.08
             if slab_z + 1.15 >= z_eave - 0.10:
@@ -1149,10 +1183,19 @@ def _chimney_spot_for(spec, hl: float, hw: float) -> tuple[float, float] | None:
     return float(along), float(side)
 
 
-def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
+def _add_de_roof_details(
+    mesh,
+    spec,
+    z_eave: float,
+    mat_idx,
+    level: str = "medium",
+    fast_pass: bool = False,
+) -> None:
     """Add deterministic German dormers (`Dachgauben`) and south-facing PV solar panels (`0` extra draw calls)."""
     import buildings as bld
 
+    if fast_pass:
+        return
     if (
         getattr(spec, "plain", False)
         or getattr(spec, "holes", None)
@@ -1161,7 +1204,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
         or getattr(spec, "deck", False)
         or getattr(spec, "ship", False)
         or getattr(spec, "steeple", False)
-        or mesh.n > 50000
+        or mesh.n > 42000
     ):
         return
     if spec.roof not in ("gabled", "half-hipped", "hipped"):
@@ -1199,7 +1242,8 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
     # 1. Dormers (`Dachgauben`) on pitched residential roofs
     area_roof = abs(bld._area2(ring)) / 2.0
     if (
-        spec.roof in ("gabled", "half-hipped")
+        level != "low"
+        and spec.roof in ("gabled", "half-hipped")
         and cls not in _BALCONY_SKIP_CLS
         and area_roof >= 65.0
         and hw >= 3.6
@@ -1215,7 +1259,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
         except KeyError:
             fac_tok = roof_tok = win_tok = None
 
-        if fac_tok is not None and mesh.n + 160 <= 58000:
+        if fac_tok is not None and mesh.n + 160 <= 48000:
             # Prefer slope facing spec.door if available, else deterministic side
             sgn = 1.0 if _h01(spec.seed, "de_dormer_side") < 0.5 else -1.0
             door = getattr(spec, "door", None)
@@ -1227,7 +1271,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
                 if abs(proj_v) > 0.5:
                     sgn = 1.0 if proj_v > 0.0 else -1.0
 
-            n_dorm = 2 if (hl >= 6.0 and _h01(spec.seed, "de_dormer_n") < 0.55) else 1
+            n_dorm = 1 if level == "medium" else (2 if (hl >= 6.0 and _h01(spec.seed, "de_dormer_n") < 0.55) else 1)
             s_offsets = (0.0,) if n_dorm == 1 else (-0.42 * hl, 0.42 * hl)
             t_d = sgn * 0.52 * hw
             z_d_base = float(z_eave) + (hw - abs(t_d)) * tan_p - 0.12
@@ -1236,7 +1280,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
             for s_d in s_offsets:
                 if chim_spot is not None and (chim_spot[1] * sgn > -0.2) and abs(s_d - chim_spot[0]) < 1.35:
                     continue
-                if mesh.n + 80 > 58000:
+                if mesh.n + 80 > 48000:
                     break
                 c_xy = c + u * s_d + v * t_d
                 # Dormer body
@@ -1248,7 +1292,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
                 placed_dormers.append((s_d, sgn))
 
     # 2. South-facing rooftop PV solar panels (`Photovoltaik`)
-    if _h01(spec.seed, "de_pv") >= 0.26 or mesh.n + 120 > 58000:
+    if _h01(spec.seed, "de_pv") >= 0.26 or mesh.n + 120 > 48000:
         return
     # ENU +Y is North; outward slope normal Y = (sgn * v[1]) * sin(pitch)
     best_sgn = None
@@ -1295,7 +1339,7 @@ def _add_de_roof_details(mesh, spec, z_eave: float, mat_idx) -> None:
         t_p = best_sgn * (hw - up_d * cos_p)
         z_p = float(z_eave) + up_d * sin_p
         for ci in range(n_cols):
-            if mesh.n + 24 > 58000:
+            if mesh.n + 24 > 48000:
                 return
             s_p = -0.5 * span_s + 0.5 * mod_w + ci * (mod_w + gap)
             if chim_spot is not None and (chim_spot[1] * best_sgn > -0.2) and abs(s_p - chim_spot[0]) < 1.25:

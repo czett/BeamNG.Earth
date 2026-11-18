@@ -245,6 +245,12 @@ def _render_shop_fascia_cached(
     """Render an illuminated commercial fascia banner into a `w x h` RGB image (cached)."""
     from types import SimpleNamespace
 
+    r, g, b = bg_rgb
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    if lum > 222.0:
+        scale = 222.0 / lum
+        bg_rgb = (int(round(r * scale)), int(round(g * scale)), int(round(b * scale)))
+
     spec = SimpleNamespace(
         key=brand_key,
         emblem=emblem,
@@ -258,18 +264,30 @@ def _render_shop_fascia_cached(
 
     pad = INNER_PAD
     border_col = spec.border_rgb or spec.fg_rgb
+    bevel_col = (
+        max(0, int(round(bg_rgb[0] * 0.58))),
+        max(0, int(round(bg_rgb[1] * 0.58))),
+        max(0, int(round(bg_rgb[2] * 0.58))),
+    )
     draw.rounded_rectangle(
         [pad, pad, w - 1 - pad, h - 1 - pad],
         radius=6,
         fill=spec.bg_rgb,
-        outline=border_col,
+        outline=bevel_col,
         width=2,
+    )
+    draw.rounded_rectangle(
+        [pad + 2, pad + 2, w - 3 - pad, h - 3 - pad],
+        radius=4,
+        outline=border_col,
+        width=1,
     )
 
     emb_size = h - 2 * (pad + 4)
     has_emb = _draw_emblem(draw, spec, pad + 10, pad + 4, emb_size)
-    text_left = pad + (18 + emb_size if has_emb else 16)
-    text_w = (w - pad - 14) - text_left
+    h_pad = int(round(w * 0.04))
+    text_left = pad + (18 + emb_size if has_emb else 16) + h_pad
+    text_w = (w - pad - 14 - h_pad) - text_left
     fitted, font, bx = _fit_text(draw, label, max(80, text_w), h - 2 * (pad + 6))
     tw, th = bx[2] - bx[0], bx[3] - bx[1]
     tx = text_left + max(0.0, (text_w - tw) / 2.0) - bx[0]

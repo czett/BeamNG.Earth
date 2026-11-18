@@ -172,6 +172,10 @@ local function apply(night, step)
       end
     end
   end
+  local okd, deEnh = pcall(require, 'beamngEarth/deEnhancer')
+  if okd and type(deEnh) == 'table' and type(deEnh.syncDuskGlow) == 'function' then
+    deEnh.syncDuskGlow(night)
+  end
   for name, glow in pairs(M.MATERIALS) do updateMat(name, glow) end
   for name, glow in pairs(M.DYNAMIC) do updateMat(name, glow) end
   if night ~= M.night then

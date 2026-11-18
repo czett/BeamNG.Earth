@@ -1091,6 +1091,75 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         self.assertAlmostEqual(float(verts[:, 0].max() - verts[:, 0].min()), 0.42, places=2)
         self.assertAlmostEqual(float(verts[:, 2].max() - verts[:, 2].min()), 0.30, places=2)
 
+    def test_fascia_luminance_slope_culling_tiers_and_lods(self):
+        import cdae
+        import de_enhancer
+        import geodesy
+        import roads as roadsmod
+        from de_street_enhancer import brand_registry, classifier, furniture_de, placement, texture_atlas
+
+        # 1. Shop fascia background luminance <= 222.0 for bright brands
+        for key in ("edeka", "kaufland", "dm", "rossmann", "apotheke"):
+            spec_b = brand_registry.BY_KEY[key]
+            img = texture_atlas.render_shop_fascia(spec_b, key.upper())
+            # Sample interior background pixel away from emblem (left) and border
+            r, g, b = img.getpixel((img.width - 10, 10))
+            lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            self.assertLessEqual(lum, 222.5, f"{key} fascia background luminance {lum:.1f} exceeds 222")
+
+        # 2. Slope-safe hedges & grounding (-0.12 m Z)
+        frame = geodesy.EnuFrame(51.514, 7.465)
+        box = (-128.0, -128.0, 128.0, 128.0)
+        sp_res = _road_spec("residential", 6.0)
+        near_roads = [("r1", sp_res, np.array([[-120.0, 0.0], [120.0, 0.0]], dtype=np.float64), 7.465)]
+        h_ring = np.array([[-10.0, 10.0], [10.0, 10.0], [10.0, 22.0], [-10.0, 22.0]], dtype=np.float64)
+        h_spec = buildings.Spec(
+            ring=h_ring, floors=2, floor_h=2.8, height=5.6, min_h=0.0,
+            roof="gabled", cls="detached", seed=0.11, door=(0, 10.0), de_in=True,
+        )
+        items = [(h_spec, 0.0, 0.0)]
+
+        def _flat_ground(x, y):
+            return np.zeros(len(x), dtype=np.float64)
+
+        def _steep_ground(x, y):
+            return 0.55 * np.asarray(x, dtype=np.float64)  # ~28.8 deg (> 22 deg)
+
+        with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
+            flat_rows = placement.place_residential_yards(
+                frame, box, items, near_roads, None, [], None, [h_ring], _flat_ground, level="medium"
+            )
+            steep_rows = placement.place_residential_yards(
+                frame, box, items, near_roads, None, [], None, [h_ring], _steep_ground, level="medium"
+            )
+            low_rows = placement.place_residential_yards(
+                frame, box, items, near_roads, None, [], None, [h_ring], _flat_ground, level="low"
+            )
+        flat_hedges = [r for r in flat_rows if r[0] == "de_hedge"]
+        steep_hedges = [r for r in steep_rows if r[0] == "de_hedge"]
+        low_hedges = [r for r in low_rows if r[0] == "de_hedge"]
+        if flat_hedges:
+            self.assertAlmostEqual(float(flat_hedges[0][3]), -0.12, places=3, msg="de_hedge seated at -0.12 m Z")
+        self.assertEqual(len(steep_hedges), 0, "steep >22 deg slope must filter out de_hedge")
+        self.assertEqual(len(low_hedges), 0, "low tier must skip de_hedge")
+
+        # 3. Micro-only .cdae min_visible_px
+        hn_t = classifier.HouseNumberTarget(
+            center_xy=np.array([10.0, 10.0], dtype=np.float64),
+            d_along=np.array([1.0, 0.0], dtype=np.float64),
+            out_normal=np.array([0.0, -1.0], dtype=np.float64),
+            z_mid=1.95,
+            number="7",
+        )
+        hn_blob = placement.encode_shop_and_housenumbers_mesh([], [hn_t], "bne_de_sh_test", {"hn|7": (0.1, 0.1, 0.9, 0.9)})
+        dec_hn = cdae.decode(hn_blob)
+        self.assertGreaterEqual(dec_hn["smallestVisibleSize"], 40.0, "micro-only deshops must set min_visible_px >= 40")
+
+        # 4. normalize_detail helper
+        self.assertEqual(de_enhancer.normalize_detail(None), ("medium", False))
+        self.assertEqual(de_enhancer.normalize_detail({"level": "LOW", "fast": 1}), ("low", True))
+        self.assertEqual(de_enhancer.normalize_detail("high"), ("high", False))
+
 
 if __name__ == "__main__":
     unittest.main()
