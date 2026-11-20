@@ -34,6 +34,11 @@ M.HARSH_JERK_MPS3 = 22.0
 M.DAMAGE_COLLISION_DELTA = 50
 M.COLLISION_COOLDOWN_S = 1.25
 M.COLLISION_PEN_CAP = 65
+M.GRAVITY_MPS2 = 9.81
+M.FRAGILE_G_THRESH = 0.65
+M.HAZMAT_G_THRESH = 0.55
+M.FRAGILE_VERT_G = 1.25
+M.HAZMAT_VERT_G = 1.05
 M.JUMP_RESET_M = 200.0
 M.RADIAL_LEVEL = '/root/sandbox/other/'
 
@@ -550,7 +555,46 @@ function M.computeScore(m)
   end
 
   local score = math.max(0, math.min(100, math.floor(smoothness - collisionPen - skipPen + 0.5)))
+  local sens = type(m.cargoSensitivity) == 'string' and m.cargoSensitivity:lower() or 'standard'
+  if (sens == 'fragile' or sens == 'hazmat') and m.cargoIntegrity ~= nil then
+    local integ = math.max(0, math.min(100, tonumber(m.cargoIntegrity) or 100))
+    score = math.max(0, math.min(100, math.floor(score - (100 - integ) * 0.25 + 0.5)))
+  end
   return score, smoothness, 100
+end
+
+-- Pure: smoothly deduct cargoIntegrity (100.0 .. 0.0) on lateral/longitudinal G-spikes, vertical jolts, and collisions.
+function M.stepCargoIntegrity(integrity, sensitivity, ah, az, collided, dmgDelta, dt)
+  local integ = math.max(0.0, math.min(100.0, tonumber(integrity) or 100.0))
+  local sens = type(sensitivity) == 'string' and sensitivity:lower() or 'standard'
+  if sens ~= 'fragile' and sens ~= 'hazmat' then return integ end
+  local isHaz = (sens == 'hazmat')
+  local gThresh = isHaz and M.HAZMAT_G_THRESH or M.FRAGILE_G_THRESH
+  local vThresh = isHaz and M.HAZMAT_VERT_G or M.FRAGILE_VERT_G
+  local loss = 0.0
+
+  if isFinite(dt) and dt > 0 then
+    local horizG = math.abs(tonumber(ah) or 0) / M.GRAVITY_MPS2
+    if horizG > gThresh then
+      local rate = isHaz and 14.0 or 10.0
+      loss = loss + (horizG - gThresh) * rate * dt
+    end
+    local vertG = math.abs(tonumber(az) or 0) / M.GRAVITY_MPS2
+    if vertG > vThresh then
+      local vRate = isHaz and 18.0 or 12.0
+      loss = loss + (vertG - vThresh) * vRate * dt
+    end
+  end
+
+  if collided == true then
+    local dmg = math.max(0, tonumber(dmgDelta) or 0)
+    local baseCol = isHaz and 16.0 or 12.0
+    local extraCol = isHaz and math.min(24.0, dmg / 90.0) or math.min(18.0, dmg / 120.0)
+    loss = loss + baseCol + extraCol
+  end
+
+  if loss <= 0 then return integ end
+  return math.max(0.0, math.min(100.0, integ - loss))
 end
 
 local function round2(v)
@@ -707,6 +751,7 @@ function M.computePayoutBreakdown(j, score, smooth, timeliness, streak)
       timeBonus = 0,
       smoothnessBonus = 0,
       tipOrStreakBonus = 0,
+      hazardBonus = 0,
       damagePenalty = 0,
       totalEarned = 0,
       streakApplied = 0,
@@ -785,7 +830,15 @@ function M.computePayoutBreakdown(j, score, smooth, timeliness, streak)
     end
   end
 
-  local rawGross = basePay + timeBonus + smoothnessBonus + tipOrStreakBonus
+  local hazardBonus = 0
+  local sens = type(j.cargoSensitivity) == 'string' and j.cargoSensitivity:lower() or 'standard'
+  local hazMult = math.max(0, tonumber(j.hazardBonusMult) or 0)
+  if (sens == 'fragile' or sens == 'hazmat') and hazMult > 0 and skipped == 0 and basePay > 0 then
+    local integ = math.max(0, math.min(100, tonumber(j.cargoIntegrity) or 100))
+    hazardBonus = round2(basePay * hazMult * (integ / 100.0))
+  end
+
+  local rawGross = basePay + timeBonus + smoothnessBonus + tipOrStreakBonus + hazardBonus
   local damagePenalty = round2(math.min(rawGross, collisions * 4.50 + math.min(25.0, dmg / 300.0) + skipped * 6.00))
   local totalEarned = round2(math.max(0, rawGross - damagePenalty))
   return {
@@ -793,6 +846,7 @@ function M.computePayoutBreakdown(j, score, smooth, timeliness, streak)
     timeBonus = timeBonus,
     smoothnessBonus = smoothnessBonus,
     tipOrStreakBonus = tipOrStreakBonus,
+    hazardBonus = hazardBonus,
     damagePenalty = damagePenalty,
     totalEarned = totalEarned,
     streakApplied = streakApplied,
@@ -2690,6 +2744,10 @@ function M.onJobResult(msg)
     cargoType = cargo and tostring(cargo.type or '') or '',
     cargoLabel = cargo and tostring(cargo.label or '') or '',
     cargoDomain = cargo and tostring(cargo.domain or 'general') or 'general',
+    cargoSensitivity = tostring(msg.cargoSensitivity or (cargo and cargo.cargoSensitivity) or 'standard'),
+    sensitivityLabel = tostring(msg.sensitivityLabel or (cargo and cargo.sensitivityLabel) or ''),
+    hazardBonusMult = tonumber(msg.hazardBonusMult or (cargo and cargo.hazardBonusMult)) or 0,
+    cargoIntegrity = 100.0,
     useTrailer = (cargo and cargo.useTrailer ~= nil) and (cargo.useTrailer == true) or nil,
     cargoKg = cargoKg,
     cargoCurrentKg = 0,
@@ -2789,6 +2847,9 @@ local function finishJob(fallbackFinal)
     paxCount = j.mode == 'taxi' and j.taxiPaxCount or (j.mode == 'bus' and j.paxCount or nil),
     cargoLabel = j.cargoLabel,
     cargoKg = (j.totalCargoHauledKg and j.totalCargoHauledKg > 0) and j.totalCargoHauledKg or nil,
+    cargoSensitivity = (j.cargoSensitivity == 'fragile' or j.cargoSensitivity == 'hazmat') and j.cargoSensitivity or nil,
+    sensitivityLabel = (j.cargoSensitivity == 'fragile' or j.cargoSensitivity == 'hazmat') and j.sensitivityLabel or nil,
+    cargoIntegrity = (j.cargoSensitivity == 'fragile' or j.cargoSensitivity == 'hazmat') and math.floor((tonumber(j.cargoIntegrity) or 100) * 10 + 0.5) / 10 or nil,
     parcelsTotal = j.mode == 'parcel' and j.parcelsTotal or nil,
     parcelsDelivered = j.mode == 'parcel' and (j.parcelsDelivered or 0) or nil,
     parcelsReturned = j.mode == 'parcel' and (j.parcelsReturned or 0) or nil,
@@ -3051,6 +3112,7 @@ local function updateMetrics(j, dtSim, player)
   -- Vehicle damage / collision tracking (debounced + re-baselined on vehicle switch/reset)
   local curVehId = vehIdOf(M.playerVeh())
   local dmg = tonumber(M.readDamage()) or 0
+  local collidedNow, colDmgDelta = false, 0
   if not isFinite(dmg) or dmg < 0 then dmg = 0 end
   if curVehId ~= j.trackedVehId or dmg < (j.prevDamage or 0) then
     j.trackedVehId = curVehId
@@ -3061,8 +3123,16 @@ local function updateMetrics(j, dtSim, player)
     if delta >= M.DAMAGE_COLLISION_DELTA and (j.elapsedS - (j.lastCollisionAt or -math.huge)) >= M.COLLISION_COOLDOWN_S then
       j.collisions = j.collisions + 1
       j.lastCollisionAt = j.elapsedS
+      collidedNow = true
+      colDmgDelta = delta
     end
     j.prevDamage = dmg
+  end
+
+  local isSensitive = (j.cargoSensitivity == 'fragile' or j.cargoSensitivity == 'hazmat')
+    and (j.mode == 'parcel' or (tonumber(j.cargoCurrentKg) or 0) > 0)
+  if isSensitive and collidedNow then
+    j.cargoIntegrity = M.stepCargoIntegrity(j.cargoIntegrity, j.cargoSensitivity, 0, 0, true, colDmgDelta, 0)
   end
 
   -- Smoothness sampling (0.2 s sim interval)
@@ -3090,6 +3160,9 @@ local function updateMetrics(j, dtSim, player)
         if j.mode == 'taxi' and j.passengerOnBoard then
           j.fareHarshS = j.fareHarshS + sdt
         end
+      end
+      if isSensitive then
+        j.cargoIntegrity = M.stepCargoIntegrity(j.cargoIntegrity, j.cargoSensitivity, ah, az, false, 0, sdt)
       end
       ls.vx, ls.vy, ls.vz, ls.ax, ls.ay, ls.valid = vx, vy, vz, ax, ay, true
     else
@@ -3835,6 +3908,9 @@ function M.hudPayload()
       cargoLabel = legInfo and legInfo.cargoLabel or nil,
       cargoKg = legInfo and legInfo.cargoKg or nil,
       cargoCurrentKg = activeJob.cargoCurrentKg or 0,
+      cargoSensitivity = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and activeJob.cargoSensitivity or nil,
+      sensitivityLabel = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and activeJob.sensitivityLabel or nil,
+      cargoIntegrity = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and math.floor((tonumber(activeJob.cargoIntegrity) or 100) * 10 + 0.5) / 10 or nil,
       legKind = legInfo and legInfo.legKind or nil,
       legLabel = legInfo and legInfo.legLabel or nil,
       trailerLabel = legInfo and legInfo.trailerLabel or nil,
@@ -3883,6 +3959,9 @@ function M.hudPayload()
       paxCount = summary.paxCount,
       cargoLabel = summary.cargoLabel,
       cargoKg = summary.cargoKg,
+      cargoSensitivity = summary.cargoSensitivity,
+      sensitivityLabel = summary.sensitivityLabel,
+      cargoIntegrity = summary.cargoIntegrity,
       parcelsTotal = summary.parcelsTotal,
       parcelsDelivered = summary.parcelsDelivered,
       parcelsReturned = summary.parcelsReturned,
@@ -3988,6 +4067,9 @@ function M.uiState()
       cargoLabel = legInfo and legInfo.cargoLabel or nil,
       cargoKg = legInfo and legInfo.cargoKg or nil,
       cargoCurrentKg = activeJob.cargoCurrentKg or 0,
+      cargoSensitivity = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and activeJob.cargoSensitivity or nil,
+      sensitivityLabel = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and activeJob.sensitivityLabel or nil,
+      cargoIntegrity = (activeJob.cargoSensitivity == 'fragile' or activeJob.cargoSensitivity == 'hazmat') and math.floor((tonumber(activeJob.cargoIntegrity) or 100) * 10 + 0.5) / 10 or nil,
       trailerState = activeJob.trailerState ~= 'none' and activeJob.trailerState or nil,
       trailerDetached = activeJob.trailerDetached == true,
       trailerMissing = activeJob.trailerMissing == true,

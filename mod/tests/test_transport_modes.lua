@@ -1072,4 +1072,51 @@ do
   tm.reset()
 end
 
+-- 17. Loop 7 Part B: Fragile & Hazmat Cargo Physics, Integrity Telemetry, and Hazard Bonus Payout
+do
+  -- Gentle driving (< 0.55 G) keeps both fragile and hazmat at 100.0%
+  local f1 = tm.stepCargoIntegrity(100.0, 'fragile', 0.45 * 9.81, 0.2 * 9.81, false, 0, 1.0)
+  local h1 = tm.stepCargoIntegrity(100.0, 'hazmat', 0.50 * 9.81, 0.2 * 9.81, false, 0, 1.0)
+  T.check(f1 == 100.0 and h1 == 100.0, 'gentle driving preserves 100% cargo integrity')
+
+  -- 0.60 G spike leaves fragile untouched (> 0.65 G) but deducts hazmat (> 0.55 G)
+  local f2 = tm.stepCargoIntegrity(100.0, 'fragile', 0.60 * 9.81, 0, false, 0, 0.5)
+  local h2 = tm.stepCargoIntegrity(100.0, 'hazmat', 0.60 * 9.81, 0, false, 0, 0.5)
+  T.check(f2 == 100.0 and h2 < 100.0, '0.60 G differentiates fragile (>0.65G) vs hazmat (>0.55G)')
+
+  -- Severe G-spike + vertical jolt + collision deduct smoothly and clamp at 0
+  local h3 = tm.stepCargoIntegrity(h2, 'hazmat', 1.2 * 9.81, 1.6 * 9.81, true, 600, 1.0)
+  T.check(h3 < h2 and h3 >= 0.0, 'G-spike + jolt + collision deduct hazmat integrity')
+  local hZero = tm.stepCargoIntegrity(5.0, 'hazmat', 2.0 * 9.81, 2.0 * 9.81, true, 1200, 2.0)
+  T.check(hZero == 0.0, 'cargoIntegrity clamps cleanly at 0.0%')
+
+  -- Payout hazardBonus scales with cargoIntegrity and hazardBonusMult
+  local pFull = tm.computePayoutBreakdown({
+    mode = 'logistics', tier = 'city', stopsCompleted = 4, stopsSkipped = 0,
+    collisions = 0, damageDelta = 0, drivenM = 10000, cargoKg = 4000,
+    cargoSensitivity = 'hazmat', hazardBonusMult = 0.50, cargoIntegrity = 100.0,
+  }, 100, 100, 100, 0)
+  local pHalf = tm.computePayoutBreakdown({
+    mode = 'logistics', tier = 'city', stopsCompleted = 4, stopsSkipped = 0,
+    collisions = 0, damageDelta = 0, drivenM = 10000, cargoKg = 4000,
+    cargoSensitivity = 'hazmat', hazardBonusMult = 0.50, cargoIntegrity = 50.0,
+  }, 88, 100, 100, 0)
+  local pStd = tm.computePayoutBreakdown({
+    mode = 'logistics', tier = 'city', stopsCompleted = 4, stopsSkipped = 0,
+    collisions = 0, damageDelta = 0, drivenM = 10000, cargoKg = 4000,
+    cargoSensitivity = 'standard', hazardBonusMult = 0.0, cargoIntegrity = 100.0,
+  }, 100, 100, 100, 0)
+  T.check(pFull.hazardBonus > 0 and math.abs(pFull.hazardBonus - pFull.basePay * 0.50) <= 0.02,
+    'full integrity hazmat earns 50% basePay hazardBonus')
+  T.check(math.abs(pHalf.hazardBonus - pHalf.basePay * 0.25) <= 0.02,
+    '50% integrity hazmat earns half hazardBonus')
+  T.check(pStd.hazardBonus == 0 and pFull.totalEarned > pStd.totalEarned,
+    'standard job earns 0 hazardBonus and less than clean hazmat')
+
+  -- Score reflects integrity loss
+  local scClean = tm.computeScore({ elapsedS = 60, harshS = 0, collisions = 0, damageDelta = 0, stopsSkipped = 0, cargoSensitivity = 'fragile', cargoIntegrity = 100 })
+  local scDamaged = tm.computeScore({ elapsedS = 60, harshS = 0, collisions = 0, damageDelta = 0, stopsSkipped = 0, cargoSensitivity = 'fragile', cargoIntegrity = 40 })
+  T.check(scClean == 100 and scDamaged < scClean, 'computeScore penalizes lost fragile/hazmat integrity')
+end
+
 T.done('test_transport_modes')

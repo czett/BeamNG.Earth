@@ -708,6 +708,48 @@ def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
     }
 
 
+_FRAGILE_LABELS = {
+    "food": ("Fragile · Glass Bottles & Jars", "Fragile · Artisan Glassware"),
+    "medical": ("Fragile · Laboratory Optics", "Fragile · Sterile Vials"),
+    "hardware": ("Fragile · Ceramic Tiles & Fixtures", "Fragile · Precision Tooling"),
+    "retail": ("Fragile · Glass & Electronics", "Fragile · Fine Ceramics"),
+    "industrial": ("Fragile · Precision Instruments", "Fragile · CNC Optics"),
+    "general": ("Fragile · Glass & Electronics", "Fragile · Precision Instruments"),
+}
+_HAZMAT_LABELS = {
+    "fuel": ("Hazmat ADR · Flammable Liquids", "Hazmat ADR · Class 3 Fuel"),
+    "medical": ("Hazmat ADR · Bio-Medical Class 6", "Hazmat ADR · Cold-Chain Reagents"),
+    "industrial": ("Hazmat ADR · Corrosive Chemicals", "Hazmat ADR · Pressurized Cylinders"),
+    "hardware": ("Hazmat ADR · Solvents & Adhesives", "Hazmat ADR · Pressurized Aerosols"),
+    "general": ("Hazmat ADR · Flammable Liquids", "Hazmat ADR · Class 9 Batteries"),
+}
+
+
+def assign_cargo_sensitivity(mode, tier, domain="general", cargo_type="", seed=0):
+    """Deterministically assign standard/fragile/hazmat sensitivity on logistics & parcel city+ tiers."""
+    mode_l = str(mode or "").lower()
+    tier_l = str(tier or "").lower()
+    if mode_l not in ("logistics", "parcel") or tier_l not in ("city", "regional", "long"):
+        return {"cargoSensitivity": "standard", "sensitivityLabel": "", "hazardBonusMult": 0.0}
+
+    roll = _stable_index(seed, f"cargo_sens:{mode_l}:{tier_l}:{domain}:{cargo_type}", 100)
+    if roll < 20:
+        sens = "hazmat"
+        mult = 0.50
+        pool = _HAZMAT_LABELS.get(domain) or _HAZMAT_LABELS["general"]
+        label = pool[_stable_index(seed, f"sens_lbl:{mode_l}:{tier_l}:{domain}", len(pool))]
+    elif roll < 55:
+        sens = "fragile"
+        mult = 0.35
+        pool = _FRAGILE_LABELS.get(domain) or _FRAGILE_LABELS["general"]
+        label = pool[_stable_index(seed, f"sens_lbl:{mode_l}:{tier_l}:{domain}", len(pool))]
+    else:
+        sens = "standard"
+        mult = 0.0
+        label = ""
+    return {"cargoSensitivity": sens, "sensitivityLabel": label, "hazardBonusMult": mult}
+
+
 def pick_trailer_model(coupler, cargo_type, cargo_domain, tier, seed, installed_models=None):
     """Select an appropriate trailer JBeam model and display label for a leg."""
     coupler = str(coupler or "none").lower()
@@ -2491,9 +2533,12 @@ def _apply_logistics_cargo_and_dwell(res, req):
             "logistics", tier, stops[0].get("kind"), stops[0].get("stopType"),
             stops[0].get("name"), cargo_kg=cargo["massKg"], seed=seed, idx=stops[0].get("index", 1),
         )
+        sens = assign_cargo_sensitivity("logistics", tier, cargo["domain"], cargo["type"], seed)
+        cargo.update(sens)
         res["cargo"] = cargo
         res["vehicleClass"] = cargo["vehicleClass"]
         res["legs"] = []
+        res.update(sens)
         return res
 
     # Enforce strict complete 2-stop Pickup -> Delivery cycles (no half-dangling 3-stop splits)
@@ -2584,9 +2629,14 @@ def _apply_logistics_cargo_and_dwell(res, req):
             s.get("name"), cargo_kg=stop_cargo_kg[idx_s], seed=seed, idx=s.get("index", idx_s + 1),
             leg_kind=stop_leg_kind.get(idx_s),
         )
+    sens = assign_cargo_sensitivity(
+        "logistics", tier, first_cargo["domain"], first_cargo["type"], seed
+    )
+    first_cargo.update(sens)
     res["cargo"] = first_cargo
     res["vehicleClass"] = first_cargo["vehicleClass"]
     res["legs"] = legs
+    res.update(sens)
     return res
 
 
@@ -2939,6 +2989,7 @@ def _generate_parcel(md, req, deadline):
 
     vehicle = req.get("vehicle") or {"class": "van", "coupler": "none", "hasTrailer": False}
     vclass = vehicle.get("class") if vehicle.get("class") in VEHICLE_CLASSES else "van"
+    sens = assign_cargo_sensitivity("parcel", tier, "retail", "parcels", seed)
     tier_title = {"local": "Local Parcel Round", "city": "City Parcel Round", "regional": "Regional Parcel Round", "long": "Long Parcel Route"}
     return {
         "ok": True,
@@ -2948,6 +2999,7 @@ def _generate_parcel(md, req, deadline):
         "source": "overture",
         "estimatedKm": _route_estimate_km(lat, lon, picked),
         "vehicleClass": vclass,
+        **sens,
         "cargo": {
             "type": "parcels",
             "label": "Courier Parcels",
@@ -2955,6 +3007,7 @@ def _generate_parcel(md, req, deadline):
             "massKg": int(initial_mass_kg),
             "vehicleClass": vclass,
             "useTrailer": False,
+            **sens,
         },
         "parcel": {
             "parcelsTotal": int(deliver_total),

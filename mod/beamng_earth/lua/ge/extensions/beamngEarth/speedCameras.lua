@@ -6,7 +6,9 @@ local M = {}
 
 M.URBAN_TOLERANCE_KPH = 6
 M.RURAL_TOLERANCE_KPH = 8
+M.ROADWORK_TOLERANCE_KPH = 6
 M.COOLDOWN_S = 15.0
+M.ROADWORK_COOLDOWN_S = 20.0
 M.FLASH_S = 0.55
 M.LIGHT_S = 0.22
 M.JOB_SCORE_PENALTY = 12
@@ -18,7 +20,10 @@ M.PATROL_COOLDOWN_S = 25.0
 M.PATROL_LIGHTBAR_S = 10.0
 
 local tiles = {}              -- tileKey -> { gate, ... }
+local roadworkTiles = {}      -- tileKey -> { zone, ... }
 local cooldowns = {}          -- gate.id -> clock expiry
+local roadworkCooldowns = {}  -- zone.id -> clock expiry
+local roadworkWarned = {}     -- zone.id -> clock expiry
 local patrolCooldowns = {}    -- vehId -> clock expiry
 local activeLightbars = {}    -- vehId -> clock expiry
 local previous = nil
@@ -242,8 +247,54 @@ function M.onRows(key, rows)
   tiles[key] = #gates > 0 and gates or nil
 end
 
+function M.onRoadworks(key, rows)
+  local zones = {}
+  for _, row in ipairs(rows or {}) do
+    local x0, y0 = tonumber(row[2]) or 0, tonumber(row[3]) or 0
+    local x1, y1 = tonumber(row[4]) or 0, tonumber(row[5]) or 0
+    local dx, dy = x1 - x0, y1 - y0
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len > 1e-3 then
+      zones[#zones + 1] = {
+        id = tostring(row[1]),
+        x0 = x0,
+        y0 = y0,
+        dx = dx / len,
+        dy = dy / len,
+        len = len,
+        halfW = tonumber(row[6]) or 4.0,
+        limit = tonumber(row[7]) or 30,
+      }
+    end
+  end
+  roadworkTiles[key] = #zones > 0 and zones or nil
+end
+
+-- Pure: check whether (px, py) lies inside a roadwork corridor [0..len] x [-halfW..halfW].
+function M.pointInRoadwork(zone, px, py)
+  if type(zone) ~= 'table' or not px or not py then return false end
+  local rx, ry = px - zone.x0, py - zone.y0
+  local along = rx * zone.dx + ry * zone.dy
+  if along < 0 or along > zone.len then return false end
+  local perp = math.abs(rx * zone.dy - ry * zone.dx)
+  return perp <= zone.halfW
+end
+
+function M.activeRoadworkLimit(px, py)
+  if not M.isEnabled() or not px or not py then return nil end
+  for _, zones in pairs(roadworkTiles) do
+    for _, zone in ipairs(zones) do
+      if M.pointInRoadwork(zone, px, py) then
+        return zone.limit, zone
+      end
+    end
+  end
+  return nil
+end
+
 function M.dropKey(key)
   tiles[key] = nil
+  roadworkTiles[key] = nil
   if key == lightKey then stopLight() end
 end
 
@@ -256,7 +307,8 @@ function M.clear()
   M.resetMotion()
   local light = lightId and scenetree and scenetree.findObjectById and scenetree.findObjectById(lightId)
   if light then light:delete() end
-  lightId, tiles, cooldowns, patrolCooldowns, activeLightbars = nil, {}, {}, {}, {}
+  lightId, tiles, roadworkTiles, cooldowns, roadworkCooldowns, roadworkWarned, patrolCooldowns, activeLightbars =
+    nil, {}, {}, {}, {}, {}, {}, {}
   flashLeft, simClock = 0, 0
   stats = { flashes = 0, citations = 0, totalFines = 0, scorePenalties = 0, lastFine = 0, lastReason = nil }
 end
@@ -424,8 +476,38 @@ function M.update(player, dtSim, dtReal, opts)
   previous = player
 
   -- Patrol check runs even on tiles without fixed speed cameras
-  local limitKph = (type(opts) == 'table' and opts.limitKph) or currentLimitKph()
+  local rwLimit, rwZone = M.activeRoadworkLimit(player.x, player.y)
+  local limitKph = (type(opts) == 'table' and opts.limitKph) or rwLimit or currentLimitKph()
   M.updatePatrols(player, before, dtReal, limitKph, type(opts) == 'table' and opts.trafficData or nil)
+
+  -- Roadwork temporary speed-limit caution & enforcement
+  if rwZone and not M.isExemptRun() then
+    local speedKph = (tonumber(player.speed) or 0) * 3.6
+    local cd = roadworkCooldowns[rwZone.id]
+    local warned = roadworkWarned[rwZone.id]
+    if speedKph > rwZone.limit + M.ROADWORK_TOLERANCE_KPH and (not cd or simClock >= cd) then
+      local fine = M.evaluate(speedKph, rwZone.limit, true)
+      if fine then
+        roadworkCooldowns[rwZone.id] = simClock + M.ROADWORK_COOLDOWN_S
+        roadworkWarned[rwZone.id] = simClock + M.ROADWORK_COOLDOWN_S
+        stats.citations = stats.citations + 1
+        local _, scored = M.applyPenalty(fine, 'roadworks_speeding', M.JOB_SCORE_PENALTY)
+        if ui_message then
+          local scoreSuffix = scored and string.format(' (-%d pts)', M.JOB_SCORE_PENALTY) or ''
+          ui_message(string.format('Roadworks speed violation! %d km/h in %d km/h work zone. Fine $%d%s.',
+            math.floor(speedKph + 0.5), math.floor(rwZone.limit + 0.5), fine, scoreSuffix),
+            6, 'beamngEarthRoadworks')
+        end
+        return true
+      end
+    elseif not warned or simClock >= warned then
+      roadworkWarned[rwZone.id] = simClock + M.ROADWORK_COOLDOWN_S
+      if ui_message then
+        ui_message(string.format('Roadworks ahead · Temporary %d km/h limit', math.floor(rwZone.limit + 0.5)),
+          4, 'beamngEarthRoadworks')
+      end
+    end
+  end
 
   if next(tiles) == nil or not before or before.vehicleId ~= player.vehicleId or dtSim > 0.35 then
     return false

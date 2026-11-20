@@ -173,6 +173,20 @@ export function formatHeading(deg) {
   return `${d}° ${CARDINALS[idx]}`
 }
 
+export function sensitivityBadgeLabel(sens) {
+  if (sens === "hazmat") return "HAZMAT ADR"
+  if (sens === "fragile") return "FRAGILE"
+  return ""
+}
+
+export function integrityTier(pct) {
+  const n = Number(pct)
+  if (!Number.isFinite(n)) return "good"
+  if (n >= 75) return "good"
+  if (n >= 40) return "warn"
+  return "crit"
+}
+
 export function formatMoney(value, opts = {}) {
   const n = Number(value)
   if (!Number.isFinite(n)) return "$0.00"

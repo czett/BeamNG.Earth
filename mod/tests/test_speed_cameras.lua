@@ -161,6 +161,37 @@ T.check(statusbar.formatSpeedLimit({ ms = 30 / 3.6, unit = 'kmh' }) == '30 km/h'
 T.check(statusbar.compose({ street = 'Hellweg', place = 'Dortmund', country = 'Germany' }, nil, nil, '50 km/h')
   == 'Hellweg  |  Dortmund, Germany  |  50 km/h', 'statusbar composes street, place, and polished speed limit')
 
+-- 10. Dynamic Roadworks: prop registration, corridor math, caution & enforcement, off-switch parity
+for _, g in ipairs({ 'de_barrier', 'de_sign_123', 'de_sign_274_30', 'de_sign_274_50' }) do
+  T.check(trees.CATALOG[g] ~= nil and trees.isBarrier(g) == true, 'roadwork prop registered & protected: ' .. g)
+end
+
+do
+  local rwRow = { 'de_rw_1', 10, 0, 55, 0, 4.0, 30 }
+  speedCameras.clear()
+  notices = {}
+  settings.set('expDeStreetImmersion', false)
+  speedCameras.onRoadworks('g:rw1', { rwRow })
+  local prevBal = balance
+  drive(25, 60 / 3.6, 0.1)
+  T.check(balance == prevBal and #notices == 0, 'roadworks off-switch parity: no caution or fine when disabled')
+
+  settings.set('expDeStreetImmersion', true)
+  speedCameras.resetMotion()
+  drive(15, 32 / 3.6, 0.1)
+  T.check(balance == prevBal and #notices == 1 and notices[1].ch == 'beamngEarthRoadworks',
+    'entering roadwork within +6 tolerance shows caution without fine')
+
+  local preScore = jobScore
+  local hitRw = drive(25, 55 / 3.6, 0.1)
+  T.check(hitRw == true and balance < prevBal and jobScore == preScore - 12,
+    'blasting through roadwork over tolerance applies fine and job score penalty')
+  T.check(#notices == 2 and notices[2].ch == 'beamngEarthRoadworks', 'roadworks fine alert sent')
+
+  speedCameras.dropKey('g:rw1')
+  T.check(speedCameras.activeRoadworkLimit(25, 0) == nil, 'dropKey removes roadwork zone')
+end
+
 -- Cleanup globals
 transportModes = nil
 settings.set('expDeStreetImmersion', false)
