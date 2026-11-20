@@ -865,4 +865,103 @@ do
   jsonWriteFile, jsonReadFile, FS = oldWrite, oldRead, oldFs
 end
 
+-- 15. Loop 3: Zero-GC hot-loop, bay quad cache invalidation, uiState vehicleMatch throttle, idle early-exit
+do
+  tm.reset()
+  -- 15a. Idle M.update() does not even call M.now() when inactive & despawnQueue empty
+  local nowCalls = 0
+  local origNow = tm.now
+  tm.now = function() nowCalls = nowCalls + 1; return fakeNow end
+  local anchorIdle = { geodeticToEnu = function() return 0, 0 end }
+  local plIdle = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }
+  tm.update(0.016, 0.016, anchorIdle, plIdle, false, false)
+  T.check(nowCalls == 0, 'idle M.update() exits before calling M.now()')
+  tm.now = origNow
+
+  -- 15b. Bay quad cache & zero steady-state vec3/ColorF allocations in drawMarker()
+  local origVec3 = vec3
+  local origColorF = rawget(_G, 'ColorF')
+  local origDebugDrawer = rawget(_G, 'debugDrawer')
+  local origBuild = tm.buildBayQuads
+  local vec3Allocs, colorFAllocs, buildCalls, quadsDrawn = 0, 0, 0, 0
+  vec3 = function(x, y, z) vec3Allocs = vec3Allocs + 1; return origVec3(x, y, z) end
+  ColorF = function(r, g, b, a) colorFAllocs = colorFAllocs + 1; return { r = r, g = g, b = b, a = a } end
+  debugDrawer = { drawQuadSolid = function() quadsDrawn = quadsDrawn + 1 end }
+  tm.buildBayQuads = function(...) buildCalls = buildCalls + 1; return origBuild(...) end
+
+  tm.startJob('taxi', 'short')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id, ok = true, mode = 'taxi', tier = 'short', title = 'Perf Test',
+    stops = {
+      { index = 1, kind = 'pickup', name = 'Stop A', lat = 39.286, lon = -76.610, dwellTargetS = 5.0 },
+      { index = 2, kind = 'dropoff', name = 'Stop B', lat = 39.295, lon = -76.605, dwellTargetS = 5.0 },
+    },
+  })
+  local anchorM = { geodeticToEnu = function(_, lat) return 0, (lat == 39.286) and 0 or 800 end }
+  local plM = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0 }
+  tm.update(0.016, 0.016, anchorM, plM, false, false)
+
+  -- First frame builds cache + lazy scratch objects
+  tm.drawMarker(anchorM, plM)
+  T.check(buildCalls == 1 and tm._bayCacheBuilds() == 1 and quadsDrawn > 0, 'first drawMarker builds bay quad cache once')
+
+  -- Steady-state frames (including color transition) must have 0 rebuilds and 0 vec3/ColorF allocations
+  vec3Allocs, colorFAllocs, quadsDrawn = 0, 0, 0
+  for _ = 1, 30 do
+    fakeNow = fakeNow + 0.016
+    tm.update(0.016, 0.016, anchorM, plM, false, false)
+    tm.drawMarker(anchorM, plM)
+  end
+  T.check(buildCalls == 1 and vec3Allocs == 0 and colorFAllocs == 0 and quadsDrawn > 0,
+    'steady-state drawMarker reuses cached quads and scratch vec3/ColorF with 0 allocations')
+
+  -- Terrain gridZ change invalidates cache
+  fakeNow = fakeNow + 1.0
+  fakeRayZ = 11.2
+  tm.update(0.016, 0.016, anchorM, plM, false, false)
+  tm.drawMarker(anchorM, plM)
+  T.check(buildCalls == 2, 'bayGridZ change invalidates and rebuilds bay quad cache')
+
+  -- onRebased() invalidates cache
+  tm.onRebased()
+  tm.drawMarker(anchorM, plM)
+  T.check(buildCalls == 3, 'onRebased invalidates and rebuilds bay quad cache')
+
+  -- Stop change invalidates cache
+  tm.skipStop()
+  local anchorM2 = { geodeticToEnu = function() return 0, 0 end }
+  tm.drawMarker(anchorM2, plM)
+  T.check(buildCalls == 4, 'stop advance invalidates and rebuilds bay quad cache')
+
+  tm.reset()
+  fakeRayZ = 10.0
+  vec3, ColorF, debugDrawer, tm.buildBayQuads = origVec3, origColorF, origDebugDrawer, origBuild
+
+  -- 15c. uiState() throttles inspectGeVehicle() for 0.5 s per pvId
+  local origCv = rawget(_G, 'core_vehicles')
+  local origGpv = rawget(_G, 'getPlayerVehicle')
+  local curVid = 777
+  local detCalls = 0
+  getPlayerVehicle = function() return { getID = function() return curVid end, getJBeamFilename = function() return 'van' end } end
+  core_vehicles = { getCurrentVehicleDetails = function() detCalls = detCalls + 1; return { model = { Type = 'Van' }, configs = { Name = 'Base' } } end }
+  tm.onVehicleSwitched(nil, curVid)
+  tm.uiState()
+  tm.uiState()
+  fakeNow = fakeNow + 0.2
+  tm.uiState()
+  T.check(detCalls == 1, 'uiState caches vehicleMatch within 0.5 s window')
+  fakeNow = fakeNow + 0.4
+  tm.uiState()
+  T.check(detCalls == 2, 'uiState refreshes vehicleMatch after 0.5 s expiry')
+  curVid = 778
+  tm.onVehicleSwitched(777, 778)
+  tm.uiState()
+  T.check(detCalls == 3, 'onVehicleSwitched invalidates vehicleMatch cache immediately')
+  tm._onVehicleProbe(778, { massKg = 2800, coupler = 'towhitch', attached = false })
+  tm.uiState()
+  T.check(detCalls == 4, '_onVehicleProbe invalidates vehicleMatch cache immediately')
+  core_vehicles, getPlayerVehicle = origCv, origGpv
+  tm.reset()
+end
+
 T.done('test_transport_modes')

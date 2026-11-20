@@ -47,31 +47,61 @@ function M.payload(t)
   }
 end
 
+local trKeyBuf = {}
+
 local function transportKey(tr)
   if type(tr) ~= 'table' then return '' end
-  return table.concat({
-    tostring(tr.state or ''), tostring(tr.mode or ''), tostring(tr.tier or ''),
-    tostring(tr.stopIndex or ''), tostring(tr.stopCount or ''), tostring(tr.stopName or ''),
-    tostring(tr.stopLocality or ''), tostring(tr.stopSectorLabel or ''),
-    tostring(tr.stopKind or ''), tostring(tr.stopType or ''),
-    tostring(tr.distM or ''), tostring(tr.etaS or ''),
-    tostring(tr.dwellMode or ''), tostring(tr.dwellTargetS or ''), tostring(tr.dwellLabel or ''),
-    tostring(math.floor((tr.dwellS or 0) * 10 + 0.5)),
-    tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5)), tostring(tr.inBay or ''),
-    tostring(tr.score or ''), tostring(tr.fare or ''), tostring(tr.passengerOnBoard or ''),
-    tostring(tr.rideArchetype or ''), tostring(tr.paxCount or ''), tostring(tr.paxCapacity or ''),
-    tostring(tr.scheduleText or ''), tostring(tr.nextStopName or ''),
-    tostring(tr.nextStopLocality or ''), tostring(tr.nextStopSectorLabel or ''),
-    tostring(tr.cargoKg or ''), tostring(tr.cargoCurrentKg or ''), tostring(tr.cargoLabel or ''),
-    tostring(tr.legKind or ''), tostring(tr.legLabel or ''), tostring(tr.trailerLabel or ''), tostring(tr.trailerState or ''),
-    tostring(tr.trailerMissing or ''), tostring(tr.bayHint or ''),
-    tostring(tr.recipient or ''), tostring(tr.parcelCount or ''), tostring(tr.parcelAction or ''),
-    tostring(tr.parcelsRemaining or ''), tostring(tr.parcelsTotal or ''), tostring(tr.parcelsReturned or ''),
-    tostring(tr.cargoPropsCount or ''),
-    tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
-    tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
-    tostring(tr.totalEarned or ''), tostring(tr.driverRank or ''),
-  }, '\2')
+  trKeyBuf[1] = tostring(tr.state or '')
+  trKeyBuf[2] = tostring(tr.mode or '')
+  trKeyBuf[3] = tostring(tr.tier or '')
+  trKeyBuf[4] = tostring(tr.stopIndex or '')
+  trKeyBuf[5] = tostring(tr.stopCount or '')
+  trKeyBuf[6] = tostring(tr.stopName or '')
+  trKeyBuf[7] = tostring(tr.stopLocality or '')
+  trKeyBuf[8] = tostring(tr.stopSectorLabel or '')
+  trKeyBuf[9] = tostring(tr.stopKind or '')
+  trKeyBuf[10] = tostring(tr.stopType or '')
+  trKeyBuf[11] = tostring(tr.distM or '')
+  trKeyBuf[12] = tostring(tr.etaS or '')
+  trKeyBuf[13] = tostring(tr.dwellMode or '')
+  trKeyBuf[14] = tostring(tr.dwellTargetS or '')
+  trKeyBuf[15] = tostring(tr.dwellLabel or '')
+  trKeyBuf[16] = tostring(math.floor((tr.dwellS or 0) * 10 + 0.5))
+  trKeyBuf[17] = tostring(math.floor((tr.dwellFrac or 0) * 20 + 0.5))
+  trKeyBuf[18] = tostring(tr.inBay or '')
+  trKeyBuf[19] = tostring(tr.score or '')
+  trKeyBuf[20] = tostring(tr.fare or '')
+  trKeyBuf[21] = tostring(tr.passengerOnBoard or '')
+  trKeyBuf[22] = tostring(tr.rideArchetype or '')
+  trKeyBuf[23] = tostring(tr.paxCount or '')
+  trKeyBuf[24] = tostring(tr.paxCapacity or '')
+  trKeyBuf[25] = tostring(tr.scheduleText or '')
+  trKeyBuf[26] = tostring(tr.nextStopName or '')
+  trKeyBuf[27] = tostring(tr.nextStopLocality or '')
+  trKeyBuf[28] = tostring(tr.nextStopSectorLabel or '')
+  trKeyBuf[29] = tostring(tr.cargoKg or '')
+  trKeyBuf[30] = tostring(tr.cargoCurrentKg or '')
+  trKeyBuf[31] = tostring(tr.cargoLabel or '')
+  trKeyBuf[32] = tostring(tr.legKind or '')
+  trKeyBuf[33] = tostring(tr.legLabel or '')
+  trKeyBuf[34] = tostring(tr.trailerLabel or '')
+  trKeyBuf[35] = tostring(tr.trailerState or '')
+  trKeyBuf[36] = tostring(tr.trailerMissing or '')
+  trKeyBuf[37] = tostring(tr.bayHint or '')
+  trKeyBuf[38] = tostring(tr.recipient or '')
+  trKeyBuf[39] = tostring(tr.parcelCount or '')
+  trKeyBuf[40] = tostring(tr.parcelAction or '')
+  trKeyBuf[41] = tostring(tr.parcelsRemaining or '')
+  trKeyBuf[42] = tostring(tr.parcelsTotal or '')
+  trKeyBuf[43] = tostring(tr.parcelsReturned or '')
+  trKeyBuf[44] = tostring(tr.cargoPropsCount or '')
+  trKeyBuf[45] = tostring(tr.stopsCompleted or '')
+  trKeyBuf[46] = tostring(tr.drivenM or '')
+  trKeyBuf[47] = tostring(tr.elapsedS or '')
+  trKeyBuf[48] = tostring(tr.metric or '')
+  trKeyBuf[49] = tostring(tr.totalEarned or '')
+  trKeyBuf[50] = tostring(tr.driverRank or '')
+  return table.concat(trKeyBuf, '\2', 1, 50)
 end
 
 local function key(p)

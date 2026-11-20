@@ -736,5 +736,58 @@ class Phase6ParcelCourierTest(unittest.TestCase):
         self.assertTrue(saw_return, "expected at least one pickup_return stop across seeds")
 
 
+class CachingAndPerformanceTest(unittest.TestCase):
+    def test_cell_layer_request_cache_deduplicates_decodes(self):
+        md = _seed_corridor_md()
+        calls = {}
+        orig_cell = md.cell
+
+        def counting_cell(key, layers=("roads",), kind="demand"):
+            for ly in layers:
+                calls[(key, ly)] = calls.get((key, ly), 0) + 1
+            return orig_cell(key, layers=layers, kind=kind)
+
+        md.cell = counting_cell
+        for mode, tier in (("logistics", "city"), ("parcel", "city")):
+            calls.clear()
+            res = tm.generate_job(md, mode=mode, tier=tier, lat=39.285, lon=-76.610, heading=20.0, seed=42)
+            self.assertTrue(res["ok"], f"{mode}/{tier} failed: {res}")
+            dups = {k: v for k, v in calls.items() if v > 1}
+            self.assertEqual(dups, {}, f"{mode}/{tier} decoded cells multiple times: {dups}")
+
+    def test_classifier_lru_caches_and_parity(self):
+        tm._classify_poi_cargo_domain_cached.cache_clear()
+        tm._derive_sector_label_cached.cache_clear()
+        d1 = tm.classify_poi_cargo_domain(cat="supermarket", tags={"shop": "supermarket", "extra": "ignored"}, name="REWE")
+        d2 = tm.classify_poi_cargo_domain(cat="supermarket", tags={"shop": "supermarket", "extra": "other"}, name="REWE")
+        self.assertEqual(d1, "food")
+        self.assertEqual(d2, "food")
+        self.assertGreaterEqual(tm._classify_poi_cargo_domain_cached.cache_info().hits, 1)
+
+        s1 = tm.derive_sector_label(cat="pharmacy", tags={"amenity": "pharmacy"}, name="Apotheke")
+        s2 = tm.derive_sector_label(cat="pharmacy", tags={"amenity": "pharmacy"}, name="Apotheke")
+        self.assertEqual(s1, "Pharmacy")
+        self.assertEqual(s2, "Pharmacy")
+        self.assertGreaterEqual(tm._derive_sector_label_cached.cache_info().hits, 1)
+
+    def test_determinism_and_latency_across_all_modes(self):
+        import time
+        md = _seed_corridor_md()
+        cases = (
+            ("taxi", "city"),
+            ("bus", "partial"),
+            ("logistics", "city"),
+            ("parcel", "city"),
+        )
+        for mode, tier in cases:
+            t0 = time.monotonic()
+            r1 = tm.generate_job(md, mode=mode, tier=tier, lat=39.285, lon=-76.610, heading=20.0, seed=17)
+            r2 = tm.generate_job(md, mode=mode, tier=tier, lat=39.285, lon=-76.610, heading=20.0, seed=17)
+            dt = time.monotonic() - t0
+            self.assertTrue(r1["ok"], f"{mode}/{tier} failed: {r1}")
+            self.assertEqual(r1["stops"], r2["stops"], f"{mode}/{tier} not deterministic")
+            self.assertLess(dt, 0.5, f"{mode}/{tier} took too long: {dt:.3f}s")
+
+
 if __name__ == "__main__":
     unittest.main()
