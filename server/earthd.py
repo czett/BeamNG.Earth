@@ -114,6 +114,7 @@ import placepreview as placepreviewmod  # noqa: E402
 import placenames as placenamesmod  # noqa: E402
 import maplabels as maplabelsmod  # noqa: E402
 import places as placesmod  # noqa: E402
+import location_radio as locationradiomod  # noqa: E402
 import transport_modes as transportmod  # noqa: E402
 import runtimeprofiler
 import streamleases
@@ -8667,6 +8668,46 @@ class Connection:
                    "error": f"{type(e).__name__}: {e}"[:160]}
         self.send({"type": "transport_job_result", "id": rid, **res})
 
+    async def radio_stations_request(self, msg):
+        """Location-aware radio station lookup {"id", "lat", "lon", "place"?, "region"?, "country"?, "online"?} ->
+        radio_stations_result {"id", "ok", "regionCode", "regionLabel", "country", "place", "source", "stations",
+        "error"?} (location_radio.py)."""
+        rid = msg.get("id")
+        req, why = locationradiomod.validate_request(msg)
+        if req is None:
+            self.send({"type": "radio_stations_result", "id": rid, "ok": False,
+                       "regionCode": "GLOBAL", "regionLabel": "Global Radio", "stations": [], "error": why})
+            return
+        lat, lon = req["lat"], req["lon"]
+        place, region, country = req["place"], req["region"], req["country"]
+        loop = asyncio.get_running_loop()
+        if not (place and region and country):
+            try:
+                pn = self.s.place_names()
+                if pn is not None and await loop.run_in_executor(self.s.place_pool, pn.ready, lat, lon):
+                    info = await loop.run_in_executor(self.s.place_pool, pn.lookup, lat, lon)
+                    if isinstance(info, dict):
+                        place = place or str(info.get("place") or "")
+                        region = region or str(info.get("region") or "")
+                        country = country or str(info.get("country") or "")
+            except Exception as e:
+                log.debug("radio: place_names lookup: %s: %s", type(e).__name__, e)
+        pool = getattr(self.s, "ui_pool", None)
+        offline = bool(getattr(self.s, "offline", False))
+        try:
+            res = await loop.run_in_executor(
+                pool,
+                lambda: locationradiomod.resolve_stations(
+                    lat, lon, place=place, region=region, country=country,
+                    online=req["online"], offline=offline,
+                ),
+            )
+        except Exception as e:
+            log.warning("radio_stations_request: %s: %s", type(e).__name__, e)
+            res = {"ok": False, "regionCode": "GLOBAL", "regionLabel": "Global Radio",
+                   "stations": [], "error": f"{type(e).__name__}: {e}"[:160]}
+        self.send({"type": "radio_stations_result", "id": rid, **res})
+
     async def _where_place_later(self, out, lat, lon, seq):
         """where()'s place parts for a region not on disk yet: fetched as a background job (netfetch "background":
         never ahead of the world's own downloads), asked again every WHERE_PLACE_RETRY_S while Overture's hosts are
@@ -9329,6 +9370,8 @@ class Connection:
             self.spawn(self.places(msg))
         elif kind == "transport_job":           # Transport Modes (Taxi / Bus / Logistics) job generation
             self.spawn(self.transport_job(msg))
+        elif kind == "radio_stations_request":  # Location-aware live & local radio (location_radio.py)
+            self.spawn(self.radio_stations_request(msg))
         elif kind == "map_focus":               # the 3D map flying: where the view will end (map3d.flyHint)
             self.on_map_focus(msg)
         elif kind == "random_place":            # the level select's "Random location" (randomplace.py)

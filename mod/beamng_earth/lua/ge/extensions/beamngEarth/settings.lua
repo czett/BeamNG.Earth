@@ -1049,6 +1049,10 @@ function M.uiMapState()
       local tm = ext('beamngEarth_transportModes')
       return tm and tm.uiState and tm.uiState() or nil
     end)(),
+    radio = (function()
+      local lr = ext('beamngEarth_locationRadio')
+      return lr and lr.uiState and lr.uiState() or nil
+    end)(),
   }
 end
 
@@ -1137,6 +1141,52 @@ function M.uiTransportResetCareer()
   local tm = ext('beamngEarth_transportModes')
   if not tm or not tm.resetCareerStats then return { ok = false, error = 'Transport Modes not loaded' } end
   return tm.resetCareerStats()
+end
+
+-- Location-Aware Live & Local Radio (locationRadio.lua)
+function M.uiRadioState()
+  local lr = ext('beamngEarth_locationRadio')
+  return lr and lr.uiState and lr.uiState() or { error = 'Location Radio not loaded' }
+end
+function M.uiRadioTogglePlay()
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.togglePlay then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = true, playing = lr.togglePlay(), state = lr.uiState() }
+end
+function M.uiRadioNext()
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.nextStation then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = lr.nextStation(), state = lr.uiState() }
+end
+function M.uiRadioPrev()
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.prevStation then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = lr.prevStation(), state = lr.uiState() }
+end
+function M.uiRadioSelect(id)
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.selectStation then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = lr.selectStation(id), state = lr.uiState() }
+end
+function M.uiRadioSetVolume(v)
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.setVolume then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = true, volume = lr.setVolume(v), state = lr.uiState() }
+end
+function M.uiRadioSetAutoRoam(flag)
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.setAutoRoam then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = true, autoRoam = lr.setAutoRoam(flag), state = lr.uiState() }
+end
+function M.uiRadioSetEnabled(flag)
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.setEnabled then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = true, enabled = lr.setEnabled(flag), state = lr.uiState() }
+end
+function M.uiRadioRefresh()
+  local lr = ext('beamngEarth_locationRadio')
+  if not lr or not lr.refresh then return { ok = false, error = 'Location Radio not loaded' } end
+  return { ok = lr.refresh(), state = lr.uiState() }
 end
 
 -- The map's search-as-you-type: send (q -> { id } or { error }) and poll (id -> nil while waiting, else

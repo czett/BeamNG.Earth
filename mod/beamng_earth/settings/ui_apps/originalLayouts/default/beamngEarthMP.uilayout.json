@@ -168,6 +168,17 @@
         "width": "320px",
         "height": "170px"
       }
+    },
+    {
+      "appName": "beamngEarthRadio",
+      "appVersion": 1,
+      "placement": {
+        "top": "292px",
+        "right": "16px",
+        "position": "absolute",
+        "width": "320px",
+        "height": "168px"
+      }
     }
   ]
 }

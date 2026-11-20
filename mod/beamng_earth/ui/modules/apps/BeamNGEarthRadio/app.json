@@ -1,0 +1,21 @@
+{
+  "domElement": "<beamng-earth-radio></beamng-earth-radio>",
+  "name": "BeamNG.Earth: Car Radio",
+  "types": [
+    "ui.apps.categories.gameplay"
+  ],
+  "description": "Location-aware live car radio: FM frequency, local and regional stations, auto-roam handoff, preset pills, and live audio streaming.",
+  "css": {
+    "bottom": "76px",
+    "left": "16px",
+    "width": "320px",
+    "height": "168px"
+  },
+  "author": "BeamNG.Earth",
+  "version": "1.0",
+  "directive": "beamngEarthRadio",
+  "appName": "beamngEarthRadio",
+  "category": "BeamNG.Earth",
+  "isAuxiliary": false,
+  "interactive": "yes"
+}

@@ -218,7 +218,7 @@
       <!-- the other players of a BeamMP session, nearest first: follow one on the map, or a GPS route to them -->
       <div v-if="state.others" class="layers-wrap">
         <button class="map-btn" :class="{ on: playersPanel || typeof follow === 'string' }"
-                @click="playersPanel = !playersPanel; layersPanel = false; jobsPanel = false"
+                @click="playersPanel = !playersPanel; layersPanel = false; jobsPanel = false; radioPanel = false"
                 :title="followedPlayer ? 'Following ' + followedPlayer.name + ' (drag the map to stop)' : 'The other players'">
           <span v-if="followedPlayer" class="following">Following {{ followedPlayer.name }}</span>
           <template v-else>Players ({{ otherList.length }})</template>
@@ -246,7 +246,7 @@
       </div>
       <div class="layers-wrap">
         <button class="map-btn" :class="{ on: jobsPanel || !!activeTransport }"
-                @click="jobsPanel = !jobsPanel; layersPanel = false; playersPanel = false"
+                @click="jobsPanel = !jobsPanel; radioPanel = false; layersPanel = false; playersPanel = false"
                 title="Transport jobs: Taxi, Bus, Logistics">
           Jobs<template v-if="activeTransport"> ({{ activeTransport.stopIndex }}/{{ activeTransport.stopCount }})</template>
         </button>
@@ -256,7 +256,18 @@
         </div>
       </div>
       <div class="layers-wrap">
-        <button class="map-btn" :class="{ on: layersPanel }" @click="layersPanel = !layersPanel; playersPanel = false; jobsPanel = false" title="Base map and overlays">Layers</button>
+        <button class="map-btn" :class="{ on: radioPanel || radioPlaying }"
+                @click="radioPanel = !radioPanel; jobsPanel = false; layersPanel = false; playersPanel = false"
+                title="Location-aware live & local car radio">
+          Radio<template v-if="radioPlaying"> ♪</template>
+        </button>
+        <div v-if="radioPanel" class="layers-panel jobs-panel" :style="{ maxHeight: `calc(${h}px - 74px - 6.5vh)` }"
+             @mousedown.stop @wheel.stop @dblclick.stop>
+          <EarthRadio compact external-poll />
+        </div>
+      </div>
+      <div class="layers-wrap">
+        <button class="map-btn" :class="{ on: layersPanel }" @click="layersPanel = !layersPanel; playersPanel = false; jobsPanel = false; radioPanel = false" title="Base map and overlays">Layers</button>
         <div v-if="layersPanel" class="layers-panel" @mousedown.stop @wheel.stop @dblclick.stop>
           <div class="panel-sub">Base map</div>
           <label class="layer-opt"><input type="radio" value="sat" v-model="baseLayer" /> Satellite</label>
@@ -515,6 +526,8 @@ import layerData from "./maplayers.js"
 import { BngSelect } from "@/common/components/base"
 import EarthTransport from "./EarthTransport.vue"
 import { applyTransportState } from "./earthTransportStore.js"
+import EarthRadio from "./EarthRadio.vue"
+import { applyRadioState } from "./earthRadioStore.js"
 
 const props = defineProps({ embedded: { type: Boolean, default: false } })
 const embedded = props.embedded
@@ -549,6 +562,7 @@ function poll() {
     if (!s) { state.value = { places: [], recent: [], missing: true }; return }
     state.value = { ...s, places: toArray(s.places), recent: toArray(s.recent) }
     applyTransportState(s.transport)
+    applyRadioState(s.radio)
     if (!s.others && playersPanel.value) closePlayers()   // (out of the session: not open again by itself in the next)
     if (followingPlayer()) {
       const o = followedPlayer.value
@@ -1898,6 +1912,8 @@ const gpsScreen = computed(() => {
   const g = state.value.gps
   return g ? screen(g.lat, g.lon) : null
 })
+const radioPanel = ref(false)
+const radioPlaying = computed(() => !!(state.value.radio && state.value.radio.playing))
 const activeTransport = computed(() => (state.value.transport && state.value.transport.active) || null)
 const transportStops = computed(() => activeTransport.value ? toArray(activeTransport.value.stops) : [])
 const transportMarkers = computed(() => {

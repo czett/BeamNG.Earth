@@ -28,3 +28,5 @@ setExtensionUnloadMode('beamngEarth_api', 'manual')
 setExtensionUnloadMode('beamngEarth_finder', 'manual')
 -- Transport Modes (transportModes.lua: Taxi, Bus, Logistics jobs).
 setExtensionUnloadMode('beamngEarth_transportModes', 'manual')
+-- Location-Aware Live & Local Radio (locationRadio.lua).
+setExtensionUnloadMode('beamngEarth_locationRadio', 'manual')
