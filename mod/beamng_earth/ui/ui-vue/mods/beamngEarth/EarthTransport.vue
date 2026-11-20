@@ -46,6 +46,15 @@
               {{ logisticsBadge(active) }}
             </span>
           </div>
+          <div v-else-if="active.mode === 'parcel'" class="tm-subline">
+            <span class="tm-num">
+              <b>{{ active.parcelsRemaining ?? 0 }}/{{ active.parcelsTotal ?? 0 }}</b> parcels left · {{ formatCargo(active.cargoCurrentKg || 0) }}
+              <span v-if="active.parcelsReturned > 0"> (+{{ active.parcelsReturned }} ret)</span>
+            </span>
+            <span class="tm-pill" :class="{ on: active.parcelAction !== 'pickup_return', warn: active.parcelAction === 'pickup_return' }">
+              {{ active.parcelAction === 'pickup_return' ? ('Return +' + (active.parcelCount || 1)) : ('Deliver ' + (active.parcelCount || 1) + 'x') }}
+            </span>
+          </div>
           <div v-if="active.mode === 'bus' && active.nextStopName" class="tm-stop-addr">
             Next Stop after this: {{ active.nextStopName }}
           </div>
@@ -96,8 +105,8 @@
             @click="$emit('focus-stop', s)"
           >
             <span class="tm-stop-num tm-num">{{ idx + 1 < active.stopIndex ? '✓' : idx + 1 }}</span>
-            <span class="tm-stop-label">{{ s.name }}<span v-if="s.locality" class="tm-stop-loc"> · {{ s.locality }}</span></span>
-            <span class="tm-stop-kind">{{ s.stopType === 'loading_bay' ? 'Bay' : stopKindLabel(s.kind) }}</span>
+            <span class="tm-stop-label">{{ s.name }}<span v-if="s.recipient" class="tm-stop-loc"> · {{ s.recipient }}</span><span v-else-if="s.locality" class="tm-stop-loc"> · {{ s.locality }}</span></span>
+            <span class="tm-stop-kind">{{ active.mode === 'parcel' ? (s.parcelAction === 'pickup_return' ? ('↩ ' + (s.parcelCount || 1) + 'x') : ((s.parcelCount || 1) + 'x')) : (s.stopType === 'loading_bay' ? 'Bay' : stopKindLabel(s.kind)) }}</span>
           </div>
         </div>
       </div>
@@ -135,6 +144,7 @@
           <div><span>Collisions</span><b class="tm-num">{{ summary.collisions }}</b></div>
           <div v-if="summary.mode === 'taxi' && summary.totalFare > 0"><span>Fare + Tip</span><b class="tm-num">${{ Number(summary.totalFare).toFixed(2) }}</b></div>
           <div v-else-if="summary.mode === 'logistics' && summary.cargoKg"><span>Cargo</span><b class="tm-num">{{ formatCargo(summary.cargoKg) }}</b></div>
+          <div v-else-if="summary.mode === 'parcel'"><span>Parcels</span><b class="tm-num">{{ summary.parcelsDelivered ?? 0 }}/{{ summary.parcelsTotal ?? 0 }}<span v-if="summary.parcelsReturned > 0"> (+{{ summary.parcelsReturned }} ret)</span></b></div>
           <div class="is-score"><span>Score</span><b class="tm-num">{{ summary.score }}/100</b></div>
         </div>
         <div class="tm-actions">
@@ -275,9 +285,10 @@ const errText = computed(() => actionError.value || st.value.error || "")
 }
 .tm-seg {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 5px;
 }
-.tm-seg .tm-btn { flex: 1; }
+.tm-seg .tm-btn { flex: 1 1 70px; padding: 6px 6px; }
 .tm-tiers {
   display: flex;
   flex-direction: column;
@@ -330,6 +341,7 @@ const errText = computed(() => actionError.value || st.value.error || "")
 .tm-card.mode-border-taxi { border-left: 3px solid #ffd45a; }
 .tm-card.mode-border-bus { border-left: 3px solid #59bcff; }
 .tm-card.mode-border-logistics { border-left: 3px solid #ff9d5c; }
+.tm-card.mode-border-parcel { border-left: 3px solid #4ee6b0; }
 
 .tm-head {
   display: flex;
@@ -356,6 +368,7 @@ const errText = computed(() => actionError.value || st.value.error || "")
 .tm-badge.mode-taxi { background: rgba(255, 198, 30, 0.18); border-color: rgba(255, 198, 30, 0.42); color: #ffd45a; }
 .tm-badge.mode-bus { background: rgba(54, 163, 255, 0.18); border-color: rgba(54, 163, 255, 0.42); color: #8ad0ff; }
 .tm-badge.mode-logistics { background: rgba(242, 122, 46, 0.18); border-color: rgba(242, 122, 46, 0.42); color: #ffac75; }
+.tm-badge.mode-parcel { background: rgba(56, 217, 169, 0.18); border-color: rgba(56, 217, 169, 0.42); color: #4ee6b0; }
 
 .tm-type-pill {
   padding: 2px 7px;
