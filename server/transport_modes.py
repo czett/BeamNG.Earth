@@ -49,7 +49,7 @@ _ROAD_HALF_W = {
 SITE_SEARCH_M = 60.0
 BLD_CLEAR_M = 2.5
 
-MODES = ("taxi", "bus", "logistics")
+MODES = ("taxi", "bus", "logistics", "parcel")
 TIERS = {
     "taxi": {
         "short": {"min_km": 1.0, "max_km": 3.5, "label": "Short Ride (1-3.5 km)"},
@@ -67,7 +67,30 @@ TIERS = {
         "regional": {"target_km": 50.0, "min_stops": 2, "max_stops": 4, "label": "Regional Haul (50 km, 2-4 stops)"},
         "long": {"target_km": 115.0, "min_stops": 2, "max_stops": 2, "label": "Long Haul (100 km+)"},
     },
+    "parcel": {
+        "local": {"target_km": 3.0, "min_stops": 5, "max_stops": 7, "label": "Local Round (3 km, 5-7 stops)"},
+        "city": {"target_km": 8.0, "min_stops": 8, "max_stops": 12, "label": "City Round (8 km, 8-12 stops)"},
+        "regional": {"target_km": 25.0, "min_stops": 6, "max_stops": 10, "label": "Regional Round (25 km, 6-10 stops)"},
+        "long": {"target_km": 60.0, "min_stops": 5, "max_stops": 8, "label": "Long Route (60 km, 5-8 stops)"},
+    },
 }
+
+RESIDENTIAL_BUILDING_CLASSES = frozenset({
+    "house", "detached", "semidetached_house", "terrace", "apartments",
+    "residential", "bungalow", "cabin", "farm", "duplex",
+})
+PARCEL_ROAD_CLASSES = frozenset({
+    "residential", "living_street", "unclassified", "tertiary", "secondary", "unknown",
+})
+PARCEL_HOUSEHOLD_RECIPIENTS = (
+    "Fam. Weber", "M. Gruber", "K. Hoffmann", "S. Bauer", "Fam. Wagner",
+    "T. Richter", "A. Klein", "Fam. Schröder", "L. Neumann", "H. Schwarz",
+    "Fam. Zimmermann", "J. Braun", "E. Hartmann", "Fam. Krüger", "N. Werner", "C. Schäfer",
+)
+PARCEL_BUSINESS_RECIPIENTS = (
+    "Praxis Dr. König", "Kanzlei Huber", "Büro Schneider", "Atelier Maier",
+    "Steuerbüro Wolf", "Studio Berger", "Praxis Dr. Becker", "Architekturbüro Koch",
+)
 
 VEHICLE_CLASSES = ("car", "van", "box_truck", "semi")
 CARGO_BANDS = {
@@ -360,6 +383,8 @@ def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats
         if is_hub:
             return round(4.5 + 0.5 * _stable_index(seed, f"bdw:{idx}", 2), 1)
         return round(3.0 + 0.2 * _stable_index(seed, f"bdw:{idx}", 5), 1)
+    if mode == "parcel":
+        return 2.5
     # Logistics: trailer hookup/unhook and deadhead check-ins take ~2.5 s; solo cargo scales 3.5-8.0 s
     if lk in ("loaded_trailer", "deadhead") or kind == "deadhead":
         return 2.5
@@ -2388,6 +2413,381 @@ def _apply_logistics_cargo_and_dwell(res, req):
     return res
 
 
+# --------------------------------------------------------------------------- Parcel Courier mode
+
+def _extract_addr_fields(attrs, i, tags):
+    """Extract optional real (housenumber, street, locality) from feature attrs or OSM tags."""
+    hn = ""
+    st = ""
+    loc = ""
+    if attrs:
+        for k in ("housenumber", "number", "addr_housenumber", "addr:housenumber"):
+            col = attrs.get(k)
+            if col is not None and i < len(col):
+                v = _clean(col[i])
+                if v:
+                    hn = v
+                    break
+        for k in ("street", "addr_street", "addr:street"):
+            col = attrs.get(k)
+            if col is not None and i < len(col):
+                v = _clean(col[i])
+                if v:
+                    st = v
+                    break
+        for k in ("locality", "city", "addr_city", "addr:city"):
+            col = attrs.get(k)
+            if col is not None and i < len(col):
+                v = _clean(col[i])
+                if v:
+                    loc = v
+                    break
+    if isinstance(tags, dict):
+        if not hn:
+            hn = _clean(tags.get("addr:housenumber") or tags.get("housenumber") or "")
+        if not st:
+            st = _clean(tags.get("addr:street") or tags.get("street") or "")
+        if not loc:
+            loc = _clean(tags.get("addr:city") or tags.get("addr:suburb") or tags.get("locality") or "")
+    return hn, st, loc
+
+
+def _derive_housenumber(street, bld_lat, bld_lon, snap_lat, snap_lon, bearing, seed, key, explicit_hn=""):
+    """Return real housenumber if present, else derive a deterministic street-side house number (e.g. '14' or '27a')."""
+    if explicit_hn:
+        return explicit_hn
+    # Determine side of street: even on right (+90 deg), odd on left (-90 deg)
+    is_even = True
+    if bld_lat is not None and bld_lon is not None and dist_m(snap_lat, snap_lon, bld_lat, bld_lon) >= 1.5:
+        to_bld = bearing_deg(snap_lat, snap_lon, bld_lat, bld_lon)
+        right_brg = (float(bearing or 0.0) + 90.0) % 360.0
+        is_even = _heading_diff(right_brg, to_bld) <= 90.0
+    else:
+        is_even = (_stable_index(seed, f"hn_side:{street}:{key}", 2) == 0)
+    base = 1 + _stable_index(seed, f"hn_num:{street}:{key}", 34)
+    num = base * 2 if is_even else (base * 2 - 1)
+    suf_roll = _stable_index(seed, f"hn_suf:{street}:{key}", 100)
+    suf = "a" if suf_roll < 12 else ("b" if suf_roll < 18 else "")
+    return f"{num}{suf}"
+
+
+def _pick_parcel_recipient(is_business, poi_name, seed, key):
+    """Deterministically pick a German household or business recipient name."""
+    if is_business:
+        nm = _clean(poi_name)
+        if nm and len(nm) <= 32:
+            return nm
+        return PARCEL_BUSINESS_RECIPIENTS[_stable_index(seed, f"pbiz:{key}", len(PARCEL_BUSINESS_RECIPIENTS))]
+    return PARCEL_HOUSEHOLD_RECIPIENTS[_stable_index(seed, f"phhs:{key}", len(PARCEL_HOUSEHOLD_RECIPIENTS))]
+
+
+def _collect_parcel_candidates(md, keys, deadline):
+    """Gather residential address points, residential buildings, and small local businesses in keys."""
+    out = []
+    seen = set()
+    for key in keys:
+        if time.monotonic() > deadline:
+            break
+        # 1. Explicit addresses layer (if present in MapData / tests)
+        if md is not None and md.has(key, "addresses"):
+            f = _cell_layer(md, key, "addresses", deadline)
+            if f is not None and len(f.ids):
+                attrs = getattr(f, "attrs", {}) or {}
+                for i in range(len(f.ids)):
+                    aid = ("a", str(f.ids[i]))
+                    if aid in seen:
+                        continue
+                    pt = _feature_center(f, i)
+                    if not pt:
+                        continue
+                    tags = _tags_dict(attrs, i)
+                    hn, st, loc = _extract_addr_fields(attrs, i, tags)
+                    seen.add(aid)
+                    out.append({
+                        "prio": 3 if (hn and st) else 2,
+                        "lat": pt[0], "lon": pt[1],
+                        "housenumber": hn, "street": st, "locality": loc,
+                        "poiName": "", "isBusiness": False,
+                        "fid": str(f.ids[i]),
+                    })
+
+        # 2. Buildings layer (residential + small commercial/office)
+        f = _cell_layer(md, key, "buildings", deadline)
+        if f is not None and len(f.ids):
+            attrs = getattr(f, "attrs", {}) or {}
+            n = len(f.ids)
+            names = _col(attrs, "name", n)
+            classes = _col(attrs, "class", n)
+            subtypes = _col(attrs, "subtype", n)
+            for i in range(n):
+                bid = ("b", str(f.ids[i]))
+                if bid in seen:
+                    continue
+                cls = str(classes[i] or "").strip().lower()
+                sub = str(subtypes[i] or "").strip().lower()
+                if cls in LOGISTICS_HUB_CLASSES:
+                    continue
+                tags = _tags_dict(attrs, i)
+                hn, st, loc = _extract_addr_fields(attrs, i, tags)
+                is_res = (sub == "residential") or (cls in RESIDENTIAL_BUILDING_CLASSES) or (cls == "" and sub == "")
+                is_biz = cls in LOGISTICS_COMMERCIAL_CLASSES
+                if not (is_res or is_biz or hn):
+                    continue
+                pt = _feature_center(f, i)
+                if not pt:
+                    continue
+                seen.add(bid)
+                prio = 3 if hn else (2 if is_res else 1)
+                out.append({
+                    "prio": prio,
+                    "lat": pt[0], "lon": pt[1],
+                    "housenumber": hn, "street": st, "locality": loc,
+                    "poiName": _clean(names[i]),
+                    "isBusiness": bool(is_biz and not is_res),
+                    "fid": str(f.ids[i]),
+                })
+
+        # 3. Places layer (small clinics/offices/shops as occasional business recipients)
+        f = _cell_layer(md, key, "places", deadline)
+        if f is not None and len(f.ids):
+            attrs = getattr(f, "attrs", {}) or {}
+            n = len(f.ids)
+            names = _col(attrs, "name", n)
+            cats = _col(attrs, "basic_category", n)
+            status = _col(attrs, "operating_status", n)
+            for i in range(n):
+                pid = ("p", str(f.ids[i]))
+                if pid in seen:
+                    continue
+                st_op = str(status[i] or "").lower()
+                if st_op in ("permanently_closed", "temporarily_closed", "closed"):
+                    continue
+                nm = _clean(names[i])
+                if not nm:
+                    continue
+                pt = _feature_center(f, i)
+                if not pt:
+                    continue
+                tags = _tags_dict(attrs, i)
+                hn, st, loc = _extract_addr_fields(attrs, i, tags)
+                seen.add(pid)
+                out.append({
+                    "prio": 2 if hn else 0,
+                    "lat": pt[0], "lon": pt[1],
+                    "housenumber": hn, "street": st, "locality": loc,
+                    "poiName": nm,
+                    "isBusiness": True,
+                    "cat": str(cats[i] or "").strip().lower(),
+                    "fid": str(f.ids[i]),
+                })
+    return out
+
+
+def _generate_parcel(md, req, deadline):
+    """Generate a Parcel Courier route with real house addresses, recipients, deliveries and return pickups."""
+    lat, lon, heading, seed, tier = req["lat"], req["lon"], req["heading"], req["seed"], req["tier"]
+    spec = TIERS["parcel"][tier]
+    target_km = spec["target_km"]
+    min_stops, max_stops = spec["min_stops"], spec["max_stops"]
+    want = min_stops + _stable_index(seed, f"parcel_n:{tier}", max_stops - min_stops + 1)
+    base_brg = heading if heading is not None else float(_stable_index(seed, f"parcel_brg:{tier}", 360))
+
+    # Build targeted cell pockets
+    keys = list(_cells_around(lat, lon, 1400.0, max_cells=4))
+    town_hints = {}
+    if tier in ("regional", "long"):
+        min_t_km = target_km * 0.45
+        max_t_km = target_km * 1.15
+        towns = _towns_in_band(lat, lon, min_t_km, max_t_km, heading, seed, f"parcel_towns:{tier}")
+        for _, tlat, tlon, tname in towns[:2]:
+            for k in _cells_around(tlat, tlon, 1100.0, max_cells=3):
+                if k not in keys:
+                    keys.append(k)
+                    town_hints[k] = tname
+        if len(keys) <= 4:
+            for frac, rot in ((0.45, -15.0), (0.85, 10.0)):
+                alat, alon = offset_latlon(lat, lon, target_km * 1000.0 * frac, (base_brg + rot) % 360.0)
+                for k in _cells_around(alat, alon, 1100.0, max_cells=3):
+                    if k not in keys:
+                        keys.append(k)
+    elif tier == "city":
+        for frac, rot in ((0.35, -20.0), (0.70, 15.0)):
+            alat, alon = offset_latlon(lat, lon, target_km * 1000.0 * frac, (base_brg + rot) % 360.0)
+            for k in _cells_around(alat, alon, 1100.0, max_cells=3):
+                if k not in keys:
+                    keys.append(k)
+    else:
+        alat, alon = offset_latlon(lat, lon, target_km * 1000.0 * 0.55, base_brg)
+        for k in _cells_around(alat, alon, 1100.0, max_cells=3):
+            if k not in keys:
+                keys.append(k)
+    keys = keys[:12]
+
+    road_cache = {k: _cell_layer(md, k, "roads", deadline) for k in keys}
+    bld_cache = {k: _cell_layer(md, k, "buildings", deadline) for k in keys}
+    candidates = _collect_parcel_candidates(md, keys, deadline)
+
+    # Filter & rank candidates within tier reach
+    max_r_m = max(2500.0, target_km * 1350.0)
+    min_r_m = 80.0
+    pool = []
+    for c in candidates:
+        d = dist_m(lat, lon, c["lat"], c["lon"])
+        if min_r_m <= d <= max_r_m:
+            pool.append(c)
+    pool.sort(key=lambda c: (-c["prio"], dist_m(lat, lon, c["lat"], c["lon"]), c["fid"]))
+    pool = pool[:96]
+
+    min_gap = 65.0 if tier == "local" else (110.0 if tier == "city" else 160.0)
+    picked = []
+    used_addrs = set()
+    cur_lat, cur_lon = lat, lon
+
+    while pool and len(picked) < want and time.monotonic() <= deadline:
+        pool.sort(key=lambda c: (dist_m(cur_lat, cur_lon, c["lat"], c["lon"]) - c["prio"] * 90.0, c["fid"]))
+        cand = None
+        for idx_p, item in enumerate(pool):
+            if all(dist_m(item["lat"], item["lon"], prev["lat"], prev["lon"]) >= min_gap for prev in picked):
+                cand = pool.pop(idx_p)
+                break
+        if cand is None:
+            break
+
+        ckeys = _cells_around(cand["lat"], cand["lon"], 140.0, max_cells=4)
+        rcells = [road_cache[ck] for ck in ckeys if ck in road_cache and road_cache[ck] is not None]
+        if not rcells:
+            rcells = [_cell_layer(md, ck, "roads", deadline) for ck in ckeys]
+        bcells = [bld_cache[ck] for ck in ckeys if ck in bld_cache and bld_cache[ck] is not None]
+        snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=180.0, classes=PARCEL_ROAD_CLASSES,
+                               deadline=deadline, road_cells=rcells)
+        if not snapped:
+            snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=240.0, classes=DRIVABLE_CLASSES,
+                                   deadline=deadline, road_cells=rcells)
+        if not snapped:
+            continue
+        bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bcells)
+        curb = _apply_curb_offset(snapped, cand["lat"], cand["lon"], snapped["lat"], snapped["lon"], bld_polys)
+        street = cand["street"] or curb.get("road") or "Hauptstraße"
+        hn = _derive_housenumber(
+            street, cand["lat"], cand["lon"], curb["lat"], curb["lon"],
+            curb.get("bearing", 0.0), seed, f"{len(picked)}:{cand['fid']}", explicit_hn=cand["housenumber"],
+        )
+        addr_key = (street.lower(), hn.lower())
+        if addr_key in used_addrs:
+            continue
+        used_addrs.add(addr_key)
+        stop_idx = len(picked) + 1
+        house_addr = f"{street} {hn}".strip()
+        recipient = _pick_parcel_recipient(cand["isBusiness"], cand["poiName"], seed, f"{stop_idx}:{cand['fid']}")
+        ck_home = mapcells.cell_of(curb["lat"], curb["lon"])
+        loc_hint = cand["locality"] or town_hints.get(ck_home, "")
+        sec = "Business / Practice" if cand["isBusiness"] else "Residential"
+        stop = _make_stop(
+            stop_idx, "delivery", house_addr, curb,
+            address=f"{recipient} · {house_addr}", zone_radius=11.0,
+            stop_type="kerbside", dwell_target_s=2.5,
+            locality=loc_hint, sector_label=sec,
+        )
+        stop["recipient"] = recipient
+        picked.append(stop)
+        cur_lat, cur_lon = curb["lat"], curb["lon"]
+
+    # Road-chain fallback if building density is sparse
+    if len(picked) < min_stops:
+        step_m = max(140.0, (target_km * 1000.0) / max(1, want))
+        for k in range(len(picked) + 1, want + 8):
+            if time.monotonic() > deadline or len(picked) >= want:
+                break
+            alat, alon = offset_latlon(cur_lat, cur_lon, step_m, (base_brg + ((k % 5) - 2) * 22.0) % 360.0)
+            snapped = snap_to_road(md, alat, alon, radius_m=420.0, classes=DRIVABLE_CLASSES, deadline=deadline)
+            if snapped and all(dist_m(snapped["lat"], snapped["lon"], prev["lat"], prev["lon"]) >= min_gap for prev in picked):
+                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+                curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
+                street = curb.get("road") or "Ringstraße"
+                stop_idx = len(picked) + 1
+                hn = _derive_housenumber(street, None, None, curb["lat"], curb["lon"], curb.get("bearing", 0.0), seed, f"fb:{k}")
+                addr_key = (street.lower(), hn.lower())
+                if addr_key in used_addrs:
+                    hn = f"{int(''.join(ch for ch in hn if ch.isdigit()) or 2) + 2 * stop_idx}"
+                    addr_key = (street.lower(), hn.lower())
+                used_addrs.add(addr_key)
+                house_addr = f"{street} {hn}".strip()
+                recipient = _pick_parcel_recipient(False, "", seed, f"fb:{stop_idx}")
+                stop = _make_stop(
+                    stop_idx, "delivery", house_addr, curb,
+                    address=f"{recipient} · {house_addr}", zone_radius=11.0,
+                    stop_type="kerbside", dwell_target_s=2.5, sector_label="Residential",
+                )
+                stop["recipient"] = recipient
+                picked.append(stop)
+                cur_lat, cur_lon = curb["lat"], curb["lon"]
+
+    if len(picked) < 2:
+        return {"ok": False, "error": "No drivable residential streets found nearby for a parcel route"}
+
+    # Assign parcelCount (1-3), parcelAction ('deliver' | occasional 'pickup_return'), and cargoDeltaKg
+    n = len(picked)
+    deliver_total = 0
+    initial_mass_kg = 0
+    return_count = 0
+    for idx_s, s in enumerate(picked):
+        # Occasional return pickup on intermediate stops (never first or last stop)
+        is_return = (1 <= idx_s < n - 1) and (_stable_index(seed, f"pret:{tier}:{idx_s}", 100) < 18)
+        if is_return:
+            p_cnt = 1 + _stable_index(seed, f"prcnt:{idx_s}", 2)
+            delta_kg = 6 + _stable_index(seed, f"prkg:{idx_s}", 10)  # +6..+15 kg
+            s["kind"] = "pickup"
+            s["parcelAction"] = "pickup_return"
+            s["parcelCount"] = int(p_cnt)
+            s["cargoDeltaKg"] = int(delta_kg)
+            return_count += p_cnt
+        else:
+            p_cnt = 1 + _stable_index(seed, f"pdcnt:{idx_s}", 3)  # 1..3 parcels
+            per_p = 7 + _stable_index(seed, f"pdkg:{idx_s}", 4)   # 7..10 kg each
+            drop_kg = max(8, min(28, p_cnt * per_p))              # 8..28 kg
+            s["kind"] = "delivery"
+            s["parcelAction"] = "deliver"
+            s["parcelCount"] = int(p_cnt)
+            s["cargoDeltaKg"] = -int(drop_kg)
+            deliver_total += p_cnt
+            initial_mass_kg += drop_kg
+
+    # Annotate monotonic outbound parcelsRemaining & parcelsTotal on every stop
+    rem = deliver_total
+    for s in picked:
+        if s["parcelAction"] == "deliver":
+            rem = max(0, rem - s["parcelCount"])
+        s["parcelsRemaining"] = int(rem)
+        s["parcelsTotal"] = int(deliver_total)
+
+    vehicle = req.get("vehicle") or {"class": "van", "coupler": "none", "hasTrailer": False}
+    vclass = vehicle.get("class") if vehicle.get("class") in VEHICLE_CLASSES else "van"
+    tier_title = {"local": "Local Parcel Round", "city": "City Parcel Round", "regional": "Regional Parcel Round", "long": "Long Parcel Route"}
+    return {
+        "ok": True,
+        "mode": "parcel",
+        "tier": tier,
+        "title": f"{tier_title.get(tier, 'Parcel Round')} ({deliver_total} parcels · {initial_mass_kg} kg)",
+        "source": "overture",
+        "estimatedKm": _route_estimate_km(lat, lon, picked),
+        "vehicleClass": vclass,
+        "cargo": {
+            "type": "parcels",
+            "label": "Courier Parcels",
+            "domain": "retail",
+            "massKg": int(initial_mass_kg),
+            "vehicleClass": vclass,
+            "useTrailer": False,
+        },
+        "parcel": {
+            "parcelsTotal": int(deliver_total),
+            "initialMassKg": int(initial_mass_kg),
+            "returnCount": int(return_count),
+        },
+        "stops": picked,
+    }
+
+
 def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, vehicle=None, deadline_s=DEADLINE_S):
     """Generate a global, deterministic Transport Mode job within deadline_s."""
     req, err = validate_request({
@@ -2404,6 +2804,8 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
             res = _generate_taxi(md, req, deadline)
         elif req["mode"] == "bus":
             res = _generate_bus(md, net, req, deadline)
+        elif req["mode"] == "parcel":
+            res = _generate_parcel(md, req, deadline)
         else:
             if req["tier"] in ("local", "city"):
                 res = _generate_logistics_short(md, req, deadline)

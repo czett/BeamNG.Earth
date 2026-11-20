@@ -620,5 +620,121 @@ class Phase4MultiLegLogisticsTest(unittest.TestCase):
         self.assertTrue(any(s.get("sectorLabel") for s in res["stops"]))
 
 
+class Phase6ParcelCourierTest(unittest.TestCase):
+    def _seed_parcel_md(self, base_lat=47.713, base_lon=11.383):
+        md = FakeMapData()
+        road_buckets = {}
+        bld_buckets = {}
+        addr_buckets = {}
+        place_buckets = {}
+        streets = ["Birkenweg", "Hauptstraße", "Lindenstraße", "Ahornweg", "Gartenstraße", "Mühlweg"]
+        for i in range(16):
+            dist_m = 120.0 + i * 160.0
+            brg = 15.0 + (i % 4) * 20.0
+            la, lo = tm.offset_latlon(base_lat, base_lon, dist_m, brg)
+            la2, lo2 = tm.offset_latlon(la, lo, 180.0, 90.0)
+            k = mapcells.cell_of(la, lo)
+            st_name = streets[i % len(streets)]
+            road_buckets.setdefault(k, []).append(
+                _make_road(f"pr_{i}", la - 0.0004, lo - 0.0004, la2, lo2, cls="residential", name=st_name)
+            )
+            if i < 4:
+                # Explicit real address points with housenumber + street + locality
+                addr_buckets.setdefault(k, []).append({
+                    "id": f"pa_{i}",
+                    "attrs": {"housenumber": f"{12 + i * 2}", "street": st_name, "locality": "Sindelsdorf", "cx": lo + 0.0001, "cy": la + 0.0001},
+                    "parts": [[np.array([[lo + 0.0001, la + 0.0001]], np.float64)]],
+                })
+            else:
+                bld_buckets.setdefault(k, []).append({
+                    "id": f"pb_{i}",
+                    "attrs": {"name": "", "class": "house", "subtype": "residential", "cx": lo + 0.00012, "cy": la + 0.00012},
+                    "parts": [[np.array([[lo + 0.0001, la + 0.0001], [lo + 0.0002, la + 0.0001], [lo + 0.0002, la + 0.0002]], np.float64)]],
+                })
+        # Add one small local practice POI
+        p_lat, p_lon = tm.offset_latlon(base_lat, base_lon, 520.0, 45.0)
+        pk = mapcells.cell_of(p_lat, p_lon)
+        place_buckets.setdefault(pk, []).append(_make_place("pp_1", p_lat, p_lon, "Praxis Dr. König", cat="doctors"))
+        for k, items in road_buckets.items():
+            md.put(k, "roads", FakeFeatures(items))
+        for k, items in bld_buckets.items():
+            md.put(k, "buildings", FakeFeatures(items))
+        for k, items in addr_buckets.items():
+            md.put(k, "addresses", FakeFeatures(items))
+        for k, items in place_buckets.items():
+            md.put(k, "places", FakeFeatures(items))
+        return md
+
+    def test_parcel_validation_and_dwell(self):
+        for tier in ("local", "city", "regional", "long"):
+            req, err = tm.validate_request({"mode": "parcel", "tier": tier, "lat": 47.713, "lon": 11.383})
+            self.assertIsNone(err)
+            self.assertEqual(req["mode"], "parcel")
+            self.assertEqual(req["tier"], tier)
+        req, err = tm.validate_request({"mode": "parcel", "tier": "express", "lat": 47.713, "lon": 11.383})
+        self.assertIsNone(req)
+        self.assertIn("unknown tier", err)
+        self.assertEqual(tm.compute_dwell_target_s("parcel", "local", "delivery"), 2.5)
+
+    def test_parcel_generation_addresses_recipients_and_manifest(self):
+        import test_protocol_agreement as proto
+        md = self._seed_parcel_md()
+        res = tm.generate_job(md, mode="parcel", tier="local", lat=47.713, lon=11.383, heading=25.0, seed=42)
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["mode"], "parcel")
+        self.assertEqual(res["tier"], "local")
+        stops = res["stops"]
+        self.assertTrue(5 <= len(stops) <= 7, f"expected 5-7 local stops, got {len(stops)}")
+
+        # Determinism check
+        res2 = tm.generate_job(md, mode="parcel", tier="local", lat=47.713, lon=11.383, heading=25.0, seed=42)
+        self.assertEqual(res, res2)
+
+        # Protocol schema check
+        result_schema = proto.SERVER_TO_MOD["transport_job_result"]
+        for k in res:
+            self.assertIn(k, result_schema, f"unexpected top-level key {k!r}")
+        for s in stops:
+            for k in s:
+                self.assertIn(k, proto.TRANSPORT_STOP_FIELDS, f"unexpected stop key {k!r}")
+            self.assertEqual(s["dwellTargetS"], 2.5)
+            self.assertEqual(s["stopType"], "kerbside")
+            self.assertTrue(s.get("recipient"), "stop missing recipient")
+            self.assertIn(s.get("parcelAction"), ("deliver", "pickup_return"))
+            self.assertTrue(1 <= s["parcelCount"] <= 3)
+            # Name must look like '<Street> <HouseNumber>'
+            self.assertTrue(any(ch.isdigit() for ch in s["name"]), f"expected house number in {s['name']!r}")
+            if s["parcelAction"] == "deliver":
+                self.assertTrue(-28 <= s["cargoDeltaKg"] <= -8, f"deliver delta out of range: {s['cargoDeltaKg']}")
+            else:
+                self.assertTrue(6 <= s["cargoDeltaKg"] <= 15, f"return delta out of range: {s['cargoDeltaKg']}")
+
+        # Final stop must be a delivery and parcelsRemaining must step down monotonically to 0
+        self.assertEqual(stops[-1]["parcelAction"], "deliver")
+        self.assertEqual(stops[-1]["parcelsRemaining"], 0)
+        deliver_sum = sum(s["parcelCount"] for s in stops if s["parcelAction"] == "deliver")
+        self.assertEqual(res["parcel"]["parcelsTotal"], deliver_sum)
+        prev_rem = deliver_sum
+        for s in stops:
+            self.assertLessEqual(s["parcelsRemaining"], prev_rem)
+            self.assertEqual(s["parcelsTotal"], deliver_sum)
+            prev_rem = s["parcelsRemaining"]
+
+    def test_parcel_city_and_regional_tiers_and_return_pickups(self):
+        md = self._seed_parcel_md()
+        city_res = tm.generate_job(md, mode="parcel", tier="city", lat=47.713, lon=11.383, heading=25.0, seed=11)
+        self.assertTrue(city_res["ok"], city_res.get("error"))
+        self.assertTrue(8 <= len(city_res["stops"]) <= 12)
+
+        # Across several seeds, occasional pickup_return stops appear
+        saw_return = False
+        for sd in range(1, 20):
+            r = tm.generate_job(md, mode="parcel", tier="city", lat=47.713, lon=11.383, heading=25.0, seed=sd)
+            if any(s.get("parcelAction") == "pickup_return" for s in r["stops"]):
+                saw_return = True
+                break
+        self.assertTrue(saw_return, "expected at least one pickup_return stop across seeds")
+
+
 if __name__ == "__main__":
     unittest.main()

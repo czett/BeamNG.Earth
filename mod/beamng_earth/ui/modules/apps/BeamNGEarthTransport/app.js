@@ -10,7 +10,8 @@ angular.module('beamng.apps')
   var MODE_STYLE = {
     taxi: { color: '#ffd45a', bg: 'rgba(255,198,30,0.18)', border: 'rgba(255,198,30,0.42)' },
     bus: { color: '#78ccff', bg: 'rgba(54,163,255,0.18)', border: 'rgba(54,163,255,0.42)' },
-    logistics: { color: '#ffaa70', bg: 'rgba(242,122,46,0.18)', border: 'rgba(242,122,46,0.42)' }
+    logistics: { color: '#ffaa70', bg: 'rgba(242,122,46,0.18)', border: 'rgba(242,122,46,0.42)' },
+    parcel: { color: '#4ee6b0', bg: 'rgba(56,217,169,0.18)', border: 'rgba(56,217,169,0.42)' }
   }
 
   function fmtDist(m, metric) {
@@ -88,6 +89,7 @@ angular.module('beamng.apps')
             '</div>' +
             '<div style="font-size:12px;color:#d6dee6;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.stopsCompleted >= 2 ? \'Pickup -> Drop-off\' : \'Ride Skipped\') : (\'Stops \' + tr.stopsCompleted + \'/\' + tr.stopCount) }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
             '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:12px;color:#ffd45a;margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }} = ${{ tr.totalFare.toFixed(2) }}</div>' +
+            '<div ng-if="tr.mode === \'parcel\'" style="font-size:12px;color:#4ee6b0;margin-top:2px;font-weight:600;' + NUM + '">Parcels {{ tr.parcelsDelivered || 0 }}/{{ tr.parcelsTotal || 0 }}<span ng-if="tr.parcelsReturned > 0"> (+{{ tr.parcelsReturned }} returns)</span></div>' +
             '<div style="font-size:11px;color:#93a0ad;margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
               '<button ng-if="tr.mode === \'taxi\'" ng-click="nextPassenger()" style="flex:1;background:rgba(255,198,30,0.22);color:#ffd45a;border:1px solid rgba(255,198,30,0.45);border-radius:4px;padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer;">Next Passenger</button>' +
@@ -202,6 +204,14 @@ angular.module('beamng.apps')
               else if (tr.legKind === 'deadhead') scope.subBadge = 'Deadhead'
               else if (tr.legKind === 'pickup_approach') scope.subBadge = 'Pickup'
               else scope.subBadge = 'Solo'
+            } else if (tr.mode === 'parcel') {
+              var pRem = tr.parcelsRemaining != null ? tr.parcelsRemaining : 0
+              var pTot = tr.parcelsTotal != null ? tr.parcelsTotal : 0
+              var pWt = Math.round(tr.cargoCurrentKg || 0) + ' kg'
+              var pCnt = tr.parcelCount || 1
+              var pRec = tr.recipient ? (tr.recipient + ' · ') : ''
+              scope.subText = pRec + pRem + '/' + pTot + ' left · ' + pWt
+              scope.subBadge = tr.parcelAction === 'pickup_return' ? ('Return +' + pCnt) : ('Deliver ' + pCnt + 'x')
             }
             if (tr.state === 'summary') {
               scope.summaryDist = fmtDist(tr.drivenM, !!tr.metric)

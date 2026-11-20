@@ -65,6 +65,9 @@ local function transportKey(tr)
     tostring(tr.cargoKg or ''), tostring(tr.cargoCurrentKg or ''), tostring(tr.cargoLabel or ''),
     tostring(tr.legKind or ''), tostring(tr.legLabel or ''), tostring(tr.trailerLabel or ''), tostring(tr.trailerState or ''),
     tostring(tr.trailerMissing or ''), tostring(tr.bayHint or ''),
+    tostring(tr.recipient or ''), tostring(tr.parcelCount or ''), tostring(tr.parcelAction or ''),
+    tostring(tr.parcelsRemaining or ''), tostring(tr.parcelsTotal or ''), tostring(tr.parcelsReturned or ''),
+    tostring(tr.cargoPropsCount or ''),
     tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
     tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
   }, '\2')

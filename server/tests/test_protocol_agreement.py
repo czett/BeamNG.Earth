@@ -322,7 +322,7 @@ SERVER_TO_MOD = {
                              "title": F(str, OPT), "routeRef": F(str, OPT), "source": F(str, OPT),
                              "estimatedKm": F(NUM, OPT), "cargo": F(dict, OPT), "vehicleClass": F(str, OPT),
                              "legs": F(list, OPT),
-                             "taxi": F(dict, OPT), "bus": F(dict, OPT),
+                             "taxi": F(dict, OPT), "bus": F(dict, OPT), "parcel": F(dict, OPT),
                              "stops": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
               "miniShape": F(str), "miniScale": F(NUM)},                     # ... and its small copy (far out)
@@ -521,6 +521,8 @@ TRANSPORT_STOP_FIELDS = {
     "paxBoard": F(int, OPT), "paxAlight": F(int, OPT),
     "targetArrivalS": F(NUM, OPT),
     "locality": F(str, OPT), "sectorLabel": F(str, OPT),
+    "recipient": F(str, OPT), "parcelCount": F(int, OPT), "parcelAction": F(str, OPT),
+    "parcelsRemaining": F(int, OPT), "parcelsTotal": F(int, OPT),
 }
 # message types the plain session cannot produce (each has its own session test below)
 EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs map data (roads tests)

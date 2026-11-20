@@ -7,6 +7,7 @@ export const TRANSPORT_MODES = [
   { id: "taxi", label: "Taxi", desc: "Pick up a passenger nearby and drop them off at a real place in the chosen distance band." },
   { id: "bus", label: "Bus", desc: "Follow a real OSM bus line (or local transit corridor) stop by stop with kerbside dwell." },
   { id: "logistics", label: "Logistics", desc: "Deliver freight from a loading dock or depot across local retail stops or regional hubs." },
+  { id: "parcel", label: "Parcel", desc: "Door-to-door parcel courier route with real house addresses, recipients, and return pickups." },
 ]
 
 export const TRANSPORT_TIERS = {
@@ -26,10 +27,16 @@ export const TRANSPORT_TIERS = {
     { id: "regional", label: "Regional Haul (50 km, 2-4 stops)" },
     { id: "long", label: "Long Haul (100 km+)" },
   ],
+  parcel: [
+    { id: "local", label: "Local Round (3 km, 5-7 stops)" },
+    { id: "city", label: "City Round (8 km, 8-12 stops)" },
+    { id: "regional", label: "Regional Round (25 km, 6-10 stops)" },
+    { id: "long", label: "Long Route (60 km, 5-8 stops)" },
+  ],
 }
 
 export const selectedMode = ref("taxi")
-export const selectedTiers = ref({ taxi: "short", bus: "partial", logistics: "local" })
+export const selectedTiers = ref({ taxi: "short", bus: "partial", logistics: "local", parcel: "local" })
 export const transportState = ref(null)
 export const busy = ref(false)
 export const actionError = ref("")
