@@ -70,6 +70,7 @@ local function transportKey(tr)
     tostring(tr.cargoPropsCount or ''),
     tostring(tr.stopsCompleted or ''), tostring(tr.drivenM or ''),
     tostring(tr.elapsedS or ''), tostring(tr.metric or ''),
+    tostring(tr.totalEarned or ''), tostring(tr.driverRank or ''),
   }, '\2')
 end
 

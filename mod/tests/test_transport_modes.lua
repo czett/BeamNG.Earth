@@ -746,4 +746,123 @@ do
   scenetree, core_vehicles, be = oldScenetree, oldCv, oldBe
 end
 
+-- 13. Phase 7: Career Progression, Driver Ranks, Persistence, Itemized Payout & Vehicle Match
+do
+  -- 13a. Rank thresholds
+  T.check(tm.computeDriverRank(0, 0) == 'Rookie Driver', '0 jobs -> Rookie Driver')
+  T.check(tm.computeDriverRank(3, 75) == 'Local Courier', '3 jobs + $75 -> Local Courier')
+  T.check(tm.computeDriverRank(3, 74) == 'Rookie Driver', '3 jobs but < $75 stays Rookie Driver')
+  T.check(tm.computeDriverRank(10, 350) == 'Route Specialist', '10 jobs + $350 -> Route Specialist')
+  T.check(tm.computeDriverRank(25, 1200) == 'Senior Fleet Operator', '25 jobs + $1200 -> Senior Fleet Operator')
+  T.check(tm.computeDriverRank(50, 3500) == 'Master Hauler', '50 jobs + $3500 -> Master Hauler')
+
+  -- 13b. Vehicle match summaries
+  local vmCar = tm.vehicleMatchInfo({ jbeam = 'vivace', massKg = 1350 })
+  local vmVan = tm.vehicleMatchInfo({ jbeam = 'van', massKg = 2600, coupler = 'none' })
+  local vmSemi = tm.vehicleMatchInfo({ jbeam = 'us_semi', coupler = 'fifthwheel', massKg = 8200 })
+  local vmBus = tm.vehicleMatchInfo({ jbeam = 'citybus', massKg = 11000 })
+  T.check(vmCar.class == 'car' and vmCar.vehicleLabel == 'Passenger Car', 'vehicleMatchInfo classifies passenger car')
+  T.check(vmVan.class == 'van' and vmVan.summaryText:find('Parcel') ~= nil, 'vehicleMatchInfo recommends Parcel for van')
+  T.check(vmSemi.class == 'semi' and vmSemi.readiness == 'Ready for Heavy Trailers', 'vehicleMatchInfo detects semi fifthwheel readiness')
+  T.check(vmBus.vehicleLabel == 'City Bus' and vmBus.recommendedModes[1] == 'bus', 'vehicleMatchInfo detects citybus')
+
+  -- 13c. Itemized payout breakdown across all 4 modes & penalty clamping
+  local pTaxi = tm.computePayoutBreakdown({
+    mode = 'taxi', tier = 'city', stopsCompleted = 2, stopsSkipped = 0,
+    passengerOnBoard = true, fareDrivenM = 5000, fareElapsedS = 200, targetLegS = 260,
+    collisions = 0, damageDelta = 0, _scoreHint = 95,
+  }, 95, 92, 100, 1)
+  T.check(pTaxi.basePay > 0 and pTaxi.timeBonus > 0 and pTaxi.smoothnessBonus > 0 and pTaxi.tipOrStreakBonus > 0 and pTaxi.damagePenalty == 0 and pTaxi.totalEarned > pTaxi.basePay,
+    'taxi payout includes base fare, time, smoothness, and tip/streak bonuses')
+
+  local pBus = tm.computePayoutBreakdown({
+    mode = 'bus', tier = 'full', stopsCompleted = 6, stopsSkipped = 0,
+    drivenM = 4500, scheduleDeltaS = 10, collisions = 0, damageDelta = 0,
+  }, 90, 88, 100, 2)
+  T.check(pBus.basePay > 20 and pBus.timeBonus > 0 and pBus.smoothnessBonus > 0 and pBus.tipOrStreakBonus > 0 and pBus.streakApplied == 3,
+    'bus payout awards on-time, smoothness, and 3x streak bonus')
+
+  local pLog = tm.computePayoutBreakdown({
+    mode = 'logistics', tier = 'regional', stopsCompleted = 2, stopsSkipped = 0,
+    drivenM = 12000, totalCargoHauledKg = 14000, useTrailer = true, collisions = 1, damageDelta = 600,
+  }, 85, 84, 90, 0)
+  T.check(pLog.basePay > 40 and pLog.damagePenalty > 0 and pLog.totalEarned >= 0,
+    'logistics payout deducts collision/damage penalty cleanly')
+
+  local pSkip = tm.computePayoutBreakdown({
+    mode = 'parcel', tier = 'local', stopsCompleted = 0, stopsSkipped = 2,
+  }, 0, 100, 100, 0)
+  T.check(pSkip.totalEarned == 0 and pSkip.basePay == 0, 'zero completed stops yields $0 payout')
+
+  -- 13d. Persistence round-trip + accumulation across modes + resetCareerStats()
+  local savedFiles = {}
+  local oldWrite, oldRead, oldFs = jsonWriteFile, jsonReadFile, FS
+  jsonWriteFile = function(path, tbl)
+    savedFiles[path] = tbl
+    return true
+  end
+  jsonReadFile = function(path)
+    return savedFiles[path]
+  end
+  FS = { fileExists = function(_, path) return savedFiles[path] ~= nil end }
+
+  tm.resetCareerStats()
+  local c0 = tm.getCareerStats()
+  T.check(c0.completedJobs == 0 and c0.totalEarnings == 0 and c0.driverRank == 'Rookie Driver', 'resetCareerStats zeros career stats')
+  T.check(savedFiles[tm.CAREER_FILE] ~= nil, 'resetCareerStats writes career file')
+
+  -- Run 1 completed taxi job and 1 completed parcel job
+  local anchor7 = { geodeticToEnu = function() return 0, 0 end }
+  local pl7 = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.2 }
+
+  tm.startJob('taxi', 'short')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id, ok = true, mode = 'taxi', tier = 'short', title = 'Career Taxi',
+    stops = {
+      { index = 1, kind = 'pickup', name = 'A', lat = 39.286, lon = -76.610, dwellTargetS = 2.0 },
+      { index = 2, kind = 'dropoff', name = 'B', lat = 39.286, lon = -76.610, dwellTargetS = 2.0 },
+    },
+  })
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor7, pl7, false, false) end
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor7, pl7, false, false) end
+  local sumTaxi = tm.hudPayload()
+  T.check(sumTaxi.state == 'summary' and sumTaxi.totalEarned > 0 and sumTaxi.payout and sumTaxi.payout.totalEarned == sumTaxi.totalEarned,
+    'completed taxi job populates summary totalEarned and payout breakdown')
+  tm.dismissSummary()
+
+  tm.startJob('parcel', 'local')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id, ok = true, mode = 'parcel', tier = 'local', title = 'Career Parcel',
+    parcel = { parcelsTotal = 2, initialMassKg = 24 },
+    stops = {
+      { index = 1, kind = 'delivery', name = 'Door 1', recipient = 'A. Test', parcelCount = 2, parcelAction = 'deliver', cargoDeltaKg = -24, lat = 39.286, lon = -76.610, dwellTargetS = 2.0 },
+    },
+  })
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchor7, pl7, false, false) end
+  tm.dismissSummary()
+
+  local c1 = tm.getCareerStats()
+  T.check(c1.completedJobs == 2 and c1.totalEarnings > 0 and c1.byMode.taxi.jobs == 1 and c1.byMode.parcel.jobs == 1 and c1.bestScore > 0 and c1.avgScore > 0,
+    'career stats accumulate across taxi and parcel jobs')
+
+  -- Reload from mocked jsonReadFile
+  local cReload = tm.loadCareerStats()
+  T.check(cReload.completedJobs == 2 and cReload.totalEarnings == c1.totalEarnings and cReload.byMode.parcel.jobs == 1,
+    'loadCareerStats restores persisted career stats')
+
+  -- Corrupt JSON fallback
+  savedFiles[tm.CAREER_FILE] = 'not_a_table'
+  local cCorrupt = tm.loadCareerStats()
+  T.check(cCorrupt.completedJobs == 0 and cCorrupt.driverRank == 'Rookie Driver',
+    'corrupt career JSON falls back safely to defaults')
+
+  -- uiState exposes career and vehicleMatch
+  local u7 = tm.uiState()
+  T.check(type(u7.career) == 'table' and type(u7.vehicleMatch) == 'table' and type(u7.vehicleMatch.summaryText) == 'string',
+    'uiState exposes career and vehicleMatch')
+
+  tm.resetCareerStats()
+  jsonWriteFile, jsonReadFile, FS = oldWrite, oldRead, oldFs
+end
+
 T.done('test_transport_modes')

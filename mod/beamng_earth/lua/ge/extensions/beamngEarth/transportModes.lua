@@ -191,6 +191,19 @@ local vehicleProbes = {}  -- vehId -> { massKg, coupler, couplerNode, hasCoupler
 local despawnQueue = {}   -- { { id = trailerId } } job-owned trailers awaiting > 80 m player separation
 local lastDespawnCheckAt = -math.huge
 
+M.CAREER_FILE = '/settings/beamngEarth_transport_career.json'
+M.CAREER_VERSION = 1
+M.CAREER_RANKS = {
+  { id = 'rookie', name = 'Rookie Driver', minJobs = 0, minEarnings = 0 },
+  { id = 'courier', name = 'Local Courier', minJobs = 3, minEarnings = 75 },
+  { id = 'specialist', name = 'Route Specialist', minJobs = 10, minEarnings = 350 },
+  { id = 'senior', name = 'Senior Fleet Operator', minJobs = 25, minEarnings = 1200 },
+  { id = 'master', name = 'Master Hauler', minJobs = 50, minEarnings = 3500 },
+}
+
+local careerStats = nil
+local careerLoaded = false
+
 local function hypot(x, y) return math.sqrt(x * x + y * y) end
 function M.isFinite(n)
   return type(n) == 'number' and n == n and n ~= math.huge and n ~= -math.huge
@@ -497,6 +510,245 @@ function M.computeScore(m)
   return score, smoothness, 100
 end
 
+local function round2(v)
+  v = tonumber(v) or 0
+  if not isFinite(v) then return 0 end
+  return math.floor(v * 100 + 0.5) / 100
+end
+
+-- Pure: derive driver rank and next-rank threshold from completedJobs & totalEarnings.
+function M.computeDriverRank(completedJobs, totalEarnings)
+  local jobs = math.max(0, math.floor(tonumber(completedJobs) or 0))
+  local earn = math.max(0, tonumber(totalEarnings) or 0)
+  local rankIdx = 1
+  for i, r in ipairs(M.CAREER_RANKS) do
+    if jobs >= r.minJobs and earn >= r.minEarnings then
+      rankIdx = i
+    end
+  end
+  local cur = M.CAREER_RANKS[rankIdx]
+  local nxt = M.CAREER_RANKS[rankIdx + 1]
+  return cur.name, {
+    index = rankIdx,
+    id = cur.id,
+    name = cur.name,
+    nextName = nxt and nxt.name or nil,
+    nextMinJobs = nxt and nxt.minJobs or nil,
+    nextMinEarnings = nxt and nxt.minEarnings or nil,
+  }
+end
+
+local function defaultCareerStats()
+  local byMode = {}
+  for m in pairs(M.MODES) do
+    byMode[m] = { jobs = 0, earnings = 0 }
+  end
+  local rankName = M.computeDriverRank(0, 0)
+  return {
+    version = M.CAREER_VERSION,
+    totalEarnings = 0,
+    totalDistanceKm = 0,
+    completedJobs = 0,
+    scoreSum = 0,
+    bestScore = 0,
+    avgScore = 0,
+    streak = 0,
+    driverRank = rankName,
+    byMode = byMode,
+  }
+end
+
+local function sanitizeCareerStats(raw)
+  local c = defaultCareerStats()
+  if type(raw) ~= 'table' then return c end
+  c.totalEarnings = math.max(0, round2(raw.totalEarnings))
+  c.totalDistanceKm = math.max(0, round2(raw.totalDistanceKm))
+  c.completedJobs = math.max(0, math.floor(tonumber(raw.completedJobs) or 0))
+  c.scoreSum = math.max(0, math.floor((tonumber(raw.scoreSum) or 0) + 0.5))
+  c.bestScore = math.max(0, math.min(100, math.floor((tonumber(raw.bestScore) or 0) + 0.5)))
+  c.streak = math.max(0, math.floor(tonumber(raw.streak) or 0))
+  if c.completedJobs > 0 then
+    if c.scoreSum == 0 and tonumber(raw.avgScore) and tonumber(raw.avgScore) > 0 then
+      c.scoreSum = math.floor(tonumber(raw.avgScore) * c.completedJobs + 0.5)
+    end
+    c.avgScore = math.max(0, math.min(100, math.floor((c.scoreSum / c.completedJobs) + 0.5)))
+  else
+    c.scoreSum = 0
+    c.avgScore = 0
+  end
+  if type(raw.byMode) == 'table' then
+    for m in pairs(M.MODES) do
+      local bm = raw.byMode[m]
+      if type(bm) == 'table' then
+        c.byMode[m] = {
+          jobs = math.max(0, math.floor(tonumber(bm.jobs) or 0)),
+          earnings = math.max(0, round2(bm.earnings)),
+        }
+      end
+    end
+  end
+  c.driverRank = M.computeDriverRank(c.completedJobs, c.totalEarnings)
+  return c
+end
+
+local function ensureCareerLoaded()
+  if not careerLoaded then
+    M.loadCareerStats()
+  end
+  return careerStats
+end
+
+function M.loadCareerStats(path)
+  local target = path or M.CAREER_FILE
+  local data = nil
+  local read = rawget(_G, 'jsonReadFile')
+  local fs = rawget(_G, 'FS')
+  if type(read) == 'function' and (not fs or not fs.fileExists or fs:fileExists(target)) then
+    local ok, res = pcall(read, target)
+    if ok and type(res) == 'table' then data = res end
+  end
+  careerStats = sanitizeCareerStats(data)
+  careerLoaded = true
+  return M.getCareerStats()
+end
+
+function M.saveCareerStats(path)
+  local c = ensureCareerLoaded()
+  local write = rawget(_G, 'jsonWriteFile')
+  if type(write) ~= 'function' then return false end
+  local ok, res = pcall(write, path or M.CAREER_FILE, c, true)
+  return ok and res ~= false
+end
+
+function M.getCareerStats()
+  local c = ensureCareerLoaded()
+  local _, rankMeta = M.computeDriverRank(c.completedJobs, c.totalEarnings)
+  local byModeCopy = {}
+  for m in pairs(M.MODES) do
+    local bm = c.byMode[m] or { jobs = 0, earnings = 0 }
+    byModeCopy[m] = { jobs = bm.jobs, earnings = bm.earnings }
+  end
+  return {
+    version = c.version,
+    totalEarnings = c.totalEarnings,
+    totalDistanceKm = c.totalDistanceKm,
+    completedJobs = c.completedJobs,
+    bestScore = c.bestScore,
+    avgScore = c.avgScore,
+    streak = c.streak,
+    driverRank = rankMeta.name,
+    rankMeta = rankMeta,
+    byMode = byModeCopy,
+  }
+end
+
+function M.resetCareerStats(path)
+  careerStats = defaultCareerStats()
+  careerLoaded = true
+  M.saveCareerStats(path)
+  return { ok = true, career = M.getCareerStats() }
+end
+
+-- Pure: itemized payout breakdown across all 4 transport modes.
+function M.computePayoutBreakdown(j, score, smooth, timeliness, streak)
+  if type(j) ~= 'table' or (tonumber(j.stopsCompleted) or 0) <= 0 then
+    return {
+      basePay = 0,
+      timeBonus = 0,
+      smoothnessBonus = 0,
+      tipOrStreakBonus = 0,
+      damagePenalty = 0,
+      totalEarned = 0,
+      streakApplied = 0,
+    }
+  end
+  local mode = type(j.mode) == 'string' and j.mode:lower() or ''
+  local tier = type(j.tier) == 'string' and j.tier:lower() or ''
+  local sc = math.max(0, math.min(100, tonumber(score) or 100))
+  local sm = math.max(0, math.min(100, tonumber(smooth) or 100))
+  local tl = math.max(0, math.min(100, tonumber(timeliness) or 100))
+  local stopsDone = math.max(0, tonumber(j.stopsCompleted) or 0)
+  local skipped = math.max(0, tonumber(j.stopsSkipped) or 0)
+  local collisions = math.max(0, tonumber(j.collisions) or 0)
+  local dmg = math.max(0, tonumber(j.damageDelta) or 0)
+  local drivenKm = math.max(0, (tonumber(j.drivenM) or 0) / 1000.0)
+  if not isFinite(drivenKm) then drivenKm = 0 end
+  local curStreak = math.max(0, math.floor(tonumber(streak) or 0))
+  local cleanRun = (skipped == 0 and sc >= 80)
+  local streakApplied = cleanRun and math.min(5, curStreak + 1) or 0
+
+  local basePay, timeBonus, smoothnessBonus, tipOrStreakBonus = 0, 0, 0, 0
+  if mode == 'taxi' then
+    local meter, tip = M.computeTaxiFare(j)
+    if skipped > 0 then meter, tip = 0, 0 end
+    basePay = round2(meter)
+    if skipped == 0 and meter > 0 and tl >= 90 then
+      timeBonus = round2(meter * ((tl - 85) / 15.0) * 0.12)
+    end
+    if skipped == 0 and meter > 0 and sm >= 75 then
+      smoothnessBonus = round2(meter * ((sm - 75) / 25.0) * 0.10)
+    end
+    local streakBonus = (skipped == 0 and meter > 0 and streakApplied >= 2) and round2(streakApplied * 1.25) or 0
+    tipOrStreakBonus = round2((tip or 0) + streakBonus)
+  elseif mode == 'bus' then
+    local tierMult = (tier == 'full') and 1.25 or 1.0
+    basePay = round2((10.0 + stopsDone * 4.50 + drivenKm * 1.45) * tierMult)
+    local schedAbs = math.abs(tonumber(j.scheduleDeltaS) or 0)
+    if skipped == 0 and schedAbs <= 30 then
+      timeBonus = round2(basePay * 0.15)
+    elseif skipped == 0 and schedAbs <= 90 then
+      timeBonus = round2(basePay * 0.06)
+    end
+    if sm >= 75 then
+      smoothnessBonus = round2(basePay * ((sm - 75) / 25.0) * 0.12)
+    end
+    if cleanRun and streakApplied >= 2 then
+      tipOrStreakBonus = round2(streakApplied * 2.00)
+    end
+  elseif mode == 'logistics' then
+    local tierMult = ({ ['local'] = 1.0, city = 1.15, regional = 1.35, long = 1.60 })[tier] or 1.0
+    local hauledT = math.max(0, (tonumber(j.totalCargoHauledKg) or tonumber(j.cargoKg) or 0) / 1000.0)
+    local trailerBonus = (j.trailerOwnedByJob or j.playerOwnedTrailer or j.useTrailer) and 14.0 or 0.0
+    basePay = round2((16.0 + trailerBonus + stopsDone * 6.0 + drivenKm * 1.85 + hauledT * 1.40) * tierMult)
+    if skipped == 0 and tl >= 85 then
+      timeBonus = round2(basePay * 0.10)
+    end
+    if sm >= 75 then
+      smoothnessBonus = round2(basePay * ((sm - 75) / 25.0) * 0.14)
+    end
+    if cleanRun and streakApplied >= 2 then
+      tipOrStreakBonus = round2(streakApplied * 3.00)
+    end
+  elseif mode == 'parcel' then
+    local tierMult = ({ ['local'] = 1.0, city = 1.10, regional = 1.25, long = 1.45 })[tier] or 1.0
+    local deliv = math.max(0, tonumber(j.parcelsDelivered) or 0)
+    local ret = math.max(0, tonumber(j.parcelsReturned) or 0)
+    basePay = round2((8.0 + deliv * 2.40 + ret * 2.80 + drivenKm * 1.35) * tierMult)
+    if skipped == 0 then
+      timeBonus = round2(basePay * 0.10)
+    end
+    if sm >= 75 then
+      smoothnessBonus = round2(basePay * ((sm - 75) / 25.0) * 0.12)
+    end
+    if cleanRun and streakApplied >= 2 then
+      tipOrStreakBonus = round2(streakApplied * 1.75)
+    end
+  end
+
+  local rawGross = basePay + timeBonus + smoothnessBonus + tipOrStreakBonus
+  local damagePenalty = round2(math.min(rawGross, collisions * 4.50 + math.min(25.0, dmg / 300.0) + skipped * 6.00))
+  local totalEarned = round2(math.max(0, rawGross - damagePenalty))
+  return {
+    basePay = basePay,
+    timeBonus = timeBonus,
+    smoothnessBonus = smoothnessBonus,
+    tipOrStreakBonus = tipOrStreakBonus,
+    damagePenalty = damagePenalty,
+    totalEarned = totalEarned,
+    streakApplied = streakApplied,
+  }
+end
+
 -- Pure: classify BeamNG vehicle into 'car'|'van'|'box_truck'|'semi' from GE/VE inspection metadata.
 function M.classifyVehicle(info)
   info = type(info) == 'table' and info or {}
@@ -529,6 +781,62 @@ function M.classifyVehicle(info)
     massKg = massKg and math.floor(massKg + 0.5) or nil,
     coupler = coupler,
     hasTrailer = hasTrailer,
+  }
+end
+
+-- Pure: human-readable vehicle match & coupler readiness summary for the job launcher.
+function M.vehicleMatchInfo(info)
+  info = type(info) == 'table' and info or {}
+  local jb = type(info.jbeam) == 'string' and info.jbeam:lower() or ''
+  local cl = M.classifyVehicle(info)
+  local vehicleLabel = 'Passenger Car'
+  local readiness = 'Ideal for Taxi & Light Parcel'
+  local recommendedModes = { 'taxi', 'parcel' }
+
+  if jb == 'citybus' then
+    vehicleLabel = 'City Bus'
+    readiness = 'Ideal for Bus Routes'
+    recommendedModes = { 'bus' }
+  elseif cl.class == 'semi' then
+    if cl.hasTrailer then
+      vehicleLabel = 'Semi Tractor + Trailer'
+      readiness = 'Trailer Hitched · Ready for Heavy Freight'
+    elseif cl.coupler == 'fifthwheel' then
+      vehicleLabel = 'Semi Tractor (Fifth Wheel)'
+      readiness = 'Ready for Heavy Trailers'
+    else
+      vehicleLabel = 'Heavy Commercial Truck'
+      readiness = 'Ready for Regional Logistics'
+    end
+    recommendedModes = { 'logistics' }
+  elseif cl.class == 'box_truck' then
+    vehicleLabel = 'Box Truck / Medium Duty'
+    readiness = cl.coupler == 'towhitch' and 'Tow Hitch · City & Regional Logistics' or 'Ideal for City Logistics & Parcel'
+    recommendedModes = { 'logistics', 'parcel' }
+  elseif cl.class == 'van' then
+    vehicleLabel = 'Van / Pickup'
+    if cl.hasTrailer then
+      readiness = 'Trailer Hitched · Ready for Local Logistics'
+    elseif cl.coupler == 'towhitch' then
+      readiness = 'Tow Hitch · Parcel & Local Logistics'
+    else
+      readiness = 'Ideal for Parcel & Local Logistics'
+    end
+    recommendedModes = { 'parcel', 'logistics' }
+  elseif cl.coupler == 'towhitch' then
+    vehicleLabel = 'Passenger Car (Tow Hitch)'
+    readiness = 'Taxi, Parcel & Light Utility Trailers'
+    recommendedModes = { 'taxi', 'parcel', 'logistics' }
+  end
+
+  return {
+    class = cl.class,
+    coupler = cl.coupler,
+    hasTrailer = cl.hasTrailer,
+    vehicleLabel = vehicleLabel,
+    readiness = readiness,
+    recommendedModes = recommendedModes,
+    summaryText = vehicleLabel .. ' · ' .. readiness,
   }
 end
 
@@ -1942,6 +2250,28 @@ local function finishJob(fallbackFinal)
       fare, tip, totalFare = 0, 0, 0
     end
   end
+
+  local c = ensureCareerLoaded()
+  local payout = M.computePayoutBreakdown(j, score, smooth, timeliness, c.streak)
+  if (j.stopsCompleted or 0) > 0 then
+    c.completedJobs = c.completedJobs + 1
+    c.totalEarnings = round2(c.totalEarnings + payout.totalEarned)
+    c.totalDistanceKm = round2(c.totalDistanceKm + ((tonumber(j.drivenM) or 0) / 1000.0))
+    c.scoreSum = (c.scoreSum or 0) + score
+    if score > (c.bestScore or 0) then c.bestScore = score end
+    c.avgScore = math.max(0, math.min(100, math.floor((c.scoreSum / c.completedJobs) + 0.5)))
+    c.streak = payout.streakApplied or 0
+    local bm = c.byMode[j.mode]
+    if not bm then
+      bm = { jobs = 0, earnings = 0 }
+      c.byMode[j.mode] = bm
+    end
+    bm.jobs = bm.jobs + 1
+    bm.earnings = round2(bm.earnings + payout.totalEarned)
+    c.driverRank = M.computeDriverRank(c.completedJobs, c.totalEarnings)
+    M.saveCareerStats()
+  end
+
   summary = {
     mode = j.mode,
     tier = j.tier,
@@ -1960,6 +2290,9 @@ local function finishJob(fallbackFinal)
     fare = fare,
     tip = tip,
     totalFare = totalFare,
+    payout = payout,
+    totalEarned = payout.totalEarned,
+    driverRank = c.driverRank,
     rideArchetype = j.mode == 'taxi' and j.rideArchetype or nil,
     rideLabel = j.mode == 'taxi' and j.rideLabel or nil,
     paxCount = j.mode == 'taxi' and j.taxiPaxCount or (j.mode == 'bus' and j.paxCount or nil),
@@ -1973,7 +2306,9 @@ local function finishJob(fallbackFinal)
   clearOwnedGps()
   local prefix = fallbackFinal and 'Kerbside / Fallback Dropoff · ' or ''
   if summary.mode == 'taxi' and summary.totalFare > 0 then
-    M.say(string.format('%sTaxi complete! Fare $%.2f · Score %d/100', prefix, summary.totalFare, summary.score), 8)
+    M.say(string.format('%sTaxi complete! Earned $%.2f · Score %d/100', prefix, summary.totalEarned, summary.score), 8)
+  elseif summary.totalEarned > 0 then
+    M.say(string.format('%sJob complete! %d/%d stops · +$%.2f · Score %d/100', prefix, summary.stopsCompleted, summary.stopCount, summary.totalEarned, summary.score), 8)
   else
     M.say(string.format('%sJob complete! %d/%d stops · Score %d/100', prefix, summary.stopsCompleted, summary.stopCount, summary.score), 8)
   end
@@ -2824,6 +3159,9 @@ function M.hudPayload()
       fare = summary.fare,
       tip = summary.tip,
       totalFare = summary.totalFare,
+      payout = summary.payout,
+      totalEarned = summary.totalEarned,
+      driverRank = summary.driverRank,
       rideArchetype = summary.rideArchetype,
       rideLabel = summary.rideLabel,
       paxCount = summary.paxCount,
@@ -2916,6 +3254,19 @@ function M.uiState()
       collisions = activeJob.collisions,
     } or nil,
     summary = summary,
+    career = M.getCareerStats(),
+    vehicleMatch = (function()
+      local ge = inspectGeVehicle()
+      local prb = ge.vehId and vehicleProbes[ge.vehId] or nil
+      if prb then
+        if (ge.coupler == nil or ge.coupler == 'none') and prb.coupler and prb.coupler ~= 'none' then
+          ge.coupler = prb.coupler
+        end
+        if prb.massKg then ge.massKg = prb.massKg end
+        if prb.attached then ge.hasTrailer = true end
+      end
+      return M.vehicleMatchInfo(ge)
+    end)(),
     error = lastError,
     metric = isMetric(),
     ready = st ~= nil and st.inOurLevel == true and st.player ~= nil,
@@ -2948,6 +3299,9 @@ function M.onQuickAccessLoaded()
   })
 end
 
-M.onExtensionLoaded = function() M.onQuickAccessLoaded() end
+M.onExtensionLoaded = function()
+  M.loadCareerStats()
+  M.onQuickAccessLoaded()
+end
 
 return M
