@@ -38,6 +38,9 @@
     <!-- Transport: Taxi, Bus, Logistics jobs (EarthTransport.vue) -->
     <EarthTransport v-if="category.transport" />
 
+    <!-- Radio: Location-aware live & local radio (EarthRadio.vue) -->
+    <EarthRadio v-if="category.radio" />
+
     <!-- Add-ons: the page is the add-ons' own view (EarthAddons.vue) -->
     <EarthAddons v-if="category.addons" />
 
@@ -158,6 +161,7 @@ import {
 import { CONTRIBUTORS } from "./contributors.js"
 import EarthAddons from "./EarthAddons.vue"
 import EarthTransport from "./EarthTransport.vue"
+import EarthRadio from "./EarthRadio.vue"
 
 const props = defineProps({
   page: { type: String, default: "Graphics" },     // the page's name (settingsSchema's)

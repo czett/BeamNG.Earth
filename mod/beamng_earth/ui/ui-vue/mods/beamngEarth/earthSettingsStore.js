@@ -206,6 +206,13 @@ export const settingsSchema = [
     items: [],
   },
   {
+    // Location-Aware Live & Local Radio (EarthRadio.vue, earthRadioStore.js)
+    name: "Radio",
+    intro: "Listen to live regional and local FM radio stations wherever you drive, with automatic roaming when leaving a local station's area.",
+    radio: true,
+    items: [],
+  },
+  {
     // third-party add-ons (EarthAddons.vue, earthAddonsStore.js): the page is the add-ons' own view, no settings rows
     name: "Add-ons",
     addons: true,
@@ -260,7 +267,7 @@ export const settingsSchema = [
 // Each page's icon (the pause menu's side buttons take the icon's name, LayoutMenu's tabs the icon) and its button id
 // (the first keeps the old Mods-tab button's id: settings.lua M.BUTTON_ID, pageExists)
 export const PAGE_ICONS = { Graphics: "eyeOutlineOpened", World: "globe", Experimental: "test", Interface: "cogOutline",
-  Multiplayer: "peopleOutline", Storage: "floppyDisk", Transport: "globe", "Add-ons": "puzzleModule", Feedback: "bug", About: "info",
+  Multiplayer: "peopleOutline", Storage: "floppyDisk", Transport: "globe", Radio: "music", "Add-ons": "puzzleModule", Feedback: "bug", About: "info",
   Developer: "code" }
 export const pageId = (name, i) => i === 0 ? "beamngEarth-settings" : "beamngEarth-settings-" + name.toLowerCase()
 

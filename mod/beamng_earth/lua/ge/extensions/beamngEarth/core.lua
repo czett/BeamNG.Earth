@@ -1151,7 +1151,7 @@ M._netq = { q = {}, head = 1, rq = {}, rhead = 1, cost = {}, budgetMs = 4.0, bus
   urgent = { terrain_ready = true, terrain_ready_set = true, terrain_refresh = true, terrain_error = true,
     swap_begin = true, swap_end = true, swap_abort = true,
     block_base = true, terrain_patch = true, ground_ahead = true, deck_spans = true, status = true, load_progress = true, where_result = true, geocode_result = true, stations_result = true,
-    route_result = true, random_place_result = true, runtime_profiler_pong = true, transport_job_result = true } }
+    route_result = true, random_place_result = true, runtime_profiler_pong = true, transport_job_result = true, radio_stations_result = true } }
 -- A block's refreshed base photo (block_base) waits while the car is faster than BASE_LATER_MS, and is applied once it
 -- is slower than BASE_NOW_MS, if that block is still the one in use (a later block brings its own photo)
 M.BASE_LATER_MS, M.BASE_NOW_MS = 35, 30         -- m/s (78 / 67 mph; the server skips a block's photo wait over 89 mph)
@@ -1672,6 +1672,9 @@ local function onMessage(msg)
   elseif t == 'transport_job_result' then    -- Transport Modes (transportModes.lua)
     local tm = rawget(_G, 'beamngEarth_transportModes')
     if tm and tm.onJobResult then tm.onJobResult(msg) end
+  elseif t == 'radio_stations_result' then   -- Location-aware radio (locationRadio.lua)
+    local lr = rawget(_G, 'beamngEarth_locationRadio')
+    if lr and lr.onStationsResult then lr.onStationsResult(msg) end
   elseif t == 'geocode_result' then
     if msg.id then geocodeResults[msg.id] = { results = msg.results or {}, error = msg.error, text = msg.text } end
   elseif t == 'areas' then
@@ -2413,6 +2416,10 @@ local function hudTexts()
     local tm = rawget(_G, 'beamngEarth_transportModes')
     hudInput.transport = (shown and tm and tm.hudPayload) and tm.hudPayload() or nil
   end
+  do
+    local lr = rawget(_G, 'beamngEarth_locationRadio')
+    hudInput.radio = (shown and lr and lr.hudPayload) and lr.hudPayload() or nil
+  end
   return hudInput
 end
 
@@ -3130,6 +3137,10 @@ local function onUpdate(dtReal, dtSim)
       local tm = rawget(_G, 'beamngEarth_transportModes')
       if tm and tm.update then pcall(tm.update, dtReal, dtSim, st.anchor, st.player, st.paused, st.rebasing) end
     end
+    do
+      local lr = rawget(_G, 'beamngEarth_locationRadio')
+      if lr and lr.update then pcall(lr.update, dtReal, st.player, st.clock) end
+    end
   end
   if st.active then
     if not dropHoldFailed and (not st.paused or dropHold.active) then     -- (it runs on while it paused the game)
@@ -3410,6 +3421,7 @@ local function onClientEndMission()
   pcall(mpsession.reset)
   gps.reset()
   do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
+  do local lr = rawget(_G, 'beamngEarth_locationRadio') if lr and lr.reset then pcall(lr.reset) end end
   do local stg = rawget(_G, 'beamngEarth_settings') if stg and stg.redirectBigMap then stg.redirectBigMap(false) end end
   seasonlook.restore()
   -- runs before the level deletes its objects (server/server.lua:19 vs :34): delete the far tiles
@@ -3467,6 +3479,7 @@ local function onExtensionUnloaded()
   require('beamngEarth/minimaproads').unhook()
   levelinfo.unhookSpawnPois()
   do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
+  do local lr = rawget(_G, 'beamngEarth_locationRadio') if lr and lr.reset then pcall(lr.reset) end end
   groundcover.enginePatch(false)
   net.close()
   farfield.clear()
@@ -3777,6 +3790,12 @@ function M.requestTransportJob(id, mode, tier, lat, lon, heading, seed, vehicle)
   if not net.isConnected() then return false end
   net.send({ type = 'transport_job', id = id, mode = mode, tier = tier, lat = lat, lon = lon,
     heading = heading, seed = seed, vehicle = vehicle })
+  return true
+end
+function M.requestRadioStations(id, lat, lon, place, region, country, online)
+  if not net.isConnected() then return false end
+  net.send({ type = 'radio_stations_request', id = id, lat = lat, lon = lon,
+    place = place, region = region, country = country, online = online })
   return true
 end
 function M.requestRoute(id, lat0, lon0, lat1, lon1, bearing, via)

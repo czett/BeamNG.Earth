@@ -10,7 +10,7 @@
 -- Pure apart from guihooks (runs under plain luajit with a stub).
 local M = {}
 
-M.NAMES = { status = true, credits = true, banner = true, transport = true }
+M.NAMES = { status = true, credits = true, banner = true, transport = true, radio = true }
 M.SEND_S = 0.25           -- s between updates to the apps (the status bar's fps changes every frame)
 M.STALE_S = 5.0           -- an unchanged payload is sent again this often (an app opened since)
 
@@ -44,6 +44,7 @@ function M.payload(t)
     bannerLevel = b.level or 'info',
     hidden = t.hidden and true or false,
     transport = t.transport or nil,
+    radio = t.radio or nil,
   }
 end
 
@@ -104,9 +105,27 @@ local function transportKey(tr)
   return table.concat(trKeyBuf, '\2', 1, 50)
 end
 
+local function radioKey(r)
+  if type(r) ~= 'table' then return '' end
+  local cur = type(r.currentStation) == 'table' and r.currentStation or {}
+  local ids = {}
+  if type(r.stations) == 'table' then
+    for i = 1, #r.stations do
+      ids[i] = tostring(r.stations[i].id or '')
+    end
+  end
+  return tostring(r.enabled) .. '\3' .. tostring(r.playing) .. '\3'
+    .. tostring(math.floor((tonumber(r.volume) or 0) * 100 + 0.5)) .. '\3'
+    .. tostring(r.autoRoam) .. '\3' .. tostring(r.currentStationId or '') .. '\3'
+    .. tostring(r.currentIndex or 0) .. '\3' .. tostring(cur.streamUrl or '') .. '\3'
+    .. tostring(r.regionCode or '') .. '\3' .. tostring(r.regionLabel or '') .. '\3'
+    .. tostring(r.streamStatus or '') .. '\3' .. tostring(r.roamNotice or '') .. '\3'
+    .. table.concat(ids, ',')
+end
+
 local function key(p)
   return p.status .. '\1' .. p.loading .. '\1' .. p.credits .. '\1' .. p.banner .. '\1' .. p.bannerLevel .. '\1'
-    .. tostring(p.hidden) .. '\1' .. transportKey(p.transport)
+    .. tostring(p.hidden) .. '\1' .. transportKey(p.transport) .. '\1' .. radioKey(p.radio)
 end
 
 -- now: core's clock (s); get(): the texts (only called when a send is due, so its cost is paid at SEND_S at most).

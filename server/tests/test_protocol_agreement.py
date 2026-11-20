@@ -264,6 +264,10 @@ MOD_TO_SERVER = {
     # Transport Modes (transport_modes.py; additive): Taxi / Bus / Logistics job request
     "transport_job": {"id": F(int), "mode": F(str), "tier": F(str), "lat": F(NUM), "lon": F(NUM),
                       "heading": F(NUM, OPT), "seed": F(int, OPT), "vehicle": F(dict, OPT)},
+    # Location-Aware Live & Local Radio (location_radio.py; additive)
+    "radio_stations_request": {"id": F(int), "lat": F(NUM), "lon": F(NUM),
+                               "place": F(str, OPT), "region": F(str, OPT), "country": F(str, OPT),
+                               "online": F(bool, OPT)},
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -324,6 +328,9 @@ SERVER_TO_MOD = {
                              "legs": F(list, OPT),
                              "taxi": F(dict, OPT), "bus": F(dict, OPT), "parcel": F(dict, OPT),
                              "stops": F(list), "error": F(str, OPT)},
+    "radio_stations_result": {"id": F(int), "ok": F(bool), "regionCode": F(str), "regionLabel": F(str),
+                              "country": F(str, OPT), "place": F(str, OPT), "source": F(str, OPT),
+                              "stations": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
               "miniShape": F(str), "miniScale": F(NUM)},                     # ... and its small copy (far out)
     "random_place_result": {"id": F(int), "lat": F(NUM, OPT), "lon": F(NUM, OPT), "name": F(str, OPT)},
@@ -538,6 +545,7 @@ EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs
                        "map_labels_result",                          # the 3D map's labels: asked in map mode
                        "places_result",                              # the modding API's places (test_places_api)
                        "transport_job_result",                       # Transport Modes (test_transport_modes)
+                       "radio_stations_result",                      # Location-aware radio (test_location_radio)
                        "globe",                                      # the 3D map's globe: needs EOX tiles
                        "random_place_result", "place_previews_ready",  # the level select: map data / imagery
                                                                      # (test_randomplace)
@@ -638,7 +646,7 @@ def mod_reads():
     """Fields the mod reads from server messages: msg.X / p.msg.X / tr.X (terrain) in its Lua."""
     out = set()
     for name in ("core.lua", "farfield.lua", "lattice.lua", "weather.lua", "credits.lua", "roads.lua", "mpsession.lua",
-                 "addons.lua", "api.lua", "reportsend.lua"):
+                 "addons.lua", "api.lua", "reportsend.lua", "locationRadio.lua"):
         text = code_only((LUA / name).read_text(encoding="utf-8"), "--")
         out |= set(re.findall(r"\bmsg\.(\w+)", text))
         out |= {"terrain." + f for f in re.findall(r"\btr\.(\w+)", text)}
