@@ -142,6 +142,25 @@ export function nextPassenger() {
   })
 }
 
+export function resetCareerStats() {
+  actionError.value = ""
+  engineLua("beamngEarth_settings and beamngEarth_settings.uiTransportResetCareer and beamngEarth_settings.uiTransportResetCareer() or nil", res => {
+    if (res && res.ok === false) {
+      actionError.value = res.error || "Could not reset career stats"
+    } else {
+      setTimeout(poll, 100)
+    }
+  })
+}
+
+export function formatMoney(value, opts = {}) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return "$0.00"
+  const abs = Math.abs(n).toFixed(2)
+  if (n < 0) return `-$${abs}`
+  return opts.signed && n > 0 ? `+$${abs}` : `$${abs}`
+}
+
 export function modeLabel(m) {
   const f = TRANSPORT_MODES.find(x => x.id === m)
   return f ? f.label : String(m || "").toUpperCase()

@@ -32,6 +32,23 @@ local busGet = function()
 end
 T.check(H.update(10, busGet), 'bus hud update sent')
 T.check(H.update(10.3, busGet), 'bus hud re-emits when paxCount changes')
+local earnStep = 0
+local sumGet = function()
+  earnStep = earnStep + 1
+  return {
+    status = '', credits = '', banner = { text = '', level = 'info', visible = false },
+    transport = {
+      state = 'summary', mode = 'parcel', stopsCompleted = 4, stopCount = 4,
+      score = 94, smoothnessPct = 96, collisions = 0, drivenM = 2800, elapsedS = 190,
+      totalEarned = earnStep == 1 and 24.50 or 31.00,
+      driverRank = earnStep == 1 and 'Rookie Driver' or 'Local Courier',
+    },
+  }
+end
+T.check(H.update(11, sumGet) and sent[#sent].p.transport.totalEarned == 24.50 and sent[#sent].p.transport.driverRank == 'Rookie Driver',
+  'summary hud forwards totalEarned and driverRank')
+T.check(H.update(11.3, sumGet) and sent[#sent].p.transport.totalEarned == 31.00 and sent[#sent].p.transport.driverRank == 'Local Courier',
+  'summary hud re-emits when totalEarned/driverRank changes')
 H.setMounted('transport', false)
 H.setMounted('status', false); H.setMounted('banner', false)
 T.check(not H.any() and not H.mounted('status'), 'all apps gone')
