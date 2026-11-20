@@ -298,6 +298,78 @@ _TAXI_VIP_WORDS = ("hotel", "resort", "museum", "theatre", "theater", "palace", 
 _DOMAIN_PRIORITY = {"fuel": 5, "medical": 4, "food": 4, "hardware": 3, "retail": 2, "industrial": 1, "general": 0}
 _CARGO_TIER_BANDS = {"local": (0.05, 0.55), "city": (0.30, 0.75), "regional": (0.55, 0.90), "long": (0.70, 1.00)}
 
+# Interactive OSM Fuel Stations
+_FUEL_PLACE_CATS = frozenset({"gas_station", "fueling_station", "fuel", "petrol_station"})
+_FUEL_INFRA_CLASSES = frozenset({"fuel", "gas_station", "fueling_station", "petrol_station"})
+_FUEL_BRAND_CANON = {
+    "aral": "Aral",
+    "shell": "Shell",
+    "esso": "Esso",
+    "jet": "Jet",
+    "omv": "OMV",
+    "bp": "BP",
+    "total": "TotalEnergies",
+    "totalenergies": "TotalEnergies",
+    "total energies": "TotalEnergies",
+    "agip": "Agip",
+    "eni": "Eni",
+    "avia": "Avia",
+    "bft": "bft",
+    "hem": "HEM",
+    "star": "Star",
+    "exxon": "Exxon",
+    "mobil": "Mobil",
+    "chevron": "Chevron",
+    "texaco": "Texaco",
+    "sunoco": "Sunoco",
+    "valero": "Valero",
+    "marathon": "Marathon",
+    "sheetz": "Sheetz",
+    "circle k": "Circle K",
+    "7-eleven": "7-Eleven",
+    "eneos": "ENEOS",
+    "q1": "Q1",
+    "oil!": "OIL!",
+    "gulf": "Gulf",
+    "arco": "Arco",
+    "conoco": "Conoco",
+    "phillips 66": "Phillips 66",
+    "speedway": "Speedway",
+    "wawa": "Wawa",
+    "casey's": "Casey's",
+    "love's": "Love's",
+    "racetrac": "RaceTrac",
+    "maverik": "Maverik",
+}
+_FUEL_BRAND_WIKIDATA = {
+    "Q565734": "Aral",
+    "Q110716465": "Shell",
+    "Q867662": "Esso",
+    "Q568940": "Jet",
+    "Q152057": "BP",
+    "Q154037": "TotalEnergies",
+    "Q377915": "Agip",
+    "Q565594": "Eni",
+    "Q300147": "Avia",
+    "Q1009104": "bft",
+    "Q109675651": "Exxon",
+    "Q109676002": "Mobil",
+    "Q319642": "Chevron",
+    "Q775060": "Texaco",
+    "Q1423218": "Sunoco",
+    "Q1283291": "Valero",
+    "Q458363": "Marathon",
+    "Q7492551": "Sheetz",
+    "Q3268010": "Circle K",
+    "Q259340": "7-Eleven",
+    "Q1640290": "ENEOS",
+    "Q2121146": "Q1",
+    "Q2007561": "OIL!",
+}
+FUEL_DEDUP_M = 35.0
+FUEL_DEFAULT_RADIUS_M = 1500.0
+FUEL_MAX_STATIONS = 16
+
 
 def _get_req_cache():
     return getattr(_req_tls, "cache", None)
@@ -2930,3 +3002,245 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
     res.setdefault("tier", req["tier"])
     res.setdefault("stops", [])
     return res
+
+
+# --------------------------------------------------------------------------- Nearby OSM Fuel Stations
+
+def validate_fuel_stations_request(msg):
+    """Validate incoming fuel_stations_request dict -> (cleaned_dict, None) or (None, error_str)."""
+    if not isinstance(msg, dict):
+        return None, "invalid request"
+    try:
+        lat, lon = float(msg["lat"]), float(msg["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None, "missing or invalid lat/lon"
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None, "lat/lon out of range"
+    radius_m = msg.get("radiusM", FUEL_DEFAULT_RADIUS_M)
+    try:
+        radius_m = float(radius_m) if radius_m is not None else FUEL_DEFAULT_RADIUS_M
+        if not math.isfinite(radius_m):
+            radius_m = FUEL_DEFAULT_RADIUS_M
+    except (TypeError, ValueError):
+        radius_m = FUEL_DEFAULT_RADIUS_M
+    radius_m = max(200.0, min(5000.0, radius_m))
+    return {"lat": lat, "lon": lon, "radiusM": radius_m}, None
+
+
+def _canonical_fuel_brand(raw):
+    s = _clean(raw)
+    if not s:
+        return ""
+    low = s.lower()
+    if low in _FUEL_BRAND_CANON:
+        return _FUEL_BRAND_CANON[low]
+    for tok, canon in _FUEL_BRAND_CANON.items():
+        if len(tok) >= 3 and (low.startswith(tok + " ") or (" " + tok + " ") in (" " + low + " ")):
+            return canon
+    return ""
+
+
+def _resolve_fuel_brand_and_name(name="", brand_name="", brand_wikidata="", tags=None):
+    """Resolve canonical fuel station (name, brand) from Overture/OSM metadata."""
+    tags = tags if isinstance(tags, dict) else {}
+    wd = _clean(brand_wikidata)
+    brand = _FUEL_BRAND_WIKIDATA.get(wd, "") if wd else ""
+    if not brand:
+        for cand in (brand_name, tags.get("brand"), tags.get("operator"), name, tags.get("name")):
+            brand = _canonical_fuel_brand(cand)
+            if brand:
+                break
+    raw_name = _clean(name) or _clean(tags.get("name")) or _clean(brand_name) or _clean(tags.get("brand")) or _clean(tags.get("operator"))
+    if brand:
+        if not raw_name or raw_name.lower() in ("fuel", "gas station", "petrol station", "tankstelle", "local fuel station"):
+            return brand, brand
+        if brand.lower() == raw_name.lower():
+            return brand, brand
+        return raw_name, brand
+    if raw_name and raw_name.lower() not in ("fuel", "gas station", "petrol station", "tankstelle"):
+        return raw_name, ""
+    return "Local Fuel Station", ""
+
+
+def _fuel_price_per_liter(lat, lon, station_key):
+    """Deterministic regional + per-station fuel price per liter in [$1.72, $1.89]."""
+    reg_step = _stable_index(0, f"fuel_reg:{round(lat, 1)}:{round(lon, 1)}", 7)  # 0..6 cents
+    st_step = _stable_index(0, f"fuel_st:{station_key}:{round(lat, 4)}:{round(lon, 4)}", 12)  # 0..11 cents
+    price = 1.72 + (reg_step + st_step) * 0.01
+    return round(min(1.89, max(1.72, price)), 2)
+
+
+def find_nearby_fuel_stations(md, lat, lon, radius_m=FUEL_DEFAULT_RADIUS_M, deadline_s=1.2):
+    """Query Overture/OSM places & infrastructure layers for nearby fuel stations within radius_m.
+
+    Deduplicates stations within 35 m, resolves brand/name, snaps pump bay to nearby aisle/road,
+    enriches locality, and assigns deterministic regional fuel pricing ($1.72-$1.89 / L).
+    """
+    if md is None:
+        return []
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return []
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return []
+    radius_m = max(100.0, min(5000.0, float(radius_m or FUEL_DEFAULT_RADIUS_M)))
+    deadline = time.monotonic() + max(0.2, float(deadline_s))
+
+    prev_cache = _get_req_cache()
+    _req_tls.cache = {"cells": {}, "tags": {}, "locality": {}}
+    try:
+        keys = _cells_around(lat, lon, radius_m, max_cells=9)
+        raw_cands = []
+        seen_ids = set()
+
+        for key in keys:
+            if time.monotonic() > deadline:
+                break
+            # 1. Overture places layer
+            f_pl = _cell_layer(md, key, "places", deadline)
+            if f_pl is not None and len(getattr(f_pl, "ids", ())):
+                attrs = getattr(f_pl, "attrs", {}) or {}
+                n = len(f_pl.ids)
+                names = _col(attrs, "name", n)
+                cats = _col(attrs, "basic_category", n)
+                taxes = _col(attrs, "taxonomy", n)
+                brands = _col(attrs, "brand_name", n)
+                wikis = _col(attrs, "brand_wikidata", n)
+                status = _col(attrs, "operating_status", n)
+                for i in range(n):
+                    pid = ("p", str(f_pl.ids[i]))
+                    if pid in seen_ids:
+                        continue
+                    if str(status[i] or "").strip().lower() in _CLOSED_STATUSES:
+                        continue
+                    cat = str(cats[i] or "").strip().lower()
+                    tax = str(taxes[i] or "").strip().lower()
+                    tags = _tags_dict(attrs, i)
+                    is_fuel = (
+                        cat in _FUEL_PLACE_CATS
+                        or tax in _FUEL_PLACE_CATS
+                        or tags.get("amenity") == "fuel"
+                        or str(wikis[i] or "").strip() in _FUEL_BRAND_WIKIDATA
+                    )
+                    if not is_fuel:
+                        continue
+                    pt = _feature_center(f_pl, i)
+                    if not pt:
+                        continue
+                    d = dist_m(lat, lon, pt[0], pt[1])
+                    if d > radius_m:
+                        continue
+                    seen_ids.add(pid)
+                    nm, br = _resolve_fuel_brand_and_name(names[i], brands[i], wikis[i], tags)
+                    prio = (2 if br else (1 if nm != "Local Fuel Station" else 0)) + 1
+                    raw_cands.append({
+                        "fid": str(f_pl.ids[i]),
+                        "lat": pt[0], "lon": pt[1],
+                        "distM": d, "name": nm, "brand": br, "prio": prio,
+                    })
+
+            # 2. Overture/OSM infrastructure layer
+            f_in = _cell_layer(md, key, "infrastructure", deadline)
+            if f_in is not None and len(getattr(f_in, "ids", ())):
+                attrs = getattr(f_in, "attrs", {}) or {}
+                n = len(f_in.ids)
+                names = _col(attrs, "name", n)
+                classes = _col(attrs, "class", n)
+                for i in range(n):
+                    iid = ("i", str(f_in.ids[i]))
+                    if iid in seen_ids:
+                        continue
+                    cls = str(classes[i] or "").strip().lower()
+                    tags = _tags_dict(attrs, i)
+                    if cls not in _FUEL_INFRA_CLASSES and tags.get("amenity") != "fuel":
+                        continue
+                    pt = _feature_center(f_in, i)
+                    if not pt:
+                        continue
+                    d = dist_m(lat, lon, pt[0], pt[1])
+                    if d > radius_m:
+                        continue
+                    seen_ids.add(iid)
+                    nm, br = _resolve_fuel_brand_and_name(names[i], "", "", tags)
+                    prio = 2 if br else (1 if nm != "Local Fuel Station" else 0)
+                    raw_cands.append({
+                        "fid": str(f_in.ids[i]),
+                        "lat": pt[0], "lon": pt[1],
+                        "distM": d, "name": nm, "brand": br, "prio": prio,
+                    })
+
+        # Sort closest first (preferring higher metadata richness on ties) and deduplicate within 35 m
+        raw_cands.sort(key=lambda c: (c["distM"], -c["prio"], c["name"], c["fid"]))
+        dedup = []
+        for cand in raw_cands:
+            merged = False
+            for existing in dedup:
+                if dist_m(cand["lat"], cand["lon"], existing["lat"], existing["lon"]) <= FUEL_DEDUP_M:
+                    # Preserve strongest brand/name when merging paired places + infra pins
+                    if cand["prio"] > existing["prio"]:
+                        existing["name"] = cand["name"]
+                        existing["brand"] = cand["brand"]
+                        existing["prio"] = cand["prio"]
+                    elif not existing["brand"] and cand["brand"]:
+                        existing["brand"] = cand["brand"]
+                        if existing["name"] == "Local Fuel Station":
+                            existing["name"] = cand["name"]
+                    merged = True
+                    break
+            if not merged:
+                dedup.append(cand)
+                if len(dedup) >= FUEL_MAX_STATIONS:
+                    break
+
+        # Snap pump bay positions to forecourt aisle / road curb and enrich locality & pricing
+        loc_cache = {}
+        stations = []
+        for st in dedup:
+            if time.monotonic() > deadline:
+                break
+            ckeys = _cells_around(st["lat"], st["lon"], 150.0, max_cells=4)
+            rcells = [_cell_layer(md, k, "roads", deadline) for k in ckeys]
+            bcells = [_cell_layer(md, k, "buildings", deadline) for k in ckeys]
+            bld_polys = _building_polys(md, st["lat"], st["lon"], radius_m=100.0, deadline=deadline, bld_cells=bcells)
+
+            bay = _snap_site_aisle(md, st["lat"], st["lon"], rcells, bld_polys, max_dist_m=45.0)
+            if not bay:
+                snapped = snap_to_road(
+                    md, st["lat"], st["lon"], radius_m=120.0,
+                    classes=LOGISTICS_FALLBACK_CLASSES, deadline=deadline, road_cells=rcells,
+                )
+                if snapped:
+                    bay = _apply_curb_offset(snapped, st["lat"], st["lon"], snapped["lat"], snapped["lon"], bld_polys)
+
+            if bay:
+                bay_lat = round(float(bay["lat"]), 6)
+                bay_lon = round(float(bay["lon"]), 6)
+                bay_brg = round(float(bay.get("bearing") or 0.0) % 360.0, 1)
+                bay_road = _clean(bay.get("road") or "")
+            else:
+                bay_lat = round(float(st["lat"]), 6)
+                bay_lon = round(float(st["lon"]), 6)
+                bay_brg = 0.0
+                bay_road = ""
+
+            locality = _resolve_locality(md, bay_lat, bay_lon, deadline, cell_cache=loc_cache)
+            sid_hash = hashlib.sha256(f"{st['name']}:{bay_lat:.4f}:{bay_lon:.4f}".encode("utf-8")).hexdigest()[:10]
+            price = _fuel_price_per_liter(bay_lat, bay_lon, sid_hash)
+            stations.append({
+                "id": f"fuel_{sid_hash}",
+                "name": st["name"],
+                "brand": st["brand"],
+                "lat": bay_lat,
+                "lon": bay_lon,
+                "bearingDeg": bay_brg,
+                "distM": round(dist_m(lat, lon, bay_lat, bay_lon), 1),
+                "road": bay_road,
+                "locality": locality,
+                "pricePerLiter": price,
+            })
+
+        stations.sort(key=lambda s: (s["distM"], s["name"], s["id"]))
+        return stations
+    finally:
+        _req_tls.cache = prev_cache

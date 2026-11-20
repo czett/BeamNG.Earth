@@ -789,5 +789,112 @@ class CachingAndPerformanceTest(unittest.TestCase):
             self.assertLess(dt, 0.5, f"{mode}/{tier} took too long: {dt:.3f}s")
 
 
+class FuelStationsTest(unittest.TestCase):
+    def test_validate_fuel_stations_request(self):
+        req, err = tm.validate_fuel_stations_request({"lat": 48.1351, "lon": 11.5820, "radiusM": 1800})
+        self.assertIsNone(err)
+        self.assertAlmostEqual(req["lat"], 48.1351)
+        self.assertAlmostEqual(req["lon"], 11.5820)
+        self.assertEqual(req["radiusM"], 1800.0)
+
+        # Clamps radiusM and defaults when absent
+        req_def, err_def = tm.validate_fuel_stations_request({"lat": 48.1, "lon": 11.5})
+        self.assertIsNone(err_def)
+        self.assertEqual(req_def["radiusM"], 1500.0)
+
+        for bad in ({"lat": 95, "lon": 0}, {"lat": "x", "lon": 0}, {}):
+            r, e = tm.validate_fuel_stations_request(bad)
+            self.assertIsNone(r)
+            self.assertIsInstance(e, str)
+
+    def test_extract_deduplicate_brand_snap_and_price(self):
+        base_lat, base_lon = 48.1351, 11.5820
+        md = FakeMapData()
+        key = mapcells.cell_of(base_lat, base_lon)
+
+        # Station A: Shell in places + unnamed amenity=fuel in infrastructure 15 m away -> deduplicated to 1 ("Shell")
+        s1_lat, s1_lon = tm.offset_latlon(base_lat, base_lon, 220.0, 90.0)
+        s1_dup_lat, s1_dup_lon = tm.offset_latlon(s1_lat, s1_lon, 15.0, 0.0)
+        # Station B: Aral via brand_wikidata 650 m north
+        s2_lat, s2_lon = tm.offset_latlon(base_lat, base_lon, 650.0, 0.0)
+        # Station C: unnamed infra fuel 900 m south -> fallback "Local Fuel Station"
+        s3_lat, s3_lon = tm.offset_latlon(base_lat, base_lon, 900.0, 180.0)
+        # Station D: closed station -> excluded
+        s4_lat, s4_lon = tm.offset_latlon(base_lat, base_lon, 150.0, 270.0)
+        # Station E: beyond 1500 m radius -> excluded
+        s5_lat, s5_lon = tm.offset_latlon(base_lat, base_lon, 1800.0, 45.0)
+
+        places_items = [
+            {
+                "id": "pl_shell",
+                "attrs": {"name": "Shell Station", "basic_category": "gas_station", "brand_name": "shell", "operating_status": "open", "cx": s1_lon, "cy": s1_lat},
+                "parts": [[np.array([[s1_lon, s1_lat]], np.float64)]],
+            },
+            {
+                "id": "pl_aral",
+                "attrs": {"name": "", "basic_category": "fueling_station", "brand_wikidata": "Q565734", "operating_status": "open", "cx": s2_lon, "cy": s2_lat},
+                "parts": [[np.array([[s2_lon, s2_lat]], np.float64)]],
+            },
+            {
+                "id": "pl_closed",
+                "attrs": {"name": "Esso Closed", "basic_category": "gas_station", "operating_status": "permanently_closed", "cx": s4_lon, "cy": s4_lat},
+                "parts": [[np.array([[s4_lon, s4_lat]], np.float64)]],
+            },
+            {
+                "id": "pl_far",
+                "attrs": {"name": "OMV Far", "basic_category": "gas_station", "operating_status": "open", "cx": s5_lon, "cy": s5_lat},
+                "parts": [[np.array([[s5_lon, s5_lat]], np.float64)]],
+            },
+        ]
+        infra_items = [
+            {
+                "id": "in_shell_dup",
+                "attrs": {"name": "", "class": "fuel", "tags": {"amenity": "fuel"}, "cx": s1_dup_lon, "cy": s1_dup_lat},
+                "parts": [[np.array([[s1_dup_lon, s1_dup_lat]], np.float64)]],
+            },
+            {
+                "id": "in_local",
+                "attrs": {"name": "", "class": "fuel", "tags": {"amenity": "fuel"}, "cx": s3_lon, "cy": s3_lat},
+                "parts": [[np.array([[s3_lon, s3_lat]], np.float64)]],
+            },
+        ]
+        roads_items = [
+            _make_road("rd_s1", s1_lat - 0.0004, s1_lon, s1_lat + 0.0004, s1_lon, cls="service", subclass="driveway", name="Shell Forecourt"),
+            _make_road("rd_s2", s2_lat, s2_lon - 0.0005, s2_lat, s2_lon + 0.0005, cls="secondary", name="Leopoldstraße"),
+            _make_road("rd_s3", s3_lat - 0.0005, s3_lon, s3_lat + 0.0005, s3_lon, cls="tertiary", name="Ringstraße"),
+        ]
+        # Place into respective cells
+        for layer, items in (("places", places_items), ("infrastructure", infra_items), ("roads", roads_items)):
+            buckets = {}
+            for it in items:
+                if "cx" in it["attrs"]:
+                    ck = mapcells.cell_of(it["attrs"]["cy"], it["attrs"]["cx"])
+                else:
+                    p0 = it["parts"][0][0][0]
+                    ck = mapcells.cell_of(float(p0[1]), float(p0[0]))
+                buckets.setdefault(ck, []).append(it)
+            for ck, b_items in buckets.items():
+                md.put(ck, layer, FakeFeatures(b_items))
+
+        st1 = tm.find_nearby_fuel_stations(md, base_lat, base_lon, radius_m=1500.0)
+        st2 = tm.find_nearby_fuel_stations(md, base_lat, base_lon, radius_m=1500.0)
+        self.assertEqual(st1, st2, "fuel station query must be deterministic")
+        self.assertEqual(len(st1), 3, f"expected 3 deduplicated open stations in radius, got {st1}")
+
+        # Sorted by distM ascending: Shell (~220m), Aral (~650m), Local Fuel Station (~900m)
+        self.assertEqual(st1[0]["brand"], "Shell")
+        self.assertIn("Shell", st1[0]["name"])
+        self.assertEqual(st1[1]["brand"], "Aral")
+        self.assertEqual(st1[1]["name"], "Aral")
+        self.assertEqual(st1[2]["name"], "Local Fuel Station")
+
+        for s in st1:
+            self.assertGreaterEqual(s["pricePerLiter"], 1.72)
+            self.assertLessEqual(s["pricePerLiter"], 1.89)
+            self.assertTrue(0.0 <= s["bearingDeg"] < 360.0)
+            self.assertIsInstance(s["id"], str)
+            self.assertIsInstance(s["locality"], str)
+
+
 if __name__ == "__main__":
     unittest.main()

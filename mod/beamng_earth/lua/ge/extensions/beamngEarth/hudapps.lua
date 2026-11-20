@@ -101,7 +101,18 @@ local function transportKey(tr)
   trKeyBuf[48] = tostring(tr.metric or '')
   trKeyBuf[49] = tostring(tr.totalEarned or '')
   trKeyBuf[50] = tostring(tr.driverRank or '')
-  return table.concat(trKeyBuf, '\2', 1, 50)
+  trKeyBuf[51] = tostring(tr.fuelPct or '')
+  trKeyBuf[52] = tostring(tr.lowFuel or '')
+  local nfs = tr.nearestFuelStation
+  trKeyBuf[53] = nfs and tostring(nfs.name or '') or ''
+  trKeyBuf[54] = nfs and tostring(nfs.distM or '') or ''
+  local rf = tr.refueling
+  trKeyBuf[55] = rf and tostring(rf.active or '') or ''
+  trKeyBuf[56] = rf and tostring(rf.done or '') or ''
+  trKeyBuf[57] = rf and tostring(math.floor((rf.litersAdded or 0) * 10 + 0.5)) or ''
+  trKeyBuf[58] = rf and tostring(math.floor((rf.costTotal or 0) * 100 + 0.5)) or ''
+  trKeyBuf[59] = rf and tostring(rf.overdraftHit or '') or ''
+  return table.concat(trKeyBuf, '\2', 1, 59)
 end
 
 local function key(p)

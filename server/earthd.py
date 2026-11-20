@@ -8404,6 +8404,31 @@ class Connection:
                    "error": f"{type(e).__name__}: {e}"[:160]}
         self.send({"type": "transport_job_result", "id": rid, **res})
 
+    async def fuel_stations_request(self, msg):
+        """Nearby OSM/Overture fuel station query {"id", "lat", "lon", "radiusM"?} ->
+        fuel_stations_result {"id", "ok", "stations", "error"?} (transport_modes.py)."""
+        rid = msg.get("id")
+        req, why = transportmod.validate_fuel_stations_request(msg)
+        if req is None:
+            self.send({"type": "fuel_stations_result", "id": rid, "ok": False, "stations": [], "error": why})
+            return
+        md = getattr(self.s, "mapdata", None)
+        pool = getattr(self.s, "transport_pool", None) or getattr(self.s, "ui_pool", None)
+        loop = asyncio.get_running_loop()
+        try:
+            stations = await loop.run_in_executor(
+                pool,
+                lambda: transportmod.find_nearby_fuel_stations(
+                    md, req["lat"], req["lon"], radius_m=req["radiusM"],
+                ),
+            )
+            out = {"type": "fuel_stations_result", "id": rid, "ok": True, "stations": stations}
+        except Exception as e:
+            log.warning("fuel stations: %s: %s", type(e).__name__, e)
+            out = {"type": "fuel_stations_result", "id": rid, "ok": False, "stations": [],
+                   "error": f"{type(e).__name__}: {e}"[:160]}
+        self.send(out)
+
     async def _where_place_later(self, out, lat, lon, seq):
         """where()'s place parts for a region not on disk yet: fetched as a background job (netfetch "background":
         never ahead of the world's own downloads), asked again every WHERE_PLACE_RETRY_S while Overture's hosts are
@@ -9063,6 +9088,8 @@ class Connection:
             self.spawn(self.places(msg))
         elif kind == "transport_job":           # Transport Modes (Taxi / Bus / Logistics) job generation
             self.spawn(self.transport_job(msg))
+        elif kind == "fuel_stations_request":   # Transport Modes nearby OSM/Overture fuel stations
+            self.spawn(self.fuel_stations_request(msg))
         elif kind == "map_focus":               # the 3D map flying: where the view will end (map3d.flyHint)
             self.on_map_focus(msg)
         elif kind == "random_place":            # the level select's "Random location" (randomplace.py)

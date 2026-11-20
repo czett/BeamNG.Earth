@@ -49,6 +49,21 @@ T.check(H.update(11, sumGet) and sent[#sent].p.transport.totalEarned == 24.50 an
   'summary hud forwards totalEarned and driverRank')
 T.check(H.update(11.3, sumGet) and sent[#sent].p.transport.totalEarned == 31.00 and sent[#sent].p.transport.driverRank == 'Local Courier',
   'summary hud re-emits when totalEarned/driverRank changes')
+local fuelStep = 0
+local fuelGet = function()
+  fuelStep = fuelStep + 1
+  return {
+    status = '', credits = '', banner = { text = '', level = 'info', visible = false },
+    transport = {
+      state = 'refueling', fuelPct = fuelStep == 1 and 40 or 58, lowFuel = false,
+      refueling = { active = true, done = false, stationName = 'Shell', litersAdded = fuelStep == 1 and 10.0 or 18.5, costTotal = fuelStep == 1 and 18.00 or 33.30 },
+    },
+  }
+end
+T.check(H.update(12, fuelGet) and sent[#sent].p.transport.state == 'refueling' and sent[#sent].p.transport.fuelPct == 40,
+  'refueling hud forwards fuelPct and receipt')
+T.check(H.update(12.3, fuelGet) and sent[#sent].p.transport.fuelPct == 58 and sent[#sent].p.transport.refueling.litersAdded == 18.5,
+  'refueling hud re-emits when fuelPct/litersAdded changes')
 H.setMounted('transport', false)
 H.setMounted('status', false); H.setMounted('banner', false)
 T.check(not H.any() and not H.mounted('status'), 'all apps gone')

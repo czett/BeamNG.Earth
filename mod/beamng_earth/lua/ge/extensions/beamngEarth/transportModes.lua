@@ -119,6 +119,24 @@ M.PROP_EST_MASS_KG = {
 }
 M.MAX_CARGO_PROPS = 8
 
+-- Interactive OSM Fuel Stations & Career Refueling Economy
+M.FUEL_QUERY_INTERVAL_S = 6.0
+M.FUEL_QUERY_MOVE_M = 400.0
+M.FUEL_QUERY_RADIUS_M = 1500.0
+M.FUEL_PROBE_INTERVAL_S = 1.5
+M.FUEL_DRAW_RADIUS_M = 140.0
+M.FUEL_HIDE_NEAR_STOP_M = 25.0
+M.FUEL_STOP_SPEED_MPS = 0.5
+M.FUEL_STOP_HOLD_S = 1.2
+M.FUEL_RATE_RATIO_PER_S = 0.18
+M.FUEL_RATE_LITERS_PER_S = 1.8
+M.FUEL_OVERDRAFT_LIMIT = -50.0
+M.LOW_FUEL_PCT = 25
+M.FUEL_RECEIPT_SHOW_S = 4.5
+M.FUEL_BAY_SPEC = { width = 3.3, length = 7.2, halfW = 1.65, halfL = 3.60, latTol = 3.2, longTol = 4.5 }
+M.FUEL_BAY_IDLE_CYAN = { 0.22, 0.74, 0.96, 0.48 }
+M.FUEL_BAY_ACTIVE_CYAN = { 0.18, 0.88, 1.00, 0.68 }
+
 -- Injectable dependencies for pure luajit unit tests
 M.core = function() return rawget(_G, 'beamngEarth_core') end
 M.gps = function() return require('beamngEarth/gps') end
@@ -209,6 +227,22 @@ M.VEHICLE_MATCH_CACHE_S = 0.5
 
 local scratchP0, scratchP1, scratchP2, scratchP3, scratchCol = nil, nil, nil, nil, nil
 local legInfoScratch = {}
+local fuel = {
+  stations = {},
+  reqId = 0,
+  lastQueryAt = -math.huge,
+  lastQueryLat = nil,
+  lastQueryLon = nil,
+  pendingRoute = false,
+  lastProbeAt = -math.huge,
+  vehId = nil,
+  ratio = nil,
+  capacityL = 55.0,
+  volumeL = nil,
+  hasTank = false,
+  refuel = nil,         -- { stationId, stationName, pricePerLiter, holdS, active, done, doneAt, litersAdded, costTotal, overdraftHit, lastCmdAt, lastSaveAt }
+  routedToFuel = false,
+}
 
 local function hypot(x, y) return math.sqrt(x * x + y * y) end
 function M.isFinite(n)
@@ -570,7 +604,7 @@ end
 local function sanitizeCareerStats(raw)
   local c = defaultCareerStats()
   if type(raw) ~= 'table' then return c end
-  c.totalEarnings = math.max(0, round2(raw.totalEarnings))
+  c.totalEarnings = math.max(M.FUEL_OVERDRAFT_LIMIT, round2(raw.totalEarnings))
   c.totalDistanceKm = math.max(0, round2(raw.totalDistanceKm))
   c.completedJobs = math.max(0, math.floor(tonumber(raw.completedJobs) or 0))
   c.scoreSum = math.max(0, math.floor((tonumber(raw.scoreSum) or 0) + 0.5))
@@ -1303,6 +1337,212 @@ obj:queueGameEngineLua('if beamngEarth_transportModes and beamngEarth_transportM
 ]]
 M.PROBE_VE = PROBE_VE
 
+-- Vehicle Lua snippet: read live liquid fuel ratio & tank capacity via energyStorage (with electrics fallback).
+local FUEL_READ_VE = [[
+local ratio, capL, volL, hasTank = -1, 0, 0, false
+if energyStorage and energyStorage.getStorages then
+  local ok, storages = pcall(energyStorage.getStorages)
+  if ok and type(storages) == 'table' then
+    for _, s in pairs(storages) do
+      if type(s) == 'table' then
+        local et = tostring(s.energyType or ''):lower()
+        if et == 'gasoline' or et == 'diesel' or et == 'kerosine' then
+          local c = tonumber(s.capacity) or 0
+          local v = tonumber(s.remainingVolume)
+          local r = tonumber(s.remainingRatio)
+          if c > 0 then
+            capL = capL + c
+            volL = volL + (v or (r and (r * c) or 0))
+            hasTank = true
+          end
+        end
+      end
+    end
+  end
+end
+if hasTank and capL > 0 then
+  ratio = math.max(0, math.min(1, volL / capL))
+elseif electrics and electrics.values and type(electrics.values.fuel) == 'number' then
+  ratio = math.max(0, math.min(1, electrics.values.fuel))
+  capL = tonumber(electrics.values.fuelCapacity) or 55.0
+  volL = tonumber(electrics.values.fuelVolume) or (ratio * capL)
+  hasTank = true
+end
+local payload = string.format('{ratio=%.5f,capacityL=%.2f,volumeL=%.2f,hasTank=%s}', ratio, capL, volL, tostring(hasTank))
+obj:queueGameEngineLua('if beamngEarth_transportModes and beamngEarth_transportModes._onFuelProbe then beamngEarth_transportModes._onFuelProbe(' .. obj:getID() .. ',' .. payload .. ') end')
+]]
+M.FUEL_READ_VE = FUEL_READ_VE
+
+-- Pure: Vehicle Lua command to set liquid energyStorage fuel ratio smoothly.
+function M.buildRefuelVeScript(targetRatio)
+  local r = math.max(0.0, math.min(1.0, tonumber(targetRatio) or 0.0))
+  return string.format([[
+local targetRatio = %.5f
+local applied = false
+if energyStorage and energyStorage.getStorages then
+  local ok, storages = pcall(energyStorage.getStorages)
+  if ok and type(storages) == 'table' then
+    for _, s in pairs(storages) do
+      if type(s) == 'table' then
+        local et = tostring(s.energyType or ''):lower()
+        if et == 'gasoline' or et == 'diesel' or et == 'kerosine' then
+          if type(s.setRemainingRatio) == 'function' then
+            pcall(s.setRemainingRatio, s, targetRatio)
+            applied = true
+          elseif type(s.setRemainingVolume) == 'function' and tonumber(s.capacity) then
+            pcall(s.setRemainingVolume, s, tonumber(s.capacity) * targetRatio)
+            applied = true
+          end
+        end
+      end
+    end
+  end
+end
+if not applied and electrics and electrics.values then
+  electrics.values.fuel = targetRatio
+end]], r)
+end
+
+-- Pure: true when nearby fuel stations should be re-queried (>= 6 s or > 400 m movement).
+function M.shouldQueryFuelStations(lastAt, lastLat, lastLon, now, lat, lon)
+  if not (isFinite(lat) and isFinite(lon)) then return false end
+  if not lastAt or not lastLat or not lastLon then return true end
+  if (now - lastAt) >= M.FUEL_QUERY_INTERVAL_S then return true end
+  return M.haversineM(lastLat, lastLon, lat, lon) > M.FUEL_QUERY_MOVE_M
+end
+
+-- Pure: compass bearing (0 = N, 90 = E) from (lat1, lon1) to (lat2, lon2).
+function M.bearingDeg(lat1, lon1, lat2, lon2)
+  local k = math.max(0.05, math.cos(math.rad((lat1 + lat2) * 0.5)))
+  local dx = (lon2 - lon1) * 111320.0 * k
+  local dy = (lat2 - lat1) * 111320.0
+  if math.abs(dx) < 1e-9 and math.abs(dy) < 1e-9 then return 0 end
+  return math.floor(((math.deg(math.atan2(dx, dy)) + 360) % 360) * 10 + 0.5) / 10
+end
+
+local CARDINALS = { 'N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW' }
+function M.cardinalOf(deg)
+  local idx = (math.floor(((tonumber(deg) or 0) % 360) / 45 + 0.5) % 8) + 1
+  return CARDINALS[idx] or 'N'
+end
+
+-- Pure: find nearest fuel station to (lat, lon) with live distM & compass bearingDeg.
+function M.nearestFuelStation(stations, lat, lon)
+  if type(stations) ~= 'table' or #stations == 0 then return nil end
+  local hasPos = isFinite(lat) and isFinite(lon)
+  local best, bestD = nil, math.huge
+  for i = 1, #stations do
+    local s = stations[i]
+    if s and isFinite(s.lat) and isFinite(s.lon) then
+      local d = hasPos and M.haversineM(lat, lon, s.lat, s.lon) or (tonumber(s.distM) or math.huge)
+      if d < bestD then
+        bestD = d
+        best = s
+      end
+    end
+  end
+  if not best then return nil end
+  local brg = hasPos and M.bearingDeg(lat, lon, best.lat, best.lon) or (tonumber(best.bearingDeg) or 0)
+  return {
+    id = best.id,
+    name = best.name or 'Local Fuel Station',
+    brand = best.brand or '',
+    lat = best.lat,
+    lon = best.lon,
+    distM = math.floor(bestD + 0.5),
+    bearingDeg = brg,
+    cardinal = M.cardinalOf(brg),
+    pricePerLiter = tonumber(best.pricePerLiter) or 1.79,
+    locality = best.locality or '',
+  }
+end
+
+-- Pure: advance pump-bay hold & smooth refueling + career overdraft protection.
+-- Returns state, deltaLiters, deltaCost, newRatio, event ('idle'|'holding'|'refueling'|'full'|'overdraft'|'stopped').
+function M.stepFuelRefuel(state, inPumpBay, speed, fuelRatio, tankCapL, pricePerLiter, careerEarnings, dtSim, paused)
+  state = state or { holdS = 0, active = false, done = false, litersAdded = 0, costTotal = 0, overdraftHit = false }
+  local ratio = math.max(0.0, math.min(1.0, tonumber(fuelRatio) or 0.0))
+  local cap = math.max(10.0, tonumber(tankCapL) or 55.0)
+  local price = math.max(0.5, tonumber(pricePerLiter) or 1.79)
+  local earn = tonumber(careerEarnings) or 0.0
+
+  if paused or not dtSim or dtSim <= 0 then
+    return state, 0, 0, ratio, state.active and 'refueling' or (state.holdS > 0 and 'holding' or 'idle')
+  end
+
+  if not inPumpBay or (tonumber(speed) or 0) >= M.FUEL_STOP_SPEED_MPS then
+    local wasActive = state.active
+    state.holdS = 0
+    state.active = false
+    if wasActive then
+      state.done = true
+      return state, 0, 0, ratio, 'stopped'
+    end
+    return state, 0, 0, ratio, 'idle'
+  end
+
+  if ratio >= 0.995 then
+    local wasActive = state.active
+    state.holdS = 0
+    state.active = false
+    if wasActive then
+      state.done = true
+      return state, 0, 0, 1.0, 'full'
+    end
+    return state, 0, 0, ratio, 'idle'
+  end
+
+  if not state.active then
+    state.holdS = (state.holdS or 0) + dtSim
+    if state.holdS < M.FUEL_STOP_HOLD_S then
+      return state, 0, 0, ratio, 'holding'
+    end
+    state.active = true
+    state.done = false
+    state.overdraftHit = false
+  end
+
+  local avail = earn - M.FUEL_OVERDRAFT_LIMIT
+  if avail <= 1e-4 then
+    state.active = false
+    state.done = true
+    state.overdraftHit = true
+    return state, 0, 0, ratio, 'overdraft'
+  end
+
+  local dRatio = math.min(1.0 - ratio, M.FUEL_RATE_RATIO_PER_S * dtSim)
+  local dLiters = math.max(dRatio * cap, math.min((1.0 - ratio) * cap, M.FUEL_RATE_LITERS_PER_S * dtSim))
+  -- Keep ratio and liters synchronized to tank capacity
+  dRatio = math.min(1.0 - ratio, dLiters / cap)
+  dLiters = dRatio * cap
+  local dCost = dLiters * price
+  local hitOverdraft = false
+  if dCost > avail then
+    local scale = avail / dCost
+    dLiters = dLiters * scale
+    dRatio = dRatio * scale
+    dCost = avail
+    hitOverdraft = true
+  end
+
+  local newRatio = math.min(1.0, ratio + dRatio)
+  state.litersAdded = (state.litersAdded or 0) + dLiters
+  state.costTotal = (state.costTotal or 0) + dCost
+
+  if hitOverdraft then
+    state.active = false
+    state.done = true
+    state.overdraftHit = true
+    return state, dLiters, dCost, newRatio, 'overdraft'
+  end
+  if newRatio >= 0.999 then
+    state.active = false
+    state.done = true
+    return state, dLiters, dCost, 1.0, 'full'
+  end
+  return state, dLiters, dCost, newRatio, 'refueling'
+end
+
 local function clearOwnedGps()
   if not gpsTarget then return end
   local ok, g = pcall(M.gps)
@@ -1914,6 +2154,261 @@ function M._onVehicleProbe(vehId, info)
   vehicleMatchCache = nil
 end
 
+function M._onFuelProbe(vehId, info)
+  if type(info) ~= 'table' then return end
+  -- Do not overwrite smooth GE ramp while actively refueling
+  if fuel.refuel and fuel.refuel.active then return end
+  local hasTank = info.hasTank == true
+  local ratio = tonumber(info.ratio)
+  fuel.vehId = tonumber(vehId) or fuel.vehId
+  fuel.hasTank = hasTank and ratio ~= nil and ratio >= 0
+  if fuel.hasTank then
+    fuel.ratio = math.max(0.0, math.min(1.0, ratio))
+    local cap = tonumber(info.capacityL)
+    if cap and cap >= 5.0 then fuel.capacityL = cap end
+    fuel.volumeL = tonumber(info.volumeL) or (fuel.ratio * fuel.capacityL)
+  else
+    fuel.ratio = nil
+    fuel.volumeL = nil
+  end
+end
+
+function M.onFuelStationsResult(msg)
+  if type(msg) ~= 'table' or msg.ok ~= true or type(msg.stations) ~= 'table' then return end
+  local list = {}
+  for i = 1, #msg.stations do
+    local s = msg.stations[i]
+    if type(s) == 'table' and isFinite(tonumber(s.lat)) and isFinite(tonumber(s.lon)) then
+      list[#list + 1] = {
+        id = tostring(s.id or ('fuel_' .. i)),
+        name = tostring(s.name or 'Local Fuel Station'),
+        brand = tostring(s.brand or ''),
+        lat = tonumber(s.lat),
+        lon = tonumber(s.lon),
+        bearingDeg = tonumber(s.bearingDeg) or 0,
+        distM = tonumber(s.distM) or 0,
+        road = tostring(s.road or ''),
+        locality = tostring(s.locality or ''),
+        pricePerLiter = tonumber(s.pricePerLiter) or 1.79,
+      }
+    end
+  end
+  fuel.stations = list
+  if fuel.pendingRoute then
+    fuel.pendingRoute = false
+    if #list > 0 then
+      M.routeToNearestFuel()
+    else
+      M.say('No fuel stations found nearby', 5)
+    end
+  end
+end
+
+function M.routeToNearestFuel()
+  local _, pl = playerPose()
+  local lat = pl and pl.lat or nil
+  local lon = pl and pl.lon or nil
+  local st = M.nearestFuelStation(fuel.stations, lat, lon)
+  if st then
+    local ok, g = pcall(M.gps)
+    if ok and g and g.setDestination then
+      local label = string.format('Fuel: %s ($%.2f/L)', st.name, st.pricePerLiter)
+      pcall(g.setDestination, st.lat, st.lon, label)
+      fuel.routedToFuel = true
+    end
+    M.say(string.format('Routing to %s (%d m %s · $%.2f/L)', st.name, st.distM or 0, st.cardinal or 'N', st.pricePerLiter), 6)
+    return { ok = true, station = st }
+  end
+  local c = M.core()
+  if c and c.requestFuelStations and isFinite(lat) and isFinite(lon) then
+    fuel.reqId = fuel.reqId + 1
+    fuel.pendingRoute = true
+    if c.requestFuelStations(fuel.reqId, lat, lon, 4500.0) then
+      fuel.lastQueryAt = M.now()
+      fuel.lastQueryLat = lat
+      fuel.lastQueryLon = lon
+      M.say('Searching for nearest fuel station...', 4)
+      return { ok = true, searching = true }
+    end
+    fuel.pendingRoute = false
+  end
+  local fnd = rawget(_G, 'beamngEarth_finder')
+  if fnd and fnd.nearest then
+    pcall(fnd.nearest)
+    return { ok = true, finder = true }
+  end
+  return { ok = false, error = 'No fuel stations found nearby' }
+end
+
+local function fuelSnapshot(pl)
+  local pct = (fuel.hasTank and fuel.ratio ~= nil) and math.floor(fuel.ratio * 100 + 0.5) or nil
+  local low = pct ~= nil and pct < M.LOW_FUEL_PCT
+  local nfs = M.nearestFuelStation(fuel.stations, pl and pl.lat, pl and pl.lon)
+  local rf = nil
+  local r = fuel.refuel
+  if r and (r.active or r.done or (r.holdS or 0) > 0) then
+    rf = {
+      active = r.active == true,
+      done = r.done == true,
+      holdS = round2(r.holdS or 0),
+      holdTargetS = M.FUEL_STOP_HOLD_S,
+      stationName = r.stationName or 'Local Fuel Station',
+      pricePerLiter = r.pricePerLiter or 1.79,
+      litersAdded = math.floor((r.litersAdded or 0) * 10 + 0.5) / 10,
+      costTotal = round2(r.costTotal or 0),
+      fuelPct = pct,
+      overdraftHit = r.overdraftHit == true,
+    }
+  end
+  return pct, low, nfs, rf
+end
+
+local function tickFuel(dtSim, anchor, player, paused, rebasing, now)
+  if rebasing or not anchor or not player then return end
+
+  -- Expire completed receipt banner after FUEL_RECEIPT_SHOW_S
+  if fuel.refuel and fuel.refuel.done and fuel.refuel.doneAt and (now - fuel.refuel.doneAt) >= M.FUEL_RECEIPT_SHOW_S then
+    fuel.refuel = nil
+  end
+
+  -- 1. Periodic nearby fuel station query (every 6 s or > 400 m movement)
+  local c = M.core()
+  if c and c.requestFuelStations and isFinite(player.lat) and isFinite(player.lon) then
+    if M.shouldQueryFuelStations(fuel.lastQueryAt, fuel.lastQueryLat, fuel.lastQueryLon, now, player.lat, player.lon) then
+      fuel.reqId = fuel.reqId + 1
+      if c.requestFuelStations(fuel.reqId, player.lat, player.lon, M.FUEL_QUERY_RADIUS_M) then
+        fuel.lastQueryAt = now
+        fuel.lastQueryLat = player.lat
+        fuel.lastQueryLon = player.lon
+      end
+    end
+  end
+
+  -- 2. Periodic live vehicle fuel probe (paused while actively refueling)
+  local pv = M.playerVeh()
+  if pv and pv.queueLuaCommand and not (fuel.refuel and fuel.refuel.active) then
+    if (now - fuel.lastProbeAt) >= M.FUEL_PROBE_INTERVAL_S then
+      fuel.lastProbeAt = now
+      pcall(pv.queueLuaCommand, pv, M.FUEL_READ_VE)
+    end
+  end
+
+  -- 3. Pump bay proximity & physical refueling
+  if #fuel.stations == 0 or not fuel.hasTank or fuel.ratio == nil then
+    if fuel.refuel and fuel.refuel.active then
+      fuel.refuel.active = false
+      fuel.refuel.done = true
+      fuel.refuel.doneAt = now
+      M.saveCareerStats()
+    end
+    return
+  end
+
+  local inBayStation = nil
+  local spec = M.FUEL_BAY_SPEC
+  for i = 1, #fuel.stations do
+    local s = fuel.stations[i]
+    if s._anchor ~= anchor then
+      local sx, sy = anchor:geodeticToEnu(s.lat, s.lon, 0)
+      local nx, ny = 0, 1
+      if anchor.northAt then
+        local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
+        if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
+      end
+      local fx, fy, rx, ry = M.bayFrame(nx, ny, s.bearingDeg)
+      s._anchor, s._sx, s._sy, s._fx, s._fy, s._rx, s._ry = anchor, sx, sy, fx, fy, rx, ry
+      s._gz = nil
+      s._gzAt = -math.huge
+      s._quads = nil
+    end
+    local distXY = hypot(s._sx - player.x, s._sy - player.y)
+    s._distXY = distXY
+    if distXY <= 22.0 then
+      if s._gz == nil or (now - (s._gzAt or -math.huge)) >= 1.5 then
+        local gz = M.castRay(s._sx, s._sy, (player.z or 0) + 40, 120)
+        if gz then
+          s._gz = gz
+          s._gzAt = now
+        end
+      end
+      local dz = s._gz and ((player.z or 0) - s._gz) or 0
+      local longOff, latOff = M.bayOffsets(player.x, player.y, s._sx, s._sy, s._fx, s._fy, s._rx, s._ry)
+      if math.abs(dz) <= M.HEIGHT_TOL_M and math.abs(latOff) <= spec.latTol and math.abs(longOff) <= spec.longTol then
+        inBayStation = s
+        break
+      end
+    end
+  end
+
+  if not inBayStation and not (fuel.refuel and (fuel.refuel.active or (fuel.refuel.holdS or 0) > 0)) then
+    return
+  end
+
+  if inBayStation then
+    if not fuel.refuel or fuel.refuel.done or fuel.refuel.stationId ~= inBayStation.id then
+      fuel.refuel = {
+        stationId = inBayStation.id,
+        stationName = inBayStation.name or 'Local Fuel Station',
+        pricePerLiter = inBayStation.pricePerLiter or 1.79,
+        holdS = 0,
+        active = false,
+        done = false,
+        doneAt = nil,
+        litersAdded = 0,
+        costTotal = 0,
+        overdraftHit = false,
+        lastCmdAt = -math.huge,
+        lastSaveAt = now,
+      }
+    end
+  end
+
+  local r = fuel.refuel
+  if not r then return end
+  local career = ensureCareerLoaded()
+  local _, dLiters, dCost, newRatio, ev = M.stepFuelRefuel(
+    r, inBayStation ~= nil, player.speed or 0, fuel.ratio, fuel.capacityL,
+    r.pricePerLiter, career.totalEarnings, dtSim, paused
+  )
+  if dLiters > 0 then
+    fuel.ratio = newRatio
+    fuel.volumeL = newRatio * (fuel.capacityL or 55.0)
+    career.totalEarnings = math.max(M.FUEL_OVERDRAFT_LIMIT, round2(career.totalEarnings - dCost))
+    careerStatsCache = nil
+    if pv and pv.queueLuaCommand and ((now - (r.lastCmdAt or -math.huge)) >= 0.15 or ev == 'full' or ev == 'overdraft') then
+      r.lastCmdAt = now
+      pcall(pv.queueLuaCommand, pv, M.buildRefuelVeScript(newRatio))
+    end
+    if (now - (r.lastSaveAt or -math.huge)) >= 1.0 then
+      r.lastSaveAt = now
+      M.saveCareerStats()
+    end
+  end
+  if ev == 'full' or ev == 'overdraft' or ev == 'stopped' then
+    if pv and pv.queueLuaCommand and dLiters > 0 then
+      pcall(pv.queueLuaCommand, pv, M.buildRefuelVeScript(newRatio))
+    end
+    r.done = true
+    r.doneAt = now
+    M.saveCareerStats()
+    fuel.lastProbeAt = -math.huge
+    if r.litersAdded and r.litersAdded > 0.05 then
+      if ev == 'overdraft' then
+        M.say(string.format('Overdraft limit (-$50) at %s · +%.1f L · -$%.2f', r.stationName, r.litersAdded, r.costTotal), 6)
+      else
+        M.say(string.format('Refueled at %s · +%.1f L · -$%.2f', r.stationName, r.litersAdded, r.costTotal), 6)
+      end
+    end
+    -- If player detoured to fuel during an active job, restore GPS back to the active stop
+    if fuel.routedToFuel and activeJob and activeJob.stops and activeJob.stops[activeJob.stopIndex] then
+      fuel.routedToFuel = false
+      syncGpsToStop(activeJob.stops[activeJob.stopIndex], activeJob.stopIndex, #activeJob.stops)
+    end
+  elseif ev == 'idle' and not r.done then
+    fuel.refuel = nil
+  end
+end
+
 local function dispatchPendingProbe(pr)
   local ge = pr.geInfo or {}
   local prb = pr.vehId and vehicleProbes[pr.vehId] or nil
@@ -2468,6 +2963,16 @@ end
 
 function M.onVehicleSwitched(oldId, newId, player)
   vehicleMatchCache = nil
+  fuel.vehId = newId
+  fuel.ratio = nil
+  fuel.volumeL = nil
+  fuel.hasTank = false
+  fuel.lastProbeAt = -math.huge
+  if fuel.refuel and fuel.refuel.active then
+    fuel.refuel.active = false
+    fuel.refuel.done = true
+    M.saveCareerStats()
+  end
   if activeJob then
     activeJob.trackedVehId = newId
     activeJob.prevDamage = M.readDamage()
@@ -2476,6 +2981,10 @@ function M.onVehicleSwitched(oldId, newId, player)
 end
 
 function M.onRebased()
+  for i = 1, #fuel.stations do
+    local s = fuel.stations[i]
+    s._anchor, s._gz, s._quads = nil, nil, nil
+  end
   if not activeJob then return end
   activeJob.lastTrack = nil
   if activeJob.lastSample then activeJob.lastSample.valid = false end
@@ -2498,6 +3007,17 @@ function M.reset()
   summary = nil
   lastError = nil
   vehicleMatchCache = nil
+  fuel.stations = {}
+  fuel.lastQueryAt = -math.huge
+  fuel.lastQueryLat = nil
+  fuel.lastQueryLon = nil
+  fuel.pendingRoute = false
+  fuel.lastProbeAt = -math.huge
+  fuel.ratio = nil
+  fuel.volumeL = nil
+  fuel.hasTank = false
+  fuel.refuel = nil
+  fuel.routedToFuel = false
   clearOwnedGps()
 end
 
@@ -2583,8 +3103,14 @@ local function updateMetrics(j, dtSim, player)
 end
 
 function M.update(dtReal, dtSim, anchor, player, paused, rebasing)
-  if not activeJob and not pending and not pendingProbe and #despawnQueue == 0 then return end
+  local hasFuelWork = (not rebasing and anchor and player)
+    and (#fuel.stations > 0 or fuel.refuel ~= nil or (isFinite(player.lat) and isFinite(player.lon)))
+  if not hasFuelWork and not activeJob and not pending and not pendingProbe and #despawnQueue == 0 then return end
   local now = M.now()
+  if hasFuelWork then
+    tickFuel(dtSim, anchor, player, paused, rebasing, now)
+  end
+  if not activeJob and not pending and not pendingProbe and #despawnQueue == 0 then return end
   if not rebasing then
     tickDespawnQueue(now)
   end
@@ -2979,84 +3505,19 @@ function M._bayCacheBuilds()
   return activeJob and activeJob._bayCacheBuilds or 0
 end
 
-function M.drawMarker(anchor, player)
-  if not activeJob or not anchor or not player then return end
-  local dd = rawget(_G, 'debugDrawer')
-  if not dd or not ColorF then return end
-  local j = activeJob
-  local stop = j.stops[j.stopIndex]
-  if not stop then return end
-
-  local sx, sy, fx, fy, rx, ry
-  if j.stopEnuIdx == j.stopIndex and j.stopEnuAnchor == anchor then
-    sx, sy, fx, fy, rx, ry = j.stopEnuX, j.stopEnuY, j.stopFx, j.stopFy, j.stopRx, j.stopRy
-  else
-    sx, sy = anchor:geodeticToEnu(stop.lat, stop.lon, 0)
-    local nx, ny = 0, 1
-    if anchor.northAt then
-      local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
-      if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
+-- Pure: build compact, subtle 3D Fuel Pump Bay corner brackets (cyan-tinted, no edge bars).
+function M.buildFuelBayQuads(sx, sy, fx, fy, rx, ry, spec, zFn, col)
+  local all = M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec or M.FUEL_BAY_SPEC, zFn, col or M.FUEL_BAY_IDLE_CYAN)
+  local out = {}
+  for i = 1, #all do
+    if all[i].kind == 'corner_band' then
+      out[#out + 1] = all[i]
     end
-    fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
-    j.stopEnuIdx, j.stopEnuAnchor = j.stopIndex, anchor
-    j.stopEnuX, j.stopEnuY, j.stopFx, j.stopFy, j.stopRx, j.stopRy = sx, sy, fx, fy, rx, ry
   end
+  return out
+end
 
-  local distXY = hypot(sx - player.x, sy - player.y)
-  if distXY > M.DRAW_RADIUS_M then return end
-
-  local spec = M.baySpec(j.mode, j.tier)
-  local zCenter = j.stopZ or player.z or 0
-  local hl, hw = spec.halfL, spec.halfW
-
-  local now = M.now()
-  local dtVis = j.visAt and math.max(0, math.min(0.25, now - j.visAt)) or 0.05
-  j.visAt = now
-  local tgtCol = M.bayFrameColor(j.inBay, j.inFallback, j.dwellMode, (distXY <= 25 and j.trailerState or nil), j.trailerMissing)
-  local curCol = j.visCol
-  if not curCol then
-    local g = M.BAY_IDLE_GREY
-    curCol = { g[1], g[2], g[3], g[4] }
-    j.visCol = curCol
-  end
-  local tBlend = math.min(1, dtVis * 8.0)
-  curCol[1] = lerp(curCol[1], tgtCol[1], tBlend)
-  curCol[2] = lerp(curCol[2], tgtCol[2], tBlend)
-  curCol[3] = lerp(curCol[3], tgtCol[3], tBlend)
-  curCol[4] = lerp(curCol[4], tgtCol[4], tBlend)
-
-  local gridVer = j.bayGridVersion or 0
-  local cache = j._bayCache
-  if not cache
-      or cache.stopIndex ~= j.stopIndex
-      or cache.gridVer ~= gridVer
-      or cache.spec ~= spec
-      or math.abs((cache.zCenter or 0) - zCenter) > 1e-3
-      or math.abs((cache.sx or 0) - sx) > 1e-3
-      or math.abs((cache.sy or 0) - sy) > 1e-3 then
-    local function bayZ(along, across)
-      local u = math.max(0, math.min(1, (along + hl) / (2 * hl)))
-      local v = math.max(0, math.min(1, (across + hw) / (2 * hw)))
-      local z = M.sampleBayGridZ(j.bayGridZ, u, v, zCenter)
-      return math.max(z, zCenter - 0.25)
-    end
-    local quads = M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, bayZ, curCol)
-    cache = {
-      stopIndex = j.stopIndex,
-      gridVer = gridVer,
-      spec = spec,
-      zCenter = zCenter,
-      sx = sx,
-      sy = sy,
-      quads = quads,
-    }
-    j._bayCache = cache
-    j._bayCacheBuilds = (j._bayCacheBuilds or 0) + 1
-  else
-    M.recolorBayQuads(cache.quads, curCol)
-  end
-
-  local quads = cache.quads
+local function emitQuads(dd, quads)
   if not scratchP0 then
     scratchP0 = vec3(0, 0, 0)
     scratchP1 = vec3(0, 0, 0)
@@ -3064,7 +3525,6 @@ function M.drawMarker(anchor, player)
     scratchP3 = vec3(0, 0, 0)
     scratchCol = ColorF(1, 1, 1, 1)
   end
-
   if dd.drawQuadSolid then
     for i = 1, #quads do
       local q = quads[i]
@@ -3095,6 +3555,140 @@ function M.drawMarker(anchor, player)
       dd:drawLineInstance(scratchP0, scratchP1, 3, scratchCol)
     end
   end
+end
+
+local function drawFuelMarkers(dd, anchor, player, hideNearJobStop)
+  if #fuel.stations == 0 or hideNearJobStop then return end
+  local now = M.now()
+  local spec = M.FUEL_BAY_SPEC
+  local activeSid = fuel.refuel and (fuel.refuel.active or (fuel.refuel.holdS or 0) > 0) and fuel.refuel.stationId or nil
+  for i = 1, #fuel.stations do
+    local s = fuel.stations[i]
+    if s._anchor ~= anchor then
+      local sx, sy = anchor:geodeticToEnu(s.lat, s.lon, 0)
+      local nx, ny = 0, 1
+      if anchor.northAt then
+        local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
+        if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
+      end
+      local fx, fy, rx, ry = M.bayFrame(nx, ny, s.bearingDeg)
+      s._anchor, s._sx, s._sy, s._fx, s._fy, s._rx, s._ry = anchor, sx, sy, fx, fy, rx, ry
+      s._gz = nil
+      s._gzAt = -math.huge
+      s._quads = nil
+    end
+    local distXY = hypot(s._sx - player.x, s._sy - player.y)
+    if distXY <= M.FUEL_DRAW_RADIUS_M then
+      if s._gz == nil or (now - (s._gzAt or -math.huge)) >= 1.5 then
+        local gz = M.castRay(s._sx, s._sy, (player.z or 0) + 40, 120)
+        if gz then
+          if s._gz == nil or math.abs(gz - s._gz) > 0.05 then
+            s._quads = nil
+          end
+          s._gz = gz
+          s._gzAt = now
+        end
+      end
+      local zCenter = s._gz or player.z or 0
+      local col = (activeSid == s.id) and M.FUEL_BAY_ACTIVE_CYAN or M.FUEL_BAY_IDLE_CYAN
+      if not s._quads then
+        local function flatZ() return zCenter end
+        s._quads = M.buildFuelBayQuads(s._sx, s._sy, s._fx, s._fy, s._rx, s._ry, spec, flatZ, col)
+      else
+        M.recolorBayQuads(s._quads, col)
+      end
+      emitQuads(dd, s._quads)
+    end
+  end
+end
+
+function M.drawMarker(anchor, player)
+  if not anchor or not player then return end
+  if not activeJob and #fuel.stations == 0 then return end
+  local dd = rawget(_G, 'debugDrawer')
+  if not dd or not ColorF then return end
+
+  local hideFuelNearStop = false
+  if activeJob then
+    local j = activeJob
+    local stop = j.stops[j.stopIndex]
+    if stop then
+      local sx, sy, fx, fy, rx, ry
+      if j.stopEnuIdx == j.stopIndex and j.stopEnuAnchor == anchor then
+        sx, sy, fx, fy, rx, ry = j.stopEnuX, j.stopEnuY, j.stopFx, j.stopFy, j.stopRx, j.stopRy
+      else
+        sx, sy = anchor:geodeticToEnu(stop.lat, stop.lon, 0)
+        local nx, ny = 0, 1
+        if anchor.northAt then
+          local okN, ax, ay = pcall(anchor.northAt, anchor, sx, sy)
+          if okN and tonumber(ax) and tonumber(ay) then nx, ny = ax, ay end
+        end
+        fx, fy, rx, ry = M.bayFrame(nx, ny, stop.bearing)
+        j.stopEnuIdx, j.stopEnuAnchor = j.stopIndex, anchor
+        j.stopEnuX, j.stopEnuY, j.stopFx, j.stopFy, j.stopRx, j.stopRy = sx, sy, fx, fy, rx, ry
+      end
+
+      local distXY = hypot(sx - player.x, sy - player.y)
+      if distXY < M.FUEL_HIDE_NEAR_STOP_M then
+        hideFuelNearStop = true
+      end
+      if distXY <= M.DRAW_RADIUS_M then
+        local spec = M.baySpec(j.mode, j.tier)
+        local zCenter = j.stopZ or player.z or 0
+        local hl, hw = spec.halfL, spec.halfW
+
+        local now = M.now()
+        local dtVis = j.visAt and math.max(0, math.min(0.25, now - j.visAt)) or 0.05
+        j.visAt = now
+        local tgtCol = M.bayFrameColor(j.inBay, j.inFallback, j.dwellMode, (distXY <= 25 and j.trailerState or nil), j.trailerMissing)
+        local curCol = j.visCol
+        if not curCol then
+          local g = M.BAY_IDLE_GREY
+          curCol = { g[1], g[2], g[3], g[4] }
+          j.visCol = curCol
+        end
+        local tBlend = math.min(1, dtVis * 8.0)
+        curCol[1] = lerp(curCol[1], tgtCol[1], tBlend)
+        curCol[2] = lerp(curCol[2], tgtCol[2], tBlend)
+        curCol[3] = lerp(curCol[3], tgtCol[3], tBlend)
+        curCol[4] = lerp(curCol[4], tgtCol[4], tBlend)
+
+        local gridVer = j.bayGridVersion or 0
+        local cache = j._bayCache
+        if not cache
+            or cache.stopIndex ~= j.stopIndex
+            or cache.gridVer ~= gridVer
+            or cache.spec ~= spec
+            or math.abs((cache.zCenter or 0) - zCenter) > 1e-3
+            or math.abs((cache.sx or 0) - sx) > 1e-3
+            or math.abs((cache.sy or 0) - sy) > 1e-3 then
+          local function bayZ(along, across)
+            local u = math.max(0, math.min(1, (along + hl) / (2 * hl)))
+            local v = math.max(0, math.min(1, (across + hw) / (2 * hw)))
+            local z = M.sampleBayGridZ(j.bayGridZ, u, v, zCenter)
+            return math.max(z, zCenter - 0.25)
+          end
+          local quads = M.buildBayQuads(sx, sy, fx, fy, rx, ry, spec, bayZ, curCol)
+          cache = {
+            stopIndex = j.stopIndex,
+            gridVer = gridVer,
+            spec = spec,
+            zCenter = zCenter,
+            sx = sx,
+            sy = sy,
+            quads = quads,
+          }
+          j._bayCache = cache
+          j._bayCacheBuilds = (j._bayCacheBuilds or 0) + 1
+        else
+          M.recolorBayQuads(cache.quads, curCol)
+        end
+        emitQuads(dd, cache.quads)
+      end
+    end
+  end
+
+  drawFuelMarkers(dd, anchor, player, hideFuelNearStop)
 end
 
 -- ImGui fallback HUD only when BeamNGEarthTransport app is not mounted
@@ -3173,7 +3767,23 @@ local function isMetric()
 end
 
 function M.hudPayload()
-  if not activeJob and not summary and not pending and not pendingProbe then return nil end
+  local c = M.core()
+  local st = c and c._state and c._state()
+  local pl = st and st.player or nil
+  local fuelPct, lowFuel, nearestFuel, refuelInfo = fuelSnapshot(pl)
+  if not activeJob and not summary and not pending and not pendingProbe then
+    if refuelInfo then
+      return {
+        state = 'refueling',
+        fuelPct = fuelPct,
+        lowFuel = lowFuel,
+        nearestFuelStation = nearestFuel,
+        refueling = refuelInfo,
+        metric = isMetric(),
+      }
+    end
+    return nil
+  end
   local metric = isMetric()
   if activeJob then
     local stop = activeJob.stops[activeJob.stopIndex]
@@ -3241,6 +3851,10 @@ function M.hudPayload()
       parcelsReturned = activeJob.mode == 'parcel' and (activeJob.parcelsReturned or 0) or nil,
       cargoPropsCount = activeJob.cargoProps and #activeJob.cargoProps or 0,
       collisions = activeJob.collisions,
+      fuelPct = fuelPct,
+      lowFuel = lowFuel,
+      nearestFuelStation = nearestFuel,
+      refueling = refuelInfo,
       metric = metric,
     }
   elseif summary then
@@ -3274,11 +3888,19 @@ function M.hudPayload()
       parcelsReturned = summary.parcelsReturned,
       collisions = summary.collisions,
       damageDelta = summary.damageDelta,
+      fuelPct = fuelPct,
+      lowFuel = lowFuel,
+      nearestFuelStation = nearestFuel,
+      refueling = refuelInfo,
       metric = metric,
     }
   end
   local p = pending or pendingProbe
-  return { state = 'pending', mode = p.mode, tier = p.tier, metric = metric }
+  return {
+    state = 'pending', mode = p.mode, tier = p.tier,
+    fuelPct = fuelPct, lowFuel = lowFuel, nearestFuelStation = nearestFuel, refueling = refuelInfo,
+    metric = metric,
+  }
 end
 
 function M.status()
@@ -3383,6 +4005,10 @@ function M.uiState()
     summary = summary,
     career = M.getCareerStats(),
     vehicleMatch = getCachedVehicleMatch(),
+    fuelPct = select(1, fuelSnapshot(st and st.player)),
+    lowFuel = select(2, fuelSnapshot(st and st.player)),
+    nearestFuelStation = select(3, fuelSnapshot(st and st.player)),
+    refueling = select(4, fuelSnapshot(st and st.player)),
     error = lastError,
     metric = isMetric(),
     ready = st ~= nil and st.inOurLevel == true and st.player ~= nil,

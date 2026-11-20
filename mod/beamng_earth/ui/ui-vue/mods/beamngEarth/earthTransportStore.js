@@ -153,6 +153,26 @@ export function resetCareerStats() {
   })
 }
 
+export function findNearestFuel() {
+  actionError.value = ""
+  engineLua("beamngEarth_settings and beamngEarth_settings.uiTransportFindFuel and beamngEarth_settings.uiTransportFindFuel() or nil", res => {
+    if (res && res.ok === false) {
+      actionError.value = res.error || "No fuel stations found nearby"
+    } else {
+      setTimeout(poll, 150)
+    }
+  })
+}
+
+const CARDINALS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+export function formatHeading(deg) {
+  const n = Number(deg)
+  if (!Number.isFinite(n)) return ""
+  const d = ((Math.round(n) % 360) + 360) % 360
+  const idx = Math.floor(((d % 360) / 45) + 0.5) % 8
+  return `${d}° ${CARDINALS[idx]}`
+}
+
 export function formatMoney(value, opts = {}) {
   const n = Number(value)
   if (!Number.isFinite(n)) return "$0.00"
