@@ -1160,6 +1160,55 @@ class UrbanLifeAndHedgesTest(unittest.TestCase):
         self.assertEqual(de_enhancer.normalize_detail({"level": "LOW", "fast": 1}), ("low", True))
         self.assertEqual(de_enhancer.normalize_detail("high"), ("high", False))
 
+    def test_loop3_de_enhancer_caches_and_fuel_poi_parity(self):
+        from de_street_enhancer import brand_registry, classifier, furniture_de, texture_atlas
+
+        # 1. brand_registry.match_poi LRU cache hits & parity
+        brand_registry._match_poi_cached.cache_clear()
+        s1, l1 = brand_registry.match_poi(None, "REWE", "REWE City", "supermarket", lat=48.1)
+        s2, l2 = brand_registry.match_poi(None, "REWE", "REWE City", "supermarket", lat=48.1)
+        self.assertEqual((s1.key, l1), (s2.key, l2))
+        self.assertGreaterEqual(brand_registry._match_poi_cached.cache_info().hits, 1)
+
+        # 2. texture_atlas LRU caches on bus stop, fuel pylon, housenumber grid
+        texture_atlas.render_bus_stop_panel.cache_clear()
+        texture_atlas.render_fuel_pylon.cache_clear()
+        texture_atlas._render_housenumber_grid_cached.cache_clear()
+        im_b1 = texture_atlas.render_bus_stop_panel("Marienplatz")
+        im_b2 = texture_atlas.render_bus_stop_panel("Marienplatz")
+        self.assertIs(im_b1, im_b2)
+        im_f1 = texture_atlas.render_fuel_pylon("aral", "ARAL", "1.759", "1.819", "1.679")
+        im_f2 = texture_atlas.render_fuel_pylon("aral", "ARAL", "1.759", "1.819", "1.679")
+        self.assertIs(im_f1, im_f2)
+        im_h1 = texture_atlas.render_housenumber_grid(["12", "14a"])
+        im_h2 = texture_atlas.render_housenumber_grid(["12", "14a"])
+        self.assertIs(im_h1, im_h2)
+
+        # 3. _extract_infra_furn cell memoization + RetailCandidate fuel POI path
+        class _FakeInfra:
+            def __init__(self):
+                self.ids = ["i1", "i2"]
+                self.attrs = {
+                    "class": ["bench", "bus_stop"],
+                    "name": ["", "Bahnhof"],
+                    "tags": ['{"amenity":"bench"}', '{"highway":"bus_stop","shelter":"yes"}'],
+                }
+            def __len__(self):
+                return 2
+
+        fi = _FakeInfra()
+        r1 = furniture_de._extract_infra_furn(fi, (14, 0, 0))
+        r2 = furniture_de._extract_infra_furn(fi, (14, 0, 0))
+        self.assertIs(r1, r2)
+        self.assertEqual(len(r1), 1)
+        self.assertEqual(r1[0][2], "bus")
+        self.assertEqual(r1[0][3], "Bahnhof")
+
+        # Verify RetailCandidate exposes poi_id and display_name as used by furniture_de
+        rc = classifier.RetailCandidate("poi_1", 11.5, 48.1, "local_shop", "Aral", "gas_station", 0.9)
+        self.assertEqual(rc.poi_id, "poi_1")
+        self.assertEqual(rc.display_name, "Aral")
+
 
 if __name__ == "__main__":
     unittest.main()

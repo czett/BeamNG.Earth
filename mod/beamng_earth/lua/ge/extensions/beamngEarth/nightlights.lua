@@ -114,6 +114,7 @@ M.LANTERN = { range = 20, inner = 65, outer = 150, brightness = 4.0, color = '1 
 local lastCheck = -1e9
 local shown = {}         -- material name -> the factor and nits set (set again only when they change)
 local shownMap = {}      -- material name -> the emissive map set (none: its materials.json's, M.MAPS' first)
+local deEnhMod = nil
 M.DYNAMIC = {}           -- runtime-created emissive Materials (deEnhancer shop fascias): name -> { color, nits }
 
 function M.addDynamic(name, color, nits)
@@ -172,9 +173,12 @@ local function apply(night, step)
       end
     end
   end
-  local okd, deEnh = pcall(require, 'beamngEarth/deEnhancer')
-  if okd and type(deEnh) == 'table' and type(deEnh.syncDuskGlow) == 'function' then
-    deEnh.syncDuskGlow(night)
+  if deEnhMod == nil then
+    local okd, deEnh = pcall(require, 'beamngEarth/deEnhancer')
+    deEnhMod = (okd and type(deEnh) == 'table') and deEnh or false
+  end
+  if deEnhMod and type(deEnhMod.syncDuskGlow) == 'function' then
+    deEnhMod.syncDuskGlow(night)
   end
   for name, glow in pairs(M.MATERIALS) do updateMat(name, glow) end
   for name, glow in pairs(M.DYNAMIC) do updateMat(name, glow) end
