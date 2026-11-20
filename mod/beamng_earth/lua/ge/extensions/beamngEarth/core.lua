@@ -1151,7 +1151,8 @@ M._netq = { q = {}, head = 1, rq = {}, rhead = 1, cost = {}, budgetMs = 4.0, bus
   urgent = { terrain_ready = true, terrain_ready_set = true, terrain_refresh = true, terrain_error = true,
     swap_begin = true, swap_end = true, swap_abort = true,
     block_base = true, terrain_patch = true, ground_ahead = true, deck_spans = true, status = true, load_progress = true, where_result = true, geocode_result = true, stations_result = true,
-    route_result = true, random_place_result = true, runtime_profiler_pong = true, transport_job_result = true, radio_stations_result = true } }
+    route_result = true, random_place_result = true, runtime_profiler_pong = true, transport_job_result = true,
+    radio_stations_result = true, fuel_stations_result = true } }
 -- A block's refreshed base photo (block_base) waits while the car is faster than BASE_LATER_MS, and is applied once it
 -- is slower than BASE_NOW_MS, if that block is still the one in use (a later block brings its own photo)
 M.BASE_LATER_MS, M.BASE_NOW_MS = 35, 30         -- m/s (78 / 67 mph; the server skips a block's photo wait over 89 mph)
@@ -1675,6 +1676,9 @@ local function onMessage(msg)
   elseif t == 'radio_stations_result' then   -- Location-aware radio (locationRadio.lua)
     local lr = rawget(_G, 'beamngEarth_locationRadio')
     if lr and lr.onStationsResult then lr.onStationsResult(msg) end
+  elseif t == 'fuel_stations_result' then    -- Transport Modes nearby fuel stations (transportModes.lua)
+    local tm = rawget(_G, 'beamngEarth_transportModes')
+    if tm and tm.onFuelStationsResult then tm.onFuelStationsResult(msg) end
   elseif t == 'geocode_result' then
     if msg.id then geocodeResults[msg.id] = { results = msg.results or {}, error = msg.error, text = msg.text } end
   elseif t == 'areas' then
@@ -3811,6 +3815,11 @@ function M.requestRadioStations(id, lat, lon, place, region, country, online)
   if not net.isConnected() then return false end
   net.send({ type = 'radio_stations_request', id = id, lat = lat, lon = lon,
     place = place, region = region, country = country, online = online })
+  return true
+end
+function M.requestFuelStations(id, lat, lon, radiusM)
+  if not net.isConnected() then return false end
+  net.send({ type = 'fuel_stations_request', id = id, lat = lat, lon = lon, radiusM = radiusM })
   return true
 end
 function M.requestRoute(id, lat0, lon0, lat1, lon1, bearing, via)

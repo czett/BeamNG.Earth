@@ -964,4 +964,112 @@ do
   tm.reset()
 end
 
+-- 16. Interactive OSM Fuel Stations, Physical Refueling, Career Deduction & -$50 Overdraft Persistence
+do
+  tm.reset()
+  local savedCareer = nil
+  local origRead, origWrite = rawget(_G, 'jsonReadFile'), rawget(_G, 'jsonWriteFile')
+  local origGpv = rawget(_G, 'getPlayerVehicle')
+  local origVec3, origColorF, origDd = rawget(_G, 'vec3'), rawget(_G, 'ColorF'), rawget(_G, 'debugDrawer')
+
+  jsonReadFile = function() return savedCareer end
+  jsonWriteFile = function(_, data) savedCareer = data; return true end
+  tm.resetCareerStats()
+
+  -- Seed $20.00 career balance
+  local cInit = tm.getCareerStats()
+  savedCareer = { version = 1, totalEarnings = 20.0, completedJobs = 2, scoreSum = 180, bestScore = 95, avgScore = 90, streak = 1 }
+  tm.loadCareerStats()
+  T.check(tm.getCareerStats().totalEarnings == 20.0, 'career loaded with $20.00 balance')
+
+  -- Pure query throttling (6 s or > 400 m)
+  T.check(tm.shouldQueryFuelStations(nil, nil, nil, 100, 48.135, 11.582), 'first fuel query always due')
+  T.check(not tm.shouldQueryFuelStations(100, 48.135, 11.582, 103, 48.1351, 11.582), 'throttled within 6 s and < 400 m')
+  T.check(tm.shouldQueryFuelStations(100, 48.135, 11.582, 106.5, 48.135, 11.582), 're-queries after 6 s')
+  T.check(tm.shouldQueryFuelStations(100, 48.135, 11.582, 101, 48.140, 11.582), 're-queries after > 400 m move')
+
+  -- Periodic query + onFuelStationsResult + _onFuelProbe
+  local fuelReqs = {}
+  local origReqFuel = fakeCore.requestFuelStations
+  fakeCore.requestFuelStations = function(id, lat, lon, rM)
+    fuelReqs[#fuelReqs + 1] = { id = id, lat = lat, lon = lon, radiusM = rM }
+    return true
+  end
+
+  local queuedCmds = {}
+  getPlayerVehicle = function()
+    return {
+      getID = function() return 42 end,
+      queueLuaCommand = function(_, cmd) queuedCmds[#queuedCmds + 1] = cmd end,
+    }
+  end
+
+  local anchorF = { geodeticToEnu = function(_, lat, lon) return (lat == 39.285) and 0 or 500, 0 end }
+  local plF = { lat = 39.285, lon = -76.610, x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.1 }
+  fakeNow = 500.0
+  tm.update(0.1, 0.1, anchorF, plF, false, false)
+  T.check(#fuelReqs == 1 and fuelReqs[1].radiusM == tm.FUEL_QUERY_RADIUS_M, 'update triggers initial fuel_stations_request')
+  T.check(#queuedCmds == 1 and queuedCmds[1]:find('energyStorage'), 'update probes vehicle fuel via energyStorage')
+
+  -- Feed fuel station & low fuel probe (15% of 60 L tank)
+  tm.onFuelStationsResult({
+    id = fuelReqs[1].id,
+    ok = true,
+    stations = {
+      { id = 'fuel_shell', name = 'Shell', brand = 'Shell', lat = 39.285, lon = -76.610, bearingDeg = 0, distM = 0, road = 'Main St', locality = 'Baltimore', pricePerLiter = 1.80 },
+      { id = 'fuel_aral', name = 'Aral', brand = 'Aral', lat = 39.290, lon = -76.610, bearingDeg = 90, distM = 540, road = 'North Rd', locality = 'Baltimore', pricePerLiter = 1.75 },
+    },
+  })
+  tm._onFuelProbe(42, { ratio = 0.15, capacityL = 60.0, volumeL = 9.0, hasTank = true })
+
+  local uiF = tm.uiState()
+  T.check(uiF.fuelPct == 15 and uiF.lowFuel == true, 'uiState exposes fuelPct=15 and lowFuel=true')
+  T.check(uiF.nearestFuelStation and uiF.nearestFuelStation.name == 'Shell' and uiF.nearestFuelStation.pricePerLiter == 1.80,
+    'uiState exposes nearestFuelStation metadata')
+
+  -- 3D Fuel Pump Bay rendering within 140 m (and hidden < 25 m from active job stop)
+  local fuelQuadDraws = 0
+  vec3 = function(x, y, z) return { x = x or 0, y = y or 0, z = z or 0, set = function(self, a, b, c) self.x, self.y, self.z = a, b, c end } end
+  ColorF = function(r, g, b, a) return { r = r, g = g, b = b, a = a } end
+  debugDrawer = { drawQuadSolid = function() fuelQuadDraws = fuelQuadDraws + 1 end }
+  tm.drawMarker(anchorF, plF)
+  T.check(fuelQuadDraws > 0, '3D cyan fuel pump bay renders within 140 m')
+
+  -- Hold stopped in pump bay for 1.2 s -> begins refueling & emits setRemainingRatio
+  queuedCmds = {}
+  for _ = 1, 3 do
+    fakeNow = fakeNow + 0.5
+    tm.update(0.5, 0.5, anchorF, plF, false, false)
+  end
+  local refHud = tm.hudPayload()
+  T.check(refHud and refHud.state == 'refueling' and refHud.refueling and refHud.refueling.active == true,
+    'stopped 1.2 s in pump bay activates live refueling HUD')
+  T.check(#queuedCmds >= 1 and queuedCmds[#queuedCmds]:find('setRemainingRatio'),
+    'active refueling emits energyStorage setRemainingRatio VE command')
+
+  -- Refuel to full (51 L * $1.80 = $91.80, but balance $20 + $50 overdraft = $70 max -> hits overdraft limit -$50!)
+  for _ = 1, 20 do
+    fakeNow = fakeNow + 0.5
+    tm.update(0.5, 0.5, anchorF, plF, false, false)
+  end
+  local afterCar = tm.getCareerStats()
+  T.check(math.abs(afterCar.totalEarnings - (-50.0)) < 0.02, 'emergency overdraft caps career balance at -$50.00 (got ' .. tostring(afterCar.totalEarnings) .. ')')
+  T.check(savedCareer and math.abs(savedCareer.totalEarnings - (-50.0)) < 0.02, 'saveCareerStats persists negative overdraft balance')
+
+  -- Reloading career preserves -$50.00 overdraft
+  tm.loadCareerStats()
+  T.check(math.abs(tm.getCareerStats().totalEarnings - (-50.0)) < 0.02, 'loadCareerStats preserves -$50.00 overdraft')
+
+  -- One-click routeToNearestFuel sets GPS destination
+  local gpsBefore = #gpsCalls.set
+  local rRes = tm.routeToNearestFuel()
+  T.check(rRes.ok == true and #gpsCalls.set == gpsBefore + 1 and gpsCalls.set[#gpsCalls.set].label:find('Shell'),
+    'routeToNearestFuel sets GPS destination to nearest station')
+
+  fakeCore.requestFuelStations = origReqFuel
+  jsonReadFile, jsonWriteFile, getPlayerVehicle = origRead, origWrite, origGpv
+  vec3, ColorF, debugDrawer = origVec3, origColorF, origDd
+  tm.reset()
+end
+
 T.done('test_transport_modes')

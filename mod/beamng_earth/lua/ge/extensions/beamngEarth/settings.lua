@@ -1142,6 +1142,11 @@ function M.uiTransportResetCareer()
   if not tm or not tm.resetCareerStats then return { ok = false, error = 'Transport Modes not loaded' } end
   return tm.resetCareerStats()
 end
+function M.uiTransportFindFuel()
+  local tm = ext('beamngEarth_transportModes')
+  if not tm or not tm.routeToNearestFuel then return { ok = false, error = 'Transport Modes not loaded' } end
+  return tm.routeToNearestFuel()
+end
 
 -- Location-Aware Live & Local Radio (locationRadio.lua)
 function M.uiRadioState()

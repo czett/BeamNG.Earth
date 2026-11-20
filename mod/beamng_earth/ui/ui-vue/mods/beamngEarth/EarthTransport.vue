@@ -6,6 +6,7 @@
         <div class="tm-rank-wrap">
           <span class="tm-rank-badge">{{ career.driverRank || 'Rookie Driver' }}</span>
           <span v-if="career.streak >= 2" class="tm-streak-pill tm-num">{{ career.streak }}x streak</span>
+          <span v-if="fuelPct != null" class="tm-fuel-pill tm-num" :class="{ low: lowFuel }">Fuel {{ fuelPct }}%</span>
         </div>
         <div class="tm-career-reset">
           <template v-if="resetConfirm">
@@ -13,7 +14,7 @@
             <button class="tm-mini-btn" @click="resetConfirm = false">Cancel</button>
           </template>
           <button
-            v-else-if="career.completedJobs > 0 || career.totalEarnings > 0"
+            v-else-if="career.completedJobs > 0 || career.totalEarnings !== 0"
             class="tm-mini-btn"
             title="Reset transport career stats"
             @click="resetConfirm = true"
@@ -23,7 +24,7 @@
       <div class="tm-career-stats">
         <div class="tm-cstat">
           <span class="tm-cstat-k">Earnings</span>
-          <b class="tm-num is-accent">{{ formatMoney(career.totalEarnings || 0) }}</b>
+          <b class="tm-num" :class="(career.totalEarnings || 0) < 0 ? 'is-debt' : 'is-accent'">{{ formatMoney(career.totalEarnings || 0) }}</b>
         </div>
         <div class="tm-cstat">
           <span class="tm-cstat-k">Jobs</span>
@@ -38,6 +39,39 @@
           <b class="tm-num">{{ formatCareerDist(career.totalDistanceKm || 0, metric) }}</b>
         </div>
       </div>
+    </div>
+
+    <!-- Live Refueling Progress & Receipt Banner -->
+    <div v-if="refueling && (refueling.active || refueling.done || refueling.holdS > 0)" class="tm-refuel-banner" :class="{ done: refueling.done && !refueling.active, warn: refueling.overdraftHit }">
+      <div class="tm-refuel-row">
+        <span class="tm-refuel-title">
+          <template v-if="refueling.active">Refueling at {{ refueling.stationName }}</template>
+          <template v-else-if="refueling.overdraftHit">Overdraft Limit · {{ refueling.stationName }}</template>
+          <template v-else-if="refueling.done">Refueled at {{ refueling.stationName }}</template>
+          <template v-else>Pump Ready · Hold stopped ({{ refueling.holdS.toFixed(1) }}/{{ refueling.holdTargetS.toFixed(1) }}s)</template>
+        </span>
+        <span v-if="refueling.active || refueling.done" class="tm-num tm-refuel-receipt">
+          +{{ Number(refueling.litersAdded || 0).toFixed(1) }} L · -{{ formatMoney(refueling.costTotal || 0) }}
+        </span>
+      </div>
+      <div class="tm-bar">
+        <span
+          class="tm-bar-fill fuel"
+          :style="{ width: (refueling.active || refueling.done ? (fuelPct ?? 0) : Math.min(100, Math.round(((refueling.holdS || 0) / (refueling.holdTargetS || 1.2)) * 100))) + '%' }"
+        ></span>
+      </div>
+    </div>
+
+    <!-- Low Fuel Helper -->
+    <div v-if="lowFuel && !(refueling && refueling.active)" class="tm-lowfuel-banner">
+      <div class="tm-lowfuel-info">
+        <b class="tm-lowfuel-title">Low Fuel ({{ fuelPct }}%)</b>
+        <span v-if="nearestFuelStation" class="tm-lowfuel-sub tm-num">
+          {{ nearestFuelStation.name }} · {{ formatDist(nearestFuelStation.distM, metric) }} {{ formatHeading(nearestFuelStation.bearingDeg) }} · {{ formatMoney(nearestFuelStation.pricePerLiter) }}/L
+        </span>
+        <span v-else class="tm-lowfuel-sub">Search nearby fuel stations</span>
+      </div>
+      <button class="tm-mini-btn fuel" @click="findNearestFuel">Find Nearest Fuel</button>
     </div>
 
     <div v-if="!ready" class="tm-note is-warn">
@@ -273,8 +307,8 @@ import { ref, computed, onMounted, onUnmounted } from "vue"
 import {
   TRANSPORT_MODES, selectedMode, selectedTier, currentTiers,
   transportState, busy, actionError,
-  setMode, setTier, startJob, skipStop, cancelJob, dismissSummary, nextPassenger, resetCareerStats,
-  modeLabel, tierLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, formatMoney, toArray, start, stop,
+  setMode, setTier, startJob, skipStop, cancelJob, dismissSummary, nextPassenger, resetCareerStats, findNearestFuel,
+  modeLabel, tierLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, formatMoney, formatHeading, toArray, start, stop,
 } from "./earthTransportStore.js"
 
 const props = defineProps({
@@ -295,6 +329,10 @@ const pending = computed(() => st.value.pending || null)
 const summary = computed(() => st.value.summary || null)
 const career = computed(() => st.value.career || null)
 const vehicleMatch = computed(() => st.value.vehicleMatch || null)
+const fuelPct = computed(() => st.value.fuelPct != null ? Number(st.value.fuelPct) : null)
+const lowFuel = computed(() => st.value.lowFuel === true)
+const nearestFuelStation = computed(() => st.value.nearestFuelStation || null)
+const refueling = computed(() => st.value.refueling || null)
 const metric = computed(() => st.value.metric === true)
 const stops = computed(() => active.value ? toArray(active.value.stops) : [])
 const recommendedSet = computed(() => {
@@ -465,6 +503,71 @@ const errText = computed(() => actionError.value || st.value.error || "")
 .tm-cstat b.is-accent {
   color: #f59e0b;
 }
+.tm-cstat b.is-debt {
+  color: #ff8a80;
+}
+.tm-fuel-pill {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  color: #7dd3fc;
+}
+.tm-fuel-pill.low {
+  background: rgba(245, 158, 11, 0.20);
+  border-color: rgba(245, 158, 11, 0.55);
+  color: #fbbf24;
+}
+.tm-lowfuel-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.36);
+}
+.tm-lowfuel-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.tm-lowfuel-title { font-size: 11.5px; color: #fbbf24; }
+.tm-lowfuel-sub { font-size: 10.5px; color: #d6dfe8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-mini-btn.fuel {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: rgba(56, 189, 248, 0.46);
+  color: #bae6fd;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.tm-mini-btn.fuel:hover { background: rgba(56, 189, 248, 0.30); color: #fff; }
+.tm-refuel-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: rgba(14, 34, 48, 0.90);
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  border-left: 3px solid #38bdf8;
+}
+.tm-refuel-banner.done { border-left-color: #3ddc84; border-color: rgba(61, 220, 132, 0.38); }
+.tm-refuel-banner.warn { border-left-color: #f59e0b; border-color: rgba(245, 158, 11, 0.44); }
+.tm-refuel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.tm-refuel-title { font-weight: 600; color: #e0f2fe; }
+.tm-refuel-receipt { font-weight: 700; color: #7dd3fc; white-space: nowrap; }
+.tm-bar-fill.fuel { background: #38bdf8; }
 
 /* Vehicle Match Banner */
 .tm-veh-banner {

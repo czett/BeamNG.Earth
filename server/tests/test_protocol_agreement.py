@@ -268,6 +268,8 @@ MOD_TO_SERVER = {
     "radio_stations_request": {"id": F(int), "lat": F(NUM), "lon": F(NUM),
                                "place": F(str, OPT), "region": F(str, OPT), "country": F(str, OPT),
                                "online": F(bool, OPT)},
+    # Transport Modes nearby OSM fuel stations (transport_modes.py; additive)
+    "fuel_stations_request": {"id": F(int), "lat": F(NUM), "lon": F(NUM), "radiusM": F(NUM, OPT)},
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -331,6 +333,7 @@ SERVER_TO_MOD = {
     "radio_stations_result": {"id": F(int), "ok": F(bool), "regionCode": F(str), "regionLabel": F(str),
                               "country": F(str, OPT), "place": F(str, OPT), "source": F(str, OPT),
                               "stations": F(list), "error": F(str, OPT)},
+    "fuel_stations_result": {"id": F(int), "ok": F(bool), "stations": F(list), "error": F(str, OPT)},
     "globe": {"anchorId": F(int), "shape": F(str), "texture": F(str), "material": F(str),  # the 3D map's globe
               "miniShape": F(str), "miniScale": F(NUM)},                     # ... and its small copy (far out)
     "random_place_result": {"id": F(int), "lat": F(NUM, OPT), "lon": F(NUM, OPT), "name": F(str, OPT)},
@@ -531,6 +534,12 @@ TRANSPORT_STOP_FIELDS = {
     "recipient": F(str, OPT), "parcelCount": F(int, OPT), "parcelAction": F(str, OPT),
     "parcelsRemaining": F(int, OPT), "parcelsTotal": F(int, OPT),
 }
+FUEL_STATION_FIELDS = {
+    "id": F(str), "name": F(str), "brand": F(str),
+    "lat": F(NUM), "lon": F(NUM), "bearingDeg": F(NUM),
+    "distM": F(NUM), "road": F(str), "locality": F(str),
+    "pricePerLiter": F(NUM),
+}
 # message types the plain session cannot produce (each has its own session test below)
 EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs map data (roads tests)
                        "space_clouds",                               # the clouds from space: NASA GIBS (test_spaceclouds)
@@ -546,6 +555,7 @@ EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs
                        "places_result",                              # the modding API's places (test_places_api)
                        "transport_job_result",                       # Transport Modes (test_transport_modes)
                        "radio_stations_result",                      # Location-aware radio (test_location_radio)
+                       "fuel_stations_result",                       # Transport Modes fuel stations (test_transport_modes)
                        "globe",                                      # the 3D map's globe: needs EOX tiles
                        "random_place_result", "place_previews_ready",  # the level select: map data / imagery
                                                                      # (test_randomplace)

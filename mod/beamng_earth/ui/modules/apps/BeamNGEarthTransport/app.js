@@ -32,7 +32,16 @@ angular.module('beamng.apps')
   return {
     template:
       '<div class="bngApp" style="width:100%;height:100%;background:transparent;box-shadow:none;overflow:visible;">' +
-        '<div ng-if="tr && !hidden" ng-style="{\'border-left\': \'3px solid \' + modeStyle.color}" style="' + CARD + '">' +
+        '<div ng-if="tr && !hidden" ng-style="{\'border-left\': \'3px solid \' + (tr.state === \'refueling\' ? \'#38bdf8\' : modeStyle.color)}" style="' + CARD + '">' +
+          '<div ng-if="tr.state === \'refueling\' && tr.refueling">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;font-size:11.5px;' + NUM + '">' +
+              '<span style="font-weight:700;color:#e0f2fe;">{{ refuelTitle }}</span>' +
+              '<span ng-if="refuelReceipt" style="font-weight:700;color:#7dd3fc;white-space:nowrap;">{{ refuelReceipt }}</span>' +
+            '</div>' +
+            '<div style="height:6px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
+              '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:#38bdf8;transition:width 0.14s linear;"></div>' +
+            '</div>' +
+          '</div>' +
           '<div ng-if="tr.state === \'pending\'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">' +
               '<span style="font-weight:600;letter-spacing:0.01em;">Finding {{ tr.mode }} stops...</span>' +
@@ -48,7 +57,10 @@ angular.module('beamng.apps')
                   'style="padding:1px 6px;border-radius:3px;font-weight:600;font-size:10px;letter-spacing:0.02em;white-space:nowrap;">{{ stopTypeLabel }}</span>' +
                 '<span ng-if="stopSectorLabel" style="padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;color:#b4c5d6;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);white-space:nowrap;">{{ stopSectorLabel }}</span>' +
               '</div>' +
-              '<span style="font-weight:600;font-size:11px;color:#b8c4d0;white-space:nowrap;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
+              '<div style="display:flex;align-items:center;gap:6px;white-space:nowrap;' + NUM + '">' +
+                '<span ng-if="tr.fuelPct != null" ng-style="tr.lowFuel ? {background:\'rgba(245,158,11,0.22)\',color:\'#fbbf24\',borderColor:\'rgba(245,158,11,0.50)\'} : {background:\'rgba(56,189,248,0.14)\',color:\'#7dd3fc\',borderColor:\'rgba(56,189,248,0.34)\'}" style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-size:10px;font-weight:600;">Fuel {{ tr.fuelPct }}%</span>' +
+                '<span style="font-weight:600;font-size:11px;color:#b8c4d0;">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
+              '</div>' +
             '</div>' +
             '<div style="font-weight:600;font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopName }}</div>' +
             '<div ng-if="stopSubtitle" style="font-size:11px;color:#93a0ad;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stopSubtitle }}</div>' +
@@ -76,6 +88,19 @@ angular.module('beamng.apps')
             '</div>' +
             '<div ng-if="!tr.trailerMissing && tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11px;color:#7dd3fc;">' +
               '{{ tr.trailerState === \'staged\' ? \'Back up to hitch staged trailer\' : \'Pull into bay &amp; stop\' }}' +
+            '</div>' +
+            '<div ng-if="tr.refueling && (tr.refueling.active || tr.refueling.done || tr.refueling.holdS > 0)" style="margin-top:6px;padding:5px 7px;border-radius:4px;background:rgba(14,34,48,0.88);border:1px solid rgba(56,189,248,0.38);">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;margin-bottom:3px;' + NUM + '">' +
+                '<span style="font-weight:700;color:#e0f2fe;">{{ refuelTitle }}</span>' +
+                '<span ng-if="refuelReceipt" style="font-weight:700;color:#7dd3fc;white-space:nowrap;">{{ refuelReceipt }}</span>' +
+              '</div>' +
+              '<div style="height:5px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
+                '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:#38bdf8;transition:width 0.14s linear;"></div>' +
+              '</div>' +
+            '</div>' +
+            '<div ng-if="tr.lowFuel && !(tr.refueling && tr.refueling.active)" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:5px;padding:4px 7px;border-radius:4px;background:rgba(245,158,11,0.14);border:1px solid rgba(245,158,11,0.36);font-size:10.5px;">' +
+              '<span style="color:#fbbf24;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ lowFuelText }}</span>' +
+              '<button ng-click="findFuel()" style="background:rgba(56,189,248,0.20);color:#bae6fd;border:1px solid rgba(56,189,248,0.46);border-radius:3px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Find Nearest Fuel</button>' +
             '</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
               '<button ng-click="skip()" style="flex:1;' + BTN + '">Skip Stop</button>' +
@@ -121,6 +146,10 @@ angular.module('beamng.apps')
       scope.stopSectorLabel = ''
       scope.summaryDist = ''
       scope.summaryTime = ''
+      scope.refuelTitle = ''
+      scope.refuelReceipt = ''
+      scope.refuelBarPct = 0
+      scope.lowFuelText = 'Low Fuel'
 
       var unclipped = false
       function unclip () {
@@ -145,6 +174,9 @@ angular.module('beamng.apps')
       }
       scope.nextPassenger = function () {
         bngApi.engineLua('if beamngEarth_transportModes then beamngEarth_transportModes.nextPassenger() end')
+      }
+      scope.findFuel = function () {
+        bngApi.engineLua('if beamngEarth_transportModes then beamngEarth_transportModes.routeToNearestFuel() end')
       }
 
       scope.$on('BeamNGEarthHud', function (event, data) {
@@ -217,6 +249,28 @@ angular.module('beamng.apps')
             if (tr.state === 'summary') {
               scope.summaryDist = fmtDist(tr.drivenM, !!tr.metric)
               scope.summaryTime = fmtDur(tr.elapsedS)
+            }
+            if (tr.refueling) {
+              var rf = tr.refueling
+              if (rf.active) {
+                scope.refuelTitle = 'Refueling at ' + (rf.stationName || 'Pump')
+                scope.refuelReceipt = '+' + Number(rf.litersAdded || 0).toFixed(1) + ' L · -$' + Number(rf.costTotal || 0).toFixed(2)
+                scope.refuelBarPct = Math.max(0, Math.min(100, Number(tr.fuelPct || 0)))
+              } else if (rf.done) {
+                scope.refuelTitle = (rf.overdraftHit ? 'Overdraft Limit · ' : 'Refueled at ') + (rf.stationName || 'Pump')
+                scope.refuelReceipt = '+' + Number(rf.litersAdded || 0).toFixed(1) + ' L · -$' + Number(rf.costTotal || 0).toFixed(2)
+                scope.refuelBarPct = Math.max(0, Math.min(100, Number(tr.fuelPct || 0)))
+              } else {
+                scope.refuelTitle = 'Pump Ready · Hold stopped'
+                scope.refuelReceipt = Number(rf.holdS || 0).toFixed(1) + '/' + Number(rf.holdTargetS || 1.2).toFixed(1) + 's'
+                scope.refuelBarPct = Math.max(0, Math.min(100, Math.round(((rf.holdS || 0) / (rf.holdTargetS || 1.2)) * 100)))
+              }
+            }
+            if (tr.nearestFuelStation) {
+              var nfs = tr.nearestFuelStation
+              scope.lowFuelText = 'Low Fuel · ' + nfs.name + ' (' + fmtDist(nfs.distM, !!tr.metric) + (nfs.cardinal ? ' ' + nfs.cardinal : '') + ')'
+            } else {
+              scope.lowFuelText = 'Low Fuel (' + (tr.fuelPct != null ? tr.fuelPct : 0) + '%)'
             }
           }
           unclip()
