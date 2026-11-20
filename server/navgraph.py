@@ -214,7 +214,7 @@ def rumble_eligible(country, spec):
     return getattr(spec, "cls", None) in RUMBLE_RURAL_CLASSES and not getattr(spec, "urban", True)
 
 
-def road_mph(feats, i, spec, mph=True, at=0.5, country=None, de_on=False):
+def road_mph(feats, i, spec, mph=True, at=0.5, country=None, de_on=False, propagated=None):
     """The speed limit (mph) of road feature i at fraction at (default: its middle), else the class default
     (capped in town for arterials), or None for a class the AI does not drive. Shared by the graph and the speed-limit
     signs (speedsigns.py), so a sign shows what the traffic drives. de_on (the German junction signs, the graph's):
@@ -228,6 +228,14 @@ def road_mph(feats, i, spec, mph=True, at=0.5, country=None, de_on=False):
                 value = float(speed.value[r])
                 if math.isfinite(value) and value > 0:
                     return value / 1.609344
+    import de_enhancer
+    if country == "DE" and de_enhancer.enabled():
+        from de_street_enhancer import speed_limits as _de_sl
+        lim_kph = _de_sl.resolve_feature_limit_kph(feats, i, spec, at=at, country="DE", propagated=propagated)
+        if lim_kph is not None:
+            if lim_kph <= 0.0:
+                return _de_sl.DE_RICHTGESCHWINDIGKEIT_KMH / 1.609344
+            return lim_kph / 1.609344
     if de_on:
         zone = feats.attrs.get("osm_zone_maxspeed")
         if zone is not None and isinstance(zone[i], str):
@@ -408,6 +416,11 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
         bspecs = roads.bridge_specs(feats)
         tspecs = roads.tunnel_specs(feats)
         specs = [sp if sp is not None else bs if bs is not None else ts for sp, bs, ts in zip(rspecs, bspecs, tspecs)]
+        import de_enhancer
+        de_propagated = None
+        if country == "DE" and de_enhancer.enabled():
+            from de_street_enhancer import speed_limits as _de_sl
+            de_propagated = _de_sl.propagate_urban_limits(feats, specs, country="DE")
         rules = feats.rules
         sub = rules.get("subclass")
         con = rules.get("connectors")
@@ -572,7 +585,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                 if a == b:
                     continue
                 at = (full[j] + full[j + 1]) / (2 * L)
-                legal = road_mph(feats, i, spec, mph, at=at, country=country, de_on=de_on) * MPH
+                legal = road_mph(feats, i, spec, mph, at=at, country=country, de_on=de_on, propagated=de_propagated) * MPH
                 in_tunnel = False
                 if tunnel_ranges and any(t0 <= at <= t1 for t0, t1 in tunnel_ranges):
                     # each end inside the tunnel on its built floor (an end past a portal is on the ground)

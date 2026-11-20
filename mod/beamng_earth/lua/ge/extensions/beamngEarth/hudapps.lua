@@ -36,7 +36,7 @@ function M.any() return nMounted > 0 end
 -- Pure: the payload for the apps. t: { status, loading, credits, banner = { text, level, visible }, hidden }
 function M.payload(t)
   local b = t.banner or {}
-  return {
+  local p = {
     status = t.status or '',
     loading = t.loading or '',          -- the status bar's second line (statusbar.loading)
     credits = t.credits or '',
@@ -44,6 +44,8 @@ function M.payload(t)
     bannerLevel = b.level or 'info',
     hidden = t.hidden and true or false,
   }
+  if t.speedLimit ~= nil then p.speedLimit = t.speedLimit end
+  return p
 end
 
 local function key(p)

@@ -16,7 +16,7 @@ import germany
 
 log = logging.getLogger("earthd.de_enhancer")
 
-PACKAGE_VERSION = 2
+PACKAGE_VERSION = 3
 
 
 def enabled() -> bool:
@@ -173,6 +173,43 @@ def prepare_shops(md, frame, tx, ty, items, out_dir, vfs_dir, de_detail=None):
     except Exception as ex:
         log.warning("de_enhancer shops: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         return None, None, set()
+
+
+def build_speed_cameras(
+    md,
+    frame,
+    tx,
+    ty,
+    box,
+    near_roads,
+    rings,
+    ground,
+    de_detail=None,
+):
+    """Build German OSM speed-camera pillars (`de_radar`) and client enforcement gates (`deSpeedCameras`)."""
+    if not enabled() or not near_roads or not in_germany(frame, box):
+        return [], []
+    try:
+        from de_street_enhancer.hooks import build_speed_cameras as _build_speed_cameras
+        safe_ground = (
+            (lambda x, y: np.zeros(0, np.float64) if np.asarray(x).size == 0 else ground(x, y))
+            if ground is not None
+            else None
+        )
+        return _build_speed_cameras(
+            md,
+            frame,
+            tx,
+            ty,
+            box,
+            near_roads,
+            rings,
+            safe_ground,
+            de_detail=de_detail,
+        )
+    except Exception as ex:
+        log.warning("de_enhancer speed_cameras: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
+        return [], []
 
 
 def finish_streets_and_yards(

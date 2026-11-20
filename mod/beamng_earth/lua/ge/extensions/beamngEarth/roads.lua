@@ -25,6 +25,7 @@ local speedtraps = require('beamngEarth/speedtraps')
 
 local M = {}
 M._deEnh = require('beamngEarth/deEnhancer')
+M._speedCameras = require('beamngEarth/speedCameras')
 
 M.MATERIAL_FILES = { '/levels/west_coast_usa/art/road/main.materials.json',
   '/levels/beamng_earth/art/shapes/beamngEarth/fr_traffic/main.materials.json',
@@ -482,6 +483,7 @@ local function dropTile(key)
   if t.props then require('beamngEarth/nightlights').dropKey(key) end
   if t.park then require('beamngEarth/parking').dropKey(key) end
   if t.speedTraps then speedtraps.dropKey(key) end
+  if t.deSpeedCameras then M._speedCameras.dropKey(key) end
   if t.fuel then require('beamngEarth/gasstations').dropKey(key) end
   if t.sound then require('beamngEarth/ambience').dropSpaces(key) end
   if t.wells then require('beamngEarth/pumpjacks').dropKey(key) end
@@ -524,6 +526,7 @@ local function switchAnchor(aid)
   if aid == anchorId then return end
   anchorId = aid
   speedtraps.resetMotion()
+  M._speedCameras.resetMotion()
   for key, t in pairs(tiles) do
     if t.anchor ~= aid and not t.ghost and not t.geo then dropTile(key) end   -- (geotiles: M.replace)
   end
@@ -946,6 +949,11 @@ local function geoRows(key, t, data, replacing)
     local rows = M.mapRows(pl, data.speedTraps, 2, 5)
     speedtraps.onRows(key, M.mapRows(pl, rows, 8))
     t.speedTraps = true
+  end
+  if type(data.deSpeedCameras) == 'table' and data.deSpeedCameras[1] then
+    local rows = M.mapRows(pl, data.deSpeedCameras, 2, 5)
+    M._speedCameras.onRows(key, M.mapRows(pl, rows, 8))
+    t.deSpeedCameras = true
   end
   if type(data.fuel) == 'table' and data.fuel[1] then
     require('beamngEarth/gasstations').onRows(t.anchor, key, M.mapStations(pl, data.fuel))
@@ -1402,6 +1410,7 @@ end
 function M.replace(a, aid)
   if not a then return 0 end
   speedtraps.resetMotion()
+  M._speedCameras.resetMotion()
   anchorObj = a
   local n = 0
   for key, t in pairs(tiles) do
@@ -1550,6 +1559,10 @@ function M.onTile(msg, currentAnchor, a)
   if type(data.speedTraps) == 'table' and data.speedTraps[1] then
     speedtraps.onRows(key, data.speedTraps)
     tiles[key].speedTraps = true
+  end
+  if type(data.deSpeedCameras) == 'table' and data.deSpeedCameras[1] then
+    M._speedCameras.onRows(key, data.deSpeedCameras)
+    tiles[key].deSpeedCameras = true
   end
   sinceChange = stopwatch.new()
   if road then                -- the tile's road mesh replaces its DecalRoads (server/roadmesh.py)
@@ -2381,7 +2394,10 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
     prewarmId, prewarmWant = nil, prewarmPath
   end
   if currentAnchor then switchAnchor(currentAnchor) end
-  if dtReal then speedtraps.update(not holdActive and player or nil, dtSim, dtReal) end
+  if dtReal then
+    speedtraps.update(not holdActive and player or nil, dtSim, dtReal)
+    M._speedCameras.update(not holdActive and player or nil, dtSim, dtReal)
+  end
   step('anchor')
   releaseGhosts(player)
   step('ghosts')
@@ -3104,6 +3120,7 @@ function M.clear()
   M.swapCancel()            -- (a generation swap's tiles and parts go with everything else)
   for key in pairs(tiles) do dropTile(key) end
   speedtraps.clear()
+  M._speedCameras.clear()
   for key, f in pairs(far) do
     if f.geo then M.dropFarGeo(key) end
     if f.id then deleteQ[#deleteQ + 1] = f.id end
@@ -3143,6 +3160,7 @@ function M.reset()
   for n, d in pairs(slotDropped) do slotsGone[#slotsGone + 1] = { n, d[1], d[2] } end
   objSlot, slotLive, slotDropped = {}, {}, {}
   tiles, createQ, deleteQ, walkQ, anchorId, loadedMaterials = {}, {}, {}, {}, nil, false
+  M._speedCameras.clear()
   M._deEnh.clearAll()
   far, farQ, farSeen = {}, {}, {}
   held, parked, newColliders, swapQuiet = {}, {}, {}, nil     -- (walkQ entries of objects gone with the level)

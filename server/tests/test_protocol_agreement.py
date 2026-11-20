@@ -309,7 +309,7 @@ SERVER_TO_MOD = {
     "addon_apply": {"id": F(str), "op": F(str), "file": F(str), "tmp": F(str), "old": F(list), "tag": F(str),
                     "active": F(bool), "uiApps": F(list), "code": F(dict), "oldCode": F(dict, OPT)},
     "where_result": {"id": F(int), "street": F(str), "place": F(str, OPT), "region": F(str, OPT),
-                     "country": F(str, OPT)},   # the status bar's location
+                     "country": F(str, OPT), "speedLimitKph": F(NUM, OPT)},   # the status bar's location
     "map_labels_result": {"id": F(int), "rows": F(list)},   # the 3D map's labels: maplabels.py rows
     # ... the modding API's places (places.py rows; buildings asked only, next while more pages follow)
     "places_result": {"id": F(int), "places": F(list), "complete": F(bool), "pending": F(bool),

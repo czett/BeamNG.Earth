@@ -68,6 +68,7 @@ class ToggleAndBorderTest(unittest.TestCase):
             self.assertIsNone(sf)
             self.assertIsNone(sb)
             self.assertEqual(sup, set())
+            self.assertEqual(de_enhancer.build_speed_cameras(None, frame, 0, 0, box, [], [], _flat_ground), ([], []))
 
     def test_border_isolation_france_and_austria_emit_zero_assets(self):
         with mock.patch.dict(os.environ, {"BNE_DE_STREET_IMMERSION": "on"}):
