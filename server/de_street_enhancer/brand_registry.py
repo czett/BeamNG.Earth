@@ -1,6 +1,7 @@
 """Curated German retail/service brand registry for commercial shopfront fascias."""
 
 from dataclasses import dataclass
+import functools
 import math
 import re
 
@@ -294,14 +295,20 @@ BRANDS: tuple[BrandSpec, ...] = (
 
 BY_KEY: dict[str, BrandSpec] = {b.key: b for b in BRANDS}
 BY_WIKIDATA: dict[str, BrandSpec] = {b.wikidata: b for b in BRANDS if b.wikidata}
+_CAT_TO_BRAND: dict[str, BrandSpec] = {}
+for _b in BRANDS:
+    for _c in _b.categories:
+        _CAT_TO_BRAND.setdefault(_c, _b)
 
 _TOKEN_RE = re.compile(r"[^\w]+", re.UNICODE)
 
 
+def _regional_aldi_flag(is_north: bool) -> BrandSpec:
+    return BY_KEY["aldi_nord"] if is_north else BY_KEY["aldi_sued"]
+
+
 def _regional_aldi(lat: float | None) -> BrandSpec:
-    if lat is not None and lat >= ALDI_BORDER_LAT:
-        return BY_KEY["aldi_nord"]
-    return BY_KEY["aldi_sued"]
+    return _regional_aldi_flag(lat is not None and lat >= ALDI_BORDER_LAT)
 
 
 def normalize_label(text: str, max_len: int = 24) -> str:
@@ -310,6 +317,47 @@ def normalize_label(text: str, max_len: int = 24) -> str:
     if len(clean) <= max_len:
         return clean
     return clean[: max_len - 1].rstrip(" -/") + "."
+
+
+@functools.lru_cache(maxsize=2048)
+def _match_poi_cached(
+    qid: str,
+    raw_brand: str,
+    raw_name: str,
+    cat: str,
+    is_north: bool,
+) -> tuple[BrandSpec | None, str]:
+    if qid in BY_WIKIDATA:
+        spec = BY_WIKIDATA[qid]
+        if spec.key in ("aldi_sued", "aldi_nord"):
+            spec = _regional_aldi_flag(is_north)
+        return spec, spec.title
+
+    joined = f"{raw_brand} {raw_name}".strip().lower()
+    if joined:
+        if "aldi" in joined:
+            if "nord" in joined:
+                return BY_KEY["aldi_nord"], BY_KEY["aldi_nord"].title
+            if "süd" in joined or "sued" in joined:
+                return BY_KEY["aldi_sued"], BY_KEY["aldi_sued"].title
+            spec = _regional_aldi_flag(is_north)
+            return spec, spec.title
+
+        for spec in BRANDS:
+            for alias in spec.aliases:
+                if alias in joined:
+                    label = normalize_label(raw_name) if (raw_name and spec.key in ("apotheke", "baeckerei")) else spec.title
+                    return spec, label
+
+    if cat:
+        spec = _CAT_TO_BRAND.get(cat)
+        if spec is not None:
+            label = normalize_label(raw_name or raw_brand) if (raw_name or raw_brand) else spec.title
+            return spec, label
+
+    if raw_name:
+        return BY_KEY["local_shop"], normalize_label(raw_name)
+    return None, ""
 
 
 def match_poi(
@@ -321,41 +369,11 @@ def match_poi(
 ) -> tuple[BrandSpec | None, str]:
     """Resolve an Overture `places` POI onto a curated `BrandSpec` and display text."""
     qid = str(brand_wikidata or "").strip().upper()
-    if qid in BY_WIKIDATA:
-        spec = BY_WIKIDATA[qid]
-        if spec.key in ("aldi_sued", "aldi_nord"):
-            spec = _regional_aldi(lat)
-        return spec, spec.title
-
     raw_brand = " ".join(str(brand_name or "").split())
     raw_name = " ".join(str(name or "").split())
-    joined = f"{raw_brand} {raw_name}".strip().lower()
-
-    if joined:
-        if "aldi" in joined:
-            if "nord" in joined:
-                return BY_KEY["aldi_nord"], BY_KEY["aldi_nord"].title
-            if "süd" in joined or "sued" in joined:
-                return BY_KEY["aldi_sued"], BY_KEY["aldi_sued"].title
-            spec = _regional_aldi(lat)
-            return spec, spec.title
-
-        for spec in BRANDS:
-            for alias in spec.aliases:
-                if alias in joined:
-                    label = normalize_label(raw_name) if (raw_name and spec.key in ("apotheke", "baeckerei")) else spec.title
-                    return spec, label
-
     cat = str(category or "").strip().lower()
-    if cat:
-        for spec in BRANDS:
-            if cat in spec.categories:
-                label = normalize_label(raw_name or raw_brand) if (raw_name or raw_brand) else spec.title
-                return spec, label
-
-    if raw_name:
-        return BY_KEY["local_shop"], normalize_label(raw_name)
-    return None, ""
+    is_north = (lat is not None and lat >= ALDI_BORDER_LAT)
+    return _match_poi_cached(qid, raw_brand, raw_name, cat, is_north)
 
 
 LOCAL_INDEPENDENT_SHOPS: tuple[tuple[str, str], ...] = (

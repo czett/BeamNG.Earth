@@ -141,25 +141,27 @@ def _parse_tags(raw) -> dict:
         return {}
 
 
-def _all_road_bands(near_roads: list) -> list[tuple[np.ndarray, float]]:
-    """Return `(xy_polyline, half_width)` for EVERY road segment in `near_roads`."""
-    bands: list[tuple[np.ndarray, float]] = []
+def _all_road_bands(near_roads: list) -> list[tuple]:
+    """Return precomputed `(pts, half_width, a, ab, l2, x0, y0, x1, y1)` for EVERY road segment in `near_roads`."""
+    bands: list[tuple] = []
     for item in near_roads or ():
         sp, pts = item[1], _finite_2d(item[2], min_pts=2)
         if pts is not None:
             hw = float(getattr(sp, "width", 0.0) or 0.0) * 0.5
-            bands.append((pts, hw))
+            a = pts[:-1]
+            ab = pts[1:] - a
+            l2 = np.maximum((ab * ab).sum(1), 1e-12)
+            x0, y0 = float(pts[:, 0].min()) - hw, float(pts[:, 1].min()) - hw
+            x1, y1 = float(pts[:, 0].max()) + hw, float(pts[:, 1].max()) + hw
+            bands.append((pts, hw, a, ab, l2, x0, y0, x1, y1))
     return bands
 
 
-def _road_edge_clearances(pt: np.ndarray, road_bands: list[tuple[np.ndarray, float]]) -> list[tuple[float, np.ndarray]]:
+def _road_edge_clearances(pt: np.ndarray, road_bands: list[tuple]) -> list[tuple[float, np.ndarray]]:
     """Return `(edge_dist, unit_vec_to_road)` for each road band near `pt`."""
     px, py = float(pt[0]), float(pt[1])
     out: list[tuple[float, np.ndarray]] = []
-    for pts, hw in road_bands:
-        a, b = pts[:-1], pts[1:]
-        ab = b - a
-        l2 = np.maximum((ab * ab).sum(1), 1e-12)
+    for _pts, hw, a, ab, l2, _x0, _y0, _x1, _y1 in road_bands:
         t = np.clip(((px - a[:, 0]) * ab[:, 0] + (py - a[:, 1]) * ab[:, 1]) / l2, 0.0, 1.0)
         q = a + t[:, None] * ab
         dist = np.hypot(px - q[:, 0], py - q[:, 1])
@@ -175,13 +177,68 @@ def _road_edge_clearances(pt: np.ndarray, road_bands: list[tuple[np.ndarray, flo
     return out
 
 
-def _min_road_edge_dist(pt: np.ndarray, road_bands: list[tuple[np.ndarray, float]]) -> float:
-    hits = _road_edge_clearances(pt, road_bands)
-    return min((h[0] for h in hits), default=float("inf"))
+def _min_road_edge_dist(pt: np.ndarray, road_bands: list[tuple]) -> float:
+    px, py = float(pt[0]), float(pt[1])
+    best = float("inf")
+    for _pts, hw, a, ab, l2, x0, y0, x1, y1 in road_bands:
+        if best < float("inf") and (px < x0 - best or px > x1 + best or py < y0 - best or py > y1 + best):
+            continue
+        t = np.clip(((px - a[:, 0]) * ab[:, 0] + (py - a[:, 1]) * ab[:, 1]) / l2, 0.0, 1.0)
+        q = a + t[:, None] * ab
+        edge_d = float(np.min(np.hypot(px - q[:, 0], py - q[:, 1]))) - hw
+        if edge_d < best:
+            best = edge_d
+    return best
 
 
-def _is_narrow_island(pt: np.ndarray, road_bands: list[tuple[np.ndarray, float]], min_width_m: float = MIN_ISLAND_WIDTH_M) -> bool:
-    """True when `pt` sits inside a narrow median or traffic island (`< min_width_m` between opposing carriageways)."""
+def _extract_infra_furn(feats, cell_key) -> list[tuple[int, str, str, str, bool]]:
+    """Memoize matching DE street-furniture feature indices & metadata on an `infrastructure` layer."""
+    if feats is None or len(feats) == 0:
+        return []
+    cached = feats.__dict__.get("_de_infra_furn")
+    if cached is not None:
+        return cached
+    cls_arr = feats.attrs.get("class")
+    name_arr = feats.attrs.get("name")
+    tags_arr = feats.attrs.get("tags")
+    ids_arr = getattr(feats, "ids", None)
+    out: list[tuple[int, str, str, str, bool]] = []
+    for i in range(len(feats)):
+        cls_v = str(cls_arr[i] or "").lower() if cls_arr is not None else ""
+        tags = _parse_tags(tags_arr[i] if tags_arr is not None else None)
+        hwy = str(tags.get("highway", "")).lower()
+        pt_tag = str(tags.get("public_transport", "")).lower()
+        am = str(tags.get("amenity", "")).lower()
+        mm = str(tags.get("man_made", "")).lower()
+
+        is_bus = cls_v == "bus_stop" or hwy == "bus_stop" or am == "bus_stop" or pt_tag == "platform"
+        is_cab = mm == "street_cabinet" or cls_v == "street_cabinet"
+        is_locker = am == "parcel_locker" or cls_v == "parcel_locker"
+        is_recycle = (am == "recycling" or cls_v == "recycling") and str(tags.get("recycling_type", "")).lower() != "centre"
+        is_fuel = am == "fuel" or cls_v == "fuel"
+        if not (is_bus or is_cab or is_locker or is_recycle or is_fuel):
+            continue
+        fid = str(ids_arr[i]) if ids_arr is not None else f"{cell_key}:{i}"
+        if is_fuel:
+            kind = "fuel"
+            s_name = str(name_arr[i]) if (name_arr is not None and name_arr[i]) else str(tags.get("brand") or tags.get("name") or "")
+            no_shelter = False
+        elif is_bus:
+            kind = "bus"
+            s_name = str(name_arr[i]) if (name_arr is not None and name_arr[i]) else str(tags.get("name") or "Haltestelle")
+            no_shelter = str(tags.get("shelter", "")).lower() in ("no", "none", "false", "0") or (
+                pt_tag == "stop_position" and str(tags.get("shelter", "")).lower() != "yes"
+            )
+        elif is_cab:
+            kind, s_name, no_shelter = "cab", "", False
+        elif is_locker:
+            kind, s_name, no_shelter = "locker", "", False
+        else:
+            kind, s_name, no_shelter = "recycle", "", False
+        out.append((i, fid, kind, s_name, no_shelter))
+    feats.__dict__["_de_infra_furn"] = out
+    return out
+def _is_narrow_island(pt: np.ndarray, road_bands: list[tuple], min_width_m: float = MIN_ISLAND_WIDTH_M) -> bool:
     hits = [h for h in _road_edge_clearances(pt, road_bands) if h[0] < min_width_m + 2.0]
     if any(h[0] < 0.0 for h in hits):
         return True
@@ -470,34 +527,15 @@ def plan_de_street_furniture(
         dlat = half / 111320.0
         dlon = half / (111320.0 * max(0.2, math.cos(math.radians(float(lat0)))))
         seen: set[str] = set()
-        for cell_key in mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon):
+        bbox_cells = list(mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon))
+        for cell_key in bbox_cells:
             try:
                 cd = md.cell(cell_key, layers=("infrastructure",), kind="demand")
                 feats = cd.layers.get("infrastructure")
             except Exception:
                 continue
-            if feats is None or len(feats) == 0:
-                continue
-            cls_arr = feats.attrs.get("class")
-            name_arr = feats.attrs.get("name")
-            tags_arr = feats.attrs.get("tags")
-            for i in range(len(feats)):
-                fid = str(feats.ids[i]) if getattr(feats, "ids", None) is not None else f"{cell_key}:{i}"
+            for i, fid, kind, s_name, no_shelter in _extract_infra_furn(feats, cell_key):
                 if fid in seen:
-                    continue
-                cls_v = str(cls_arr[i] or "").lower() if cls_arr is not None else ""
-                tags = _parse_tags(tags_arr[i] if tags_arr is not None else None)
-                hwy = str(tags.get("highway", "")).lower()
-                pt_tag = str(tags.get("public_transport", "")).lower()
-                am = str(tags.get("amenity", "")).lower()
-                mm = str(tags.get("man_made", "")).lower()
-
-                is_bus = cls_v == "bus_stop" or hwy == "bus_stop" or am == "bus_stop" or pt_tag == "platform"
-                is_cab = mm == "street_cabinet" or cls_v == "street_cabinet"
-                is_locker = am == "parcel_locker" or cls_v == "parcel_locker"
-                is_recycle = (am == "recycling" or cls_v == "recycling") and str(tags.get("recycling_type", "")).lower() != "centre"
-                is_fuel = am == "fuel" or cls_v == "fuel"
-                if not (is_bus or is_cab or is_locker or is_recycle or is_fuel):
                     continue
                 seen.add(fid)
                 parts = feats.parts(i)
@@ -510,17 +548,9 @@ def plan_de_street_furniture(
                 if not roadsmod.box_owns(box, float(pt[0]), float(pt[1])):
                     continue
 
-                if is_fuel:
-                    f_name = ""
-                    if name_arr is not None and name_arr[i]:
-                        f_name = str(name_arr[i])
-                    if not f_name:
-                        f_name = str(tags.get("brand") or tags.get("name") or "")
-                    fuel_cands.append((pt, fid, f_name))
-                elif is_bus:
-                    no_shelter = str(tags.get("shelter", "")).lower() in ("no", "none", "false", "0") or (
-                        pt_tag == "stop_position" and str(tags.get("shelter", "")).lower() != "yes"
-                    )
+                if kind == "fuel":
+                    fuel_cands.append((pt, fid, s_name))
+                elif kind == "bus":
                     snapped = None
                     has_shelter = False
                     if not no_shelter:
@@ -536,13 +566,8 @@ def plan_de_street_furniture(
                         )
                         has_shelter = False
                     if snapped is not None:
-                        s_name = ""
-                        if name_arr is not None and name_arr[i]:
-                            s_name = str(name_arr[i])
-                        if not s_name:
-                            s_name = str(tags.get("name") or "Haltestelle")
                         bus_raw.append((*snapped, s_name, has_shelter))
-                elif is_cab:
+                elif kind == "cab":
                     snapped = _snap_to_outer_sidewalk(
                         pt, near_roads, all_road_bands, tram_lines, walk_polys, rings_arr,
                         min_front_clear_m=ROAD_CLEAR_M, hx=0.48, hy=0.22,
@@ -551,14 +576,14 @@ def plan_de_street_furniture(
                         pos, _, _ = snapped
                         if not any(math.hypot(float(pos[0]) - dx, float(pos[1]) - dy) < DOOR_CLEAR_M for dx, dy in door_pts):
                             cab_raw.append(snapped)
-                elif is_locker:
+                elif kind == "locker":
                     snapped = _snap_to_outer_sidewalk(
                         pt, near_roads, all_road_bands, tram_lines, walk_polys, rings_arr,
                         min_front_clear_m=ROAD_CLEAR_M, hx=1.24, hy=0.38,
                     )
                     if snapped is not None:
                         lock_raw.append(snapped)
-                elif is_recycle:
+                elif kind == "recycle":
                     snapped = _snap_to_outer_sidewalk(
                         pt, near_roads, all_road_bands, tram_lines, walk_polys, rings_arr,
                         min_front_clear_m=ROAD_CLEAR_M, hx=1.36, hy=0.44,
@@ -568,7 +593,6 @@ def plan_de_street_furniture(
                         sup_rec_xy.append((float(pt[0]), float(pt[1])))
 
         # Also scan Overture `places` for fuel stations when `infrastructure` had none at that site.
-        bbox_cells = list(mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon))
         for cand, xy_local in classifier.load_tile_pois(md, frame, bbox_cells, 0.0, 0.0):
             cat = (cand.category or "").lower()
             if cat not in ("gas_station", "fueling_station"):
@@ -577,7 +601,7 @@ def plan_de_street_furniture(
                 continue
             if any(math.hypot(float(xy_local[0]) - float(fp[0]), float(xy_local[1]) - float(fp[1])) < 35.0 for fp, _, _ in fuel_cands):
                 continue
-            fuel_cands.append((xy_local, cand.fid, cand.brand or cand.name or ""))
+            fuel_cands.append((xy_local, cand.poi_id, cand.display_name or ""))
 
     fuel_raw: list[tuple[np.ndarray, np.ndarray, np.ndarray, str, str, str, str, str]] = []
     placed_fuel_xy: list[tuple[float, float]] = []

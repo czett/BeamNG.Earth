@@ -901,6 +901,9 @@ def build_shop_fascias_mesh(
     return True
 
 
+_BARRIER_CLASSES = ("fence", "wall", "hedge", "retaining_wall", "noise_barrier")
+
+
 def _infra_barriers(md, frame, box: tuple[float, float, float, float], reach_m: float = 20.0) -> list[np.ndarray]:
     """Load mapped OSM `fence` / `wall` / `hedge` lines inside Germany when Feature C runs."""
     if md is None:
@@ -914,7 +917,6 @@ def _infra_barriers(md, frame, box: tuple[float, float, float, float], reach_m: 
     import mapcells
     out: list[np.ndarray] = []
     seen: set[str] = set()
-    classes = {"fence", "wall", "hedge", "retaining_wall", "noise_barrier"}
     for cell_key in mapcells.cells_for_bbox(float(lat0) - dlat, float(lon0) - dlon, float(lat0) + dlat, float(lon0) + dlon):
         try:
             cd = md.cell(cell_key, layers=("infrastructure",), kind="demand")
@@ -922,6 +924,12 @@ def _infra_barriers(md, frame, box: tuple[float, float, float, float], reach_m: 
         except Exception:
             continue
         if feats is None or not len(feats) or "class" not in feats.attrs:
+            continue
+        cls_mask = feats.__dict__.get("_de_barrier_mask")
+        if cls_mask is None:
+            cls_mask = np.isin(feats.attrs["class"], _BARRIER_CLASSES)
+            feats.__dict__["_de_barrier_mask"] = cls_mask
+        if not cls_mask.any():
             continue
         bounds = feats.boxes(frame)
         bounds_arr = np.asarray(bounds, dtype=np.float64) if bounds is not None else np.empty((0, 4), dtype=np.float64)
@@ -933,7 +941,7 @@ def _infra_barriers(md, frame, box: tuple[float, float, float, float], reach_m: 
             & (bounds_arr[:, 3] >= box[1] - reach_m)
             & (bounds_arr[:, 1] <= box[3] + reach_m)
         )
-        for i in np.flatnonzero(near & np.isin(feats.attrs["class"], list(classes))):
+        for i in np.flatnonzero(near & cls_mask):
             fid = str(feats.ids[i])
             if fid in seen:
                 continue

@@ -324,6 +324,7 @@ def uv_subrect(uv: tuple[float, float, float, float], rx0: float, ry0: float, rx
     )
 
 
+@functools.lru_cache(maxsize=128)
 def render_bus_stop_panel(stop_name: str, w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     """Render German StVO 224 `H` Haltestelle sign (left 25%) + timetable & stop name (right 75%)."""
     img = Image.new("RGB", (w, h), (236, 238, 232))
@@ -426,6 +427,7 @@ FUEL_PYLON_PALETTES: dict[str, tuple[tuple[int, int, int], tuple[int, int, int],
 }
 
 
+@functools.lru_cache(maxsize=128)
 def render_fuel_pylon(
     brand_key: str,
     brand_label: str,
@@ -469,7 +471,8 @@ def render_fuel_pylon(
     return img
 
 
-def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+@functools.lru_cache(maxsize=128)
+def _render_housenumber_grid_cached(numbers: tuple[str, ...], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
     """Pack up to 4 German royal-blue/white enamel house number plaques (4x1 grid, 128x64 each) into one 512x64 slot."""
     img = Image.new("RGB", (w, h), (16, 48, 96))
     draw = ImageDraw.Draw(img)
@@ -483,6 +486,10 @@ def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H
         tw, th = bx[2] - bx[0], bx[3] - bx[1]
         draw.text((cx0 + (cell_w - tw) / 2.0 - bx[0], cy0 + (cell_h - th) / 2.0 - bx[1]), fitted, font=font, fill=(250, 250, 250))
     return img
+
+
+def render_housenumber_grid(numbers: list[str], w: int = SLOT_W, h: int = SLOT_H) -> Image.Image:
+    return _render_housenumber_grid_cached(tuple(numbers[:4]), w, h)
 
 
 def _atlas_dims(count: int) -> tuple[int, int, int]:

@@ -18,6 +18,9 @@ M.DUSK_GLOW_COLOR = '1 0.82 0.56'
 M.DUSK_SHOP_NITS = 22
 M.DUSK_PYLON_NITS = 34
 M.DUSK_WIN_NITS = 14
+local DUSK_SHOP_NITS_STR = tostring(M.DUSK_SHOP_NITS)
+local DUSK_PYLON_NITS_STR = tostring(M.DUSK_PYLON_NITS)
+local DUSK_WIN_NITS_STR = tostring(M.DUSK_WIN_NITS)
 M.CHECK_S = 1.0
 
 M.NO_SHADOW_WHATS = { destreets = true, deshops = true }
@@ -37,6 +40,7 @@ local duskActive = false
 local lastDuskCheck = -1e9
 local settingsMod = nil
 local nightlightsMod = nil
+local sweepBuf = {}
 M.count = 0
 M.pbrActive = false
 
@@ -245,7 +249,7 @@ function M.syncDuskGlow(isNight, force)
       if savedDuskShop.emissiveFactor == '' then savedDuskShop.emissiveFactor = false end
       if savedDuskShop.emissiveIntensityNits == '' then savedDuskShop.emissiveIntensityNits = false end
       mShop:setField('emissiveFactor', 0, M.DUSK_GLOW_COLOR)
-      mShop:setField('emissiveIntensityNits', 0, tostring(M.DUSK_WIN_NITS))
+      mShop:setField('emissiveIntensityNits', 0, DUSK_WIN_NITS_STR)
       pcall(mShop.flush, mShop)
       pcall(mShop.reload, mShop)
     end
@@ -255,9 +259,9 @@ function M.syncDuskGlow(isNight, force)
     if entry.emissive and not duskMatState[name] then
       local m = scenetree.findObject(name)
       if m then
-        local nits = name:sub(1, 10) == 'bne_de_fp_' and M.DUSK_PYLON_NITS or M.DUSK_SHOP_NITS
+        local nitsStr = name:sub(1, 10) == 'bne_de_fp_' and DUSK_PYLON_NITS_STR or DUSK_SHOP_NITS_STR
         m:setField('emissiveFactor', 0, M.DUSK_GLOW_COLOR)
-        m:setField('emissiveIntensityNits', 0, tostring(nits))
+        m:setField('emissiveIntensityNits', 0, nitsStr)
         pcall(m.flush, m)
         pcall(m.reload, m)
         duskMatState[name] = true
@@ -403,9 +407,14 @@ end
 function M.sweep()
   if next(pendingDel) == nil then return 0 end
   local deleted = 0
-  local done = {}
-  for name in pairs(pendingDel) do done[#done + 1] = name end
-  for _, name in ipairs(done) do
+  local n = 0
+  for name in pairs(pendingDel) do
+    n = n + 1
+    sweepBuf[n] = name
+  end
+  for i = n + 1, #sweepBuf do sweepBuf[i] = nil end
+  for i = 1, n do
+    local name = sweepBuf[i]
     pendingDel[name] = nil
     local entry = mats[name]
     if entry and entry.refs <= 0 then

@@ -24,6 +24,7 @@ local sea = require('beamngEarth/sea')
 local speedtraps = require('beamngEarth/speedtraps')
 
 local M = {}
+M._deEnh = require('beamngEarth/deEnhancer')
 
 M.MATERIAL_FILES = { '/levels/west_coast_usa/art/road/main.materials.json',
   '/levels/beamng_earth/art/shapes/beamngEarth/fr_traffic/main.materials.json',
@@ -469,7 +470,7 @@ local function dropTile(key)
   if t.signs then deleteQ[#deleteQ + 1] = t.signs end
   if t.destreets then deleteQ[#deleteQ + 1] = t.destreets end
   if t.deshops then deleteQ[#deleteQ + 1] = t.deshops end
-  require('beamngEarth/deEnhancer').release(key)
+  M._deEnh.release(key)
   -- and its meshes not made yet (from KyzoFox's 1.5.4, PR #64): a tile sent again under the same key left its old
   -- walkQ / held / createQ entries, which were then made for the new tile from pooled shape paths that had just been
   -- reported gone and refilled with another tile's shape: that tile's buildings drawn here at its ground height (houses
@@ -684,7 +685,7 @@ local function updateCollideRange()
     elseif M.collideNear({ cx = d[2], cy = d[3] }, M.TILE_M) then dirtyAt[sq] = nil; markDirty('spot') end
   end
   local pos = veh and veh.getPosition and veh:getPosition() or nil
-  local deEnh = require('beamngEarth/deEnhancer')
+  local deEnh = M._deEnh
   local deOn = deEnh.isEnabled()
   local dropped = nil       -- ids of colliders dropped here (BEHIND / UNCOLLIDE_M): none of them is due any more
   for key, t in pairs(tiles) do
@@ -1091,7 +1092,7 @@ function M.onGeoTile(msg, currentAnchor, a)
     end
   end
   if type(data.deFaces) == 'table' then
-    require('beamngEarth/deEnhancer').retain(key, data.deFaces)
+    M._deEnh.retain(key, data.deFaces)
   end
   geoRows(key, t, data)
   queueGeoParts(key, t, data)
@@ -1595,7 +1596,7 @@ function M.onTile(msg, currentAnchor, a)
     tiles[key].sound = true
   end
   if type(data.deFaces) == 'table' then
-    require('beamngEarth/deEnhancer').retain(key, data.deFaces)
+    M._deEnh.retain(key, data.deFaces)
   end
   for _, what in ipairs({ 'signs', 'wire', 'destreets', 'deshops' }) do
     if type(data[what]) == 'table' and data[what].shape and type(data[what].pos) == 'table' then
@@ -2409,7 +2410,7 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
     sinceChange = stopwatch.new()
   end
   if #deleteQ == 0 then
-    require('beamngEarth/deEnhancer').sweep()
+    M._deEnh.sweep()
   end
   while #createQ > 0 and gov:try('roadChunk') do
     local q = table.remove(createQ, 1)
@@ -2493,7 +2494,7 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
       local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
       -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
       local collide = (q.what == 'bldcol' or q.what == 'walkcol' or q.what == 'railcol' or q.what == 'buscol') and 'Collision Mesh' or not isRoad
-      local deEnh = require('beamngEarth/deEnhancer')
+      local deEnh = M._deEnh
       local noShadow = deEnh.NO_SHADOW_WHATS and deEnh.NO_SHADOW_WHATS[q.what] == true
       local ok, id = pcall(createWalk, walk, staged and 'None' or collide, noShadow)
       if ok then slotMade(id, walk.shape, (q.what == 'deck' or q.what == 'tunnel') and t.waterguard or nil) end
@@ -3182,7 +3183,7 @@ function M.clear()
     slotObjGone(id)
   end
   deleteQ = {}
-  require('beamngEarth/deEnhancer').clearAll()
+  M._deEnh.clearAll()
   walkQ, parked = {}, {}
   if collisionDirty then be:reloadCollision(); M.collisionRebuilt() end
 end
@@ -3205,7 +3206,7 @@ function M.reset()
   for n, d in pairs(slotDropped) do slotsGone[#slotsGone + 1] = { n, d[1], d[2] } end
   objSlot, slotLive, slotDropped = {}, {}, {}
   tiles, createQ, deleteQ, walkQ, anchorId, loadedMaterials = {}, {}, {}, {}, nil, false
-  require('beamngEarth/deEnhancer').clearAll()
+  M._deEnh.clearAll()
   far, farQ, farSeen = {}, {}, {}
   held, parked, newColliders, swapQuiet = {}, {}, {}, nil     -- (walkQ entries of objects gone with the level)
   collisionDirty, deletesDirty, dirtyAt, extBoxes, farDeletes = false, false, {}, {}, {}

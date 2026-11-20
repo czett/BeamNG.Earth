@@ -8,6 +8,7 @@ Operates strictly inside Germany when `BNE_DE_STREET_IMMERSION` is enabled, keep
 
 import colorsys
 import hashlib
+import json
 import math
 import numpy as np
 
@@ -131,6 +132,19 @@ SOCKEL_HEIGHT_M = 0.75
 EAVE_AO_HEIGHT_M = 0.35
 
 _EXCLUDE_MATS_CACHE: tuple[int, np.ndarray] | None = None
+_BALCONY_TOKS_CACHE: tuple[int, tuple, tuple, tuple] | None = None
+
+_ADAPT_SKIP_CLASSES = frozenset({
+    "landmark", "ship", "pier", "pyramid", "elevator", "tank", "greenhouse", "mast",
+    "bridge_part", "bridge_pier", "toll_booth",
+})
+_WOOD_FACADES = frozenset({"wood", "timber", "log", "wood_boards", "timber_framing"})
+_CONCRETE_FACADES = frozenset({
+    "concrete", "cement", "precast", "cement_block", "cinder_block", "concrete_block", "block",
+})
+_PITCHED_SHAPES = frozenset({
+    "gabled", "hipped", "half-hipped", "pyramidal", "skillion", "gambrel", "mansard",
+})
 
 
 def _wall_exclude_mats_arr(bld) -> np.ndarray:
@@ -228,8 +242,7 @@ def adapt_building(spec, attrs: dict, lat: float | None, lon: float | None):
 
     cls = (getattr(spec, "cls", None) or "").lower()
     if (
-        cls in {"landmark", "ship", "pier", "pyramid", "elevator", "tank", "greenhouse", "mast",
-                "bridge_part", "bridge_pier", "toll_booth"}
+        cls in _ADAPT_SKIP_CLASSES
         or cls in bld.BRIDGE_CLASSES
         or cls in bld.CANOPY_CLASSES
         or getattr(spec, "fr_house", None)
@@ -253,7 +266,6 @@ def adapt_building(spec, attrs: dict, lat: float | None, lon: float | None):
     hn_val = attrs.get("addr:housenumber") or attrs.get("housenumber")
     if not hn_val and attrs.get("tags"):
         try:
-            import json
             t_dict = attrs["tags"] if isinstance(attrs["tags"], dict) else json.loads(str(attrs["tags"]))
             if isinstance(t_dict, dict):
                 hn_val = t_dict.get("addr:housenumber") or t_dict.get("housenumber")
@@ -299,11 +311,11 @@ def adapt_building(spec, attrs: dict, lat: float | None, lon: float | None):
         spec.facade = bld.custom_look(cur_mat, rgb)
         if spec.wall is not None:
             spec.wall = spec.facade
-    elif fm in ("wood", "timber", "log", "wood_boards", "timber_framing"):
+    elif fm in _WOOD_FACADES:
         spec.facade = bld.custom_look(bld.SIDING, _pick(((0.46, 0.34, 0.25), (0.38, 0.29, 0.22), (0.54, 0.49, 0.43)), seed, "de_wood"))
         if spec.wall is not None:
             spec.wall = spec.facade
-    elif fm in ("concrete", "cement", "precast", "cement_block", "cinder_block", "concrete_block", "block"):
+    elif fm in _CONCRETE_FACADES:
         spec.facade = bld.custom_look(cur_mat, _pick(DE_INDUSTRIAL_PANEL_TINTS, seed, "de_conc"))
         if spec.wall is not None:
             spec.wall = spec.facade
@@ -458,7 +470,6 @@ def compute_roof_overhangs(items: list) -> None:
     """Compute safe per-edge roof overhangs (`spec.de_eaves`) checking neighbor building clearance."""
     import buildings as bld
 
-    pitched_shapes = {"gabled", "hipped", "half-hipped", "pyramidal", "skillion", "gambrel", "mansard"}
     if not items:
         return
 
@@ -488,7 +499,7 @@ def compute_roof_overhangs(items: list) -> None:
                 grid.setdefault((gx, gy), []).append(idx)
 
     for idx, (spec, ring, (x0, y0, x1, y1), z_bot, z_top) in enumerate(entries):
-        if not is_de_spec(spec) or spec.roof not in pitched_shapes:
+        if not is_de_spec(spec) or spec.roof not in _PITCHED_SHAPES:
             continue
         oh_max = default_overhang_m(spec)
         gx0, gy0 = int(math.floor((x0 - 1.0) / cell_m)), int(math.floor((y0 - 1.0) / cell_m))
@@ -503,7 +514,7 @@ def compute_roof_overhangs(items: list) -> None:
         n = len(ring)
         pad = 1.0
         neighbors = [
-            entries[j][1]
+            (entries[j][1], entries[j][2])
             for j in cand_ids
             if not (
                 entries[j][2][2] < x0 - pad
@@ -535,8 +546,9 @@ def compute_roof_overhangs(items: list) -> None:
             # Probe slightly outside the edge for direct containment inside adjacent footprint
             for t_probe in (0.2, 0.5, 0.8):
                 pt = a + d * t_probe + out * 0.22
-                for nb in neighbors:
-                    if nb[:, 0].min() <= pt[0] <= nb[:, 0].max() and nb[:, 1].min() <= pt[1] <= nb[:, 1].max():
+                px_p, py_p = float(pt[0]), float(pt[1])
+                for nb, (nx0, ny0, nx1, ny1) in neighbors:
+                    if nx0 <= px_p <= nx1 and ny0 <= py_p <= ny1:
                         if bld._inside(nb, pt):
                             blocked_inside = True
                             break
@@ -549,8 +561,8 @@ def compute_roof_overhangs(items: list) -> None:
             s_lo = min(0.08, 0.1 * L)
             s_hi = L - s_lo
             min_out = 99.0
-            for nb in neighbors:
-                if nb[:, 0].max() < ex0 or nb[:, 0].min() > ex1 or nb[:, 1].max() < ey0 or nb[:, 1].min() > ey1:
+            for nb, (nx0, ny0, nx1, ny1) in neighbors:
+                if nx1 < ex0 or nx0 > ex1 or ny1 < ey0 or ny0 > ey1:
                     continue
                 m = len(nb)
                 rel = nb - a
@@ -1041,12 +1053,18 @@ def _add_entrance_canopy_and_balconies(
     if mesh.n > 44000:
         return
 
-    try:
-        glass_tok = (bld.MATERIALS.index(bld.GLASSHOUSE), (184, 214, 232, 255))
-        steel_tok = (bld.MATERIALS.index(bld.METALWALL), (54, 58, 64, 255))
-        conc_tok = (bld.MATERIALS.index(bld.CONCRETE), (206, 208, 204, 255))
-    except ValueError:
-        return
+    global _BALCONY_TOKS_CACHE
+    mats = bld.MATERIALS
+    if _BALCONY_TOKS_CACHE is not None and _BALCONY_TOKS_CACHE[0] == id(mats):
+        _, glass_tok, steel_tok, conc_tok = _BALCONY_TOKS_CACHE
+    else:
+        try:
+            glass_tok = (mats.index(bld.GLASSHOUSE), (184, 214, 232, 255))
+            steel_tok = (mats.index(bld.METALWALL), (54, 58, 64, 255))
+            conc_tok = (mats.index(bld.CONCRETE), (206, 208, 204, 255))
+        except ValueError:
+            return
+        _BALCONY_TOKS_CACHE = (id(mats), glass_tok, steel_tok, conc_tok)
 
     eaves = getattr(spec, "de_eaves", None)
     axis_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)

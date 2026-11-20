@@ -8,6 +8,7 @@ Generates multi-stop transport jobs anywhere on Earth using:
 All coordinates are snapped onto drivable ground roads (excluding footway/cycleway/pedestrian/steps/path/service-only
 and bridges/tunnels via roads.ground_parts) so the client GPS and kerbside zone markers always sit on valid roads.
 """
+import functools
 import hashlib
 import json
 import logging
@@ -270,6 +271,53 @@ LOGISTICS_HUB_CATS = frozenset({
 
 _bus_cache_lock = threading.Lock()
 _bus_cache = {}
+_req_tls = threading.local()
+_towns_cache = None  # (ts_id, ts_len, lats_np, lons_np, names_tuple)
+
+_CLOSED_STATUSES = frozenset({"permanently_closed", "temporarily_closed", "closed"})
+_LAND_USE_CLASSES = frozenset({"industrial", "commercial", "retail"})
+_PARKING_CLASSES = frozenset({"parking", "parking_space"})
+_UNPAVED_SURFACES = frozenset({"grass", "dirt", "mud", "sand"})
+_BUS_STOP_CLASSES = frozenset({"bus_stop", "platform", "bus_station", "stop_position"})
+_BUS_HUB_CATS = frozenset({"bus_station", "station", "terminal"})
+_SUBURB_SUBTYPES = frozenset({"neighborhood", "macrohood", "hamlet"})
+_LOGISTICS_ALL_BLD_CLASSES = LOGISTICS_COMMERCIAL_CLASSES | LOGISTICS_HUB_CLASSES
+_ADDR_HN_KEYS = ("housenumber", "number", "addr_housenumber", "addr:housenumber")
+_ADDR_ST_KEYS = ("street", "addr_street", "addr:street")
+_ADDR_LOC_KEYS = ("locality", "city", "addr_city", "addr:city")
+_CARGO_DOMAIN_TAG_KEYS = ("amenity", "shop", "craft", "industrial", "building", "landuse", "healthcare")
+_SECTOR_TAG_KEYS = ("amenity", "shop", "craft", "industrial", "landuse", "healthcare", "tourism", "railway", "public_transport", "aeroway")
+_CARGO_NAME_MEDICAL = ("pharmacy", "hospital", "clinic", "medical", "apotheke")
+_CARGO_NAME_FOOD = ("supermarket", "grocery", "bakery", "restaurant", "cafe", "bistro", "market")
+_CARGO_NAME_HARDWARE = ("hardware", "timber", "lumber", "builder", "auto parts", "garage", "repair")
+_CARGO_NAME_FUEL = ("fuel", "petrol", "shell", "bp ", "chevron", "exxon")
+_CARGO_NAME_INDUSTRIAL = ("industrial", "warehouse", "logistics", "freight", "factory")
+_TAXI_HUB_NAME_WORDS = ("airport", "station", "terminal", "hotel", "hospital")
+_TAXI_TRANSIT_WORDS = ("airport", "station", "terminal", "ferry", "train", "rail")
+_TAXI_VIP_WORDS = ("hotel", "resort", "museum", "theatre", "theater", "palace", "restaurant")
+_DOMAIN_PRIORITY = {"fuel": 5, "medical": 4, "food": 4, "hardware": 3, "retail": 2, "industrial": 1, "general": 0}
+_CARGO_TIER_BANDS = {"local": (0.05, 0.55), "city": (0.30, 0.75), "regional": (0.55, 0.90), "long": (0.70, 1.00)}
+
+
+def _get_req_cache():
+    return getattr(_req_tls, "cache", None)
+
+
+def _towns_arrays():
+    global _towns_cache
+    ts = randomplace.towns() or ()
+    n = len(ts)
+    if n == 0:
+        return None
+    ts_id = id(ts)
+    cached = _towns_cache
+    if cached is not None and cached[0] == ts_id and cached[1] == n:
+        return cached[2], cached[3], cached[4]
+    lats = np.array([t[0] for t in ts], dtype=np.float64)
+    lons = np.array([t[1] for t in ts], dtype=np.float64)
+    names = tuple(t[2] for t in ts)
+    _towns_cache = (ts_id, n, lats, lons, names)
+    return lats, lons, names
 
 
 def _cos_lat(lat):
@@ -374,12 +422,12 @@ def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats
     nm = str(name or "").lower()
     cat_set = {str(c or "").lower() for c in (cats or ())}
     if mode == "taxi":
-        is_hub = bool(cat_set & TAXI_HUB_CATS) or any(k in nm for k in ("airport", "station", "terminal", "hotel", "hospital"))
+        is_hub = bool(cat_set & TAXI_HUB_CATS) or any(k in nm for k in _TAXI_HUB_NAME_WORDS)
         if kind == "pickup":
             return 2.5 if is_hub else (2.0 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.2)
         return 3.0 if (is_hub or tier in ("regional", "long")) else (2.4 if _stable_index(seed, f"tdw:{idx}", 2) == 0 else 2.6)
     if mode == "bus":
-        is_hub = bool(cat_set & {"bus_station", "station", "terminal"}) or any(k in nm for k in BUS_HUB_KEYWORDS)
+        is_hub = bool(cat_set & _BUS_HUB_CATS) or any(k in nm for k in BUS_HUB_KEYWORDS)
         if is_hub:
             return round(4.5 + 0.5 * _stable_index(seed, f"bdw:{idx}", 2), 1)
         return round(3.0 + 0.2 * _stable_index(seed, f"bdw:{idx}", 5), 1)
@@ -406,48 +454,56 @@ def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats
     return round(min(hi, max(lo, base)), 1)
 
 
+@functools.lru_cache(maxsize=2048)
+def _classify_poi_cargo_domain_cached(cat, tax, bld_class, tag_vals, nm):
+    tokens = []
+    if cat:
+        tokens.append(cat)
+    if tax:
+        tokens.append(tax)
+    if bld_class:
+        tokens.append(bld_class)
+    for val in tag_vals:
+        if val:
+            tokens.append(val)
+
+    for tok_set, dom in (
+        (_FUEL_TOKENS, "fuel"),
+        (_MEDICAL_TOKENS, "medical"),
+        (_FOOD_TOKENS, "food"),
+        (_HARDWARE_TOKENS, "hardware"),
+        (_RETAIL_TOKENS, "retail"),
+        (_INDUSTRIAL_TOKENS, "industrial"),
+    ):
+        for t in tokens:
+            if t in tok_set:
+                return dom
+
+    if nm:
+        if any(w in nm for w in _CARGO_NAME_MEDICAL):
+            return "medical"
+        if any(w in nm for w in _CARGO_NAME_FOOD):
+            return "food"
+        if any(w in nm for w in _CARGO_NAME_HARDWARE):
+            return "hardware"
+        if any(w in nm for w in _CARGO_NAME_FUEL):
+            return "fuel"
+        if any(w in nm for w in _CARGO_NAME_INDUSTRIAL):
+            return "industrial"
+    return "general"
+
+
 def classify_poi_cargo_domain(cat="", tax="", bld_class="", tags=None, name=""):
     """Classify an Overture/OSM POI into a semantic cargo domain ('food'|'medical'|'hardware'|'fuel'|'retail'|'industrial'|'general')."""
-    tokens = []
-    for v in (cat, tax, bld_class):
-        s = str(v or "").strip().lower()
-        if s:
-            tokens.append(s)
-    if isinstance(tags, dict):
-        for k in ("amenity", "shop", "craft", "industrial", "building", "landuse", "healthcare"):
-            val = str(tags.get(k) or "").strip().lower()
-            if val:
-                tokens.append(val)
+    c = str(cat or "").strip().lower()
+    tx = str(tax or "").strip().lower()
+    bc = str(bld_class or "").strip().lower()
+    if isinstance(tags, dict) and tags:
+        tag_vals = tuple(str(tags.get(k) or "").strip().lower() for k in _CARGO_DOMAIN_TAG_KEYS)
+    else:
+        tag_vals = ()
     nm = str(name or "").strip().lower()
-
-    def _has_any(tok_set):
-        return any(t in tok_set for t in tokens)
-
-    if _has_any(_FUEL_TOKENS):
-        return "fuel"
-    if _has_any(_MEDICAL_TOKENS):
-        return "medical"
-    if _has_any(_FOOD_TOKENS):
-        return "food"
-    if _has_any(_HARDWARE_TOKENS):
-        return "hardware"
-    if _has_any(_RETAIL_TOKENS):
-        return "retail"
-    if _has_any(_INDUSTRIAL_TOKENS):
-        return "industrial"
-
-    # Keyword fallback on POI name when category/tags are sparse
-    if any(w in nm for w in ("pharmacy", "hospital", "clinic", "medical", "apotheke")):
-        return "medical"
-    if any(w in nm for w in ("supermarket", "grocery", "bakery", "restaurant", "cafe", "bistro", "market")):
-        return "food"
-    if any(w in nm for w in ("hardware", "timber", "lumber", "builder", "auto parts", "garage", "repair")):
-        return "hardware"
-    if any(w in nm for w in ("fuel", "petrol", "shell", "bp ", "chevron", "exxon")):
-        return "fuel"
-    if any(w in nm for w in ("industrial", "warehouse", "logistics", "freight", "factory")):
-        return "industrial"
-    return "general"
+    return _classify_poi_cargo_domain_cached(c, tx, bc, tag_vals, nm)
 
 
 _SECTOR_TOKEN_RULES = (
@@ -496,25 +552,24 @@ _SECTOR_NAME_KEYWORDS = (
 )
 
 
-def derive_sector_label(cat="", tax="", bld_class="", tags=None, name="", kind="", stop_type=""):
-    """Derive a clean human-readable business/POI sector label from Overture/OSM metadata."""
+@functools.lru_cache(maxsize=2048)
+def _derive_sector_label_cached(cat, tax, bld_class, tag_vals, nm, kind, stop_type):
     tokens = []
-    for v in (cat, tax, bld_class):
-        s = str(v or "").strip().lower()
-        if s:
-            tokens.append(s)
-    if isinstance(tags, dict):
-        for k in ("amenity", "shop", "craft", "industrial", "landuse", "healthcare",
-                  "tourism", "railway", "public_transport", "aeroway"):
-            val = str(tags.get(k) or "").strip().lower()
-            if val:
-                tokens.append(val)
+    if cat:
+        tokens.append(cat)
+    if tax:
+        tokens.append(tax)
+    if bld_class:
+        tokens.append(bld_class)
+    for val in tag_vals:
+        if val:
+            tokens.append(val)
 
     for label, tok_set in _SECTOR_TOKEN_RULES:
-        if any(t in tok_set for t in tokens):
-            return label
+        for t in tokens:
+            if t in tok_set:
+                return label
 
-    nm = str(name or "").strip().lower()
     if nm:
         for label, words in _SECTOR_NAME_KEYWORDS:
             if any(w in nm for w in words):
@@ -525,6 +580,19 @@ def derive_sector_label(cat="", tax="", bld_class="", tags=None, name="", kind="
     if stop_type == "loading_bay" and kind in ("loading", "delivery"):
         return "Logistics Depot"
     return ""
+
+
+def derive_sector_label(cat="", tax="", bld_class="", tags=None, name="", kind="", stop_type=""):
+    """Derive a clean human-readable business/POI sector label from Overture/OSM metadata."""
+    c = str(cat or "").strip().lower()
+    tx = str(tax or "").strip().lower()
+    bc = str(bld_class or "").strip().lower()
+    if isinstance(tags, dict) and tags:
+        tag_vals = tuple(str(tags.get(k) or "").strip().lower() for k in _SECTOR_TAG_KEYS)
+    else:
+        tag_vals = ()
+    nm = str(name or "").strip().lower()
+    return _derive_sector_label_cached(c, tx, bc, tag_vals, nm, kind, stop_type)
 
 
 def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
@@ -549,13 +617,7 @@ def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
         if vclass == "semi" and coupler != "fifthwheel" and not has_trailer:
             lo, hi = SEMI_BOBTAIL_BAND
 
-    tier_bands = {
-        "local": (0.05, 0.55),
-        "city": (0.30, 0.75),
-        "regional": (0.55, 0.90),
-        "long": (0.70, 1.00),
-    }
-    f_lo, f_hi = tier_bands.get(tier_l, (0.25, 0.75))
+    f_lo, f_hi = _CARGO_TIER_BANDS.get(tier_l, (0.25, 0.75))
     u = _stable_index(seed, f"cargo_w:{vclass}:{tier_l}", 101) / 100.0
     frac = f_lo + (f_hi - f_lo) * u
     raw_kg = lo + (hi - lo) * frac
@@ -671,13 +733,22 @@ def _cells_around(lat, lon, radius_m, max_cells=16):
 def _cell_layer(md, key, layer, deadline):
     if md is None:
         return None
+    rc = _get_req_cache()
+    if rc is not None:
+        ck = (id(md), key, layer)
+        cells_map = rc["cells"]
+        if ck in cells_map:
+            return cells_map[ck]
     if not md.has(key, layer) and time.monotonic() > deadline:
         return None
     try:
-        return md.cell(key, layers=(layer,), kind="demand").layers.get(layer)
+        res = md.cell(key, layers=(layer,), kind="demand").layers.get(layer)
     except Exception as e:
         log.debug("transport cell %s/%s: %s: %s", key, layer, type(e).__name__, e)
-        return None
+        res = None
+    if rc is not None:
+        rc["cells"][(id(md), key, layer)] = res
+    return res
 
 
 def _col(attrs, name, n):
@@ -689,16 +760,26 @@ def _tags_dict(attrs, i):
     tags = attrs.get("tags") if attrs else None
     if tags is None:
         return {}
+    rc = _get_req_cache()
+    if rc is not None:
+        tk = (id(attrs), i)
+        tags_map = rc["tags"]
+        if tk in tags_map:
+            return tags_map[tk]
     raw = tags[i]
+    out = {}
     if isinstance(raw, dict):
-        return {str(k).lower(): str(v).lower() for k, v in raw.items()}
-    try:
-        parsed = json.loads(str(raw))
-        if isinstance(parsed, dict):
-            return {str(k).lower(): str(v).lower() for k, v in parsed.items()}
-    except (TypeError, ValueError):
-        pass
-    return {}
+        out = {str(k).lower(): str(v).lower() for k, v in raw.items()}
+    else:
+        try:
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, dict):
+                out = {str(k).lower(): str(v).lower() for k, v in parsed.items()}
+        except (TypeError, ValueError):
+            pass
+    if rc is not None:
+        rc["tags"][(id(attrs), i)] = out
+    return out
 
 
 def _feature_center(feats, i):
@@ -909,7 +990,7 @@ def _collect_pois_in_cells(md, keys, layers, deadline):
                         continue
                     nm = _clean(names[i])
                     st = str(status[i] or "").lower()
-                    if not nm or st in ("permanently_closed", "temporarily_closed", "closed"):
+                    if not nm or st in _CLOSED_STATUSES:
                         continue
                     pt = _feature_center(f, i)
                     if not pt:
@@ -959,7 +1040,7 @@ def _collect_pois_in_cells(md, keys, layers, deadline):
                     cls = str(classes[i] or "").strip().lower()
                     tags = _tags_dict(attrs, i)
                     lu_tag = tags.get("landuse", "")
-                    if cls not in ("industrial", "commercial", "retail") and lu_tag not in ("industrial", "commercial", "retail"):
+                    if cls not in _LAND_USE_CLASSES and lu_tag not in _LAND_USE_CLASSES:
                         continue
                     pt = _feature_center(f, i)
                     if not pt:
@@ -1198,9 +1279,9 @@ def _snap_parking_lot(md, poi_lat, poi_lon, infra_cells, land_cells, road_cells,
             for i in range(n):
                 cls = str(cls_col[i] or "").strip().lower()
                 tags = _tags_dict(attrs, i)
-                if cls not in ("parking", "parking_space") and tags.get("amenity") != "parking":
+                if cls not in _PARKING_CLASSES and tags.get("amenity") != "parking":
                     continue
-                if str(surf_col[i] or "").strip().lower() in ("grass", "dirt", "mud", "sand"):
+                if str(surf_col[i] or "").strip().lower() in _UNPAVED_SURFACES:
                     continue
                 parts = f.parts(i) if hasattr(f, "parts") else None
                 if not parts or not parts[0] or len(parts[0][0]) < 3:
@@ -1340,6 +1421,13 @@ def _snap_logistics_spot(md, poi_lat, poi_lon, deadline, road_cells=None, bld_ce
 
 def _resolve_locality(md, lat, lon, deadline, town_hint="", cell_cache=None):
     """Resolve nearest town/village and optional district/suburb (e.g. 'Sindelsdorf' or 'Penzberg · Dittenried')."""
+    rc = _get_req_cache()
+    lk = None
+    if rc is not None:
+        lk = (id(md), round(lat, 3), round(lon, 3), town_hint)
+        if lk in rc["locality"]:
+            return rc["locality"][lk]
+
     keys = _cells_around(lat, lon, 1200.0, max_cells=4)
 
     def _get_layer(k, layer):
@@ -1370,7 +1458,7 @@ def _resolve_locality(md, lat, lon, deadline, town_hint="", cell_cache=None):
                     continue
                 d = dist_m(lat, lon, pt[0], pt[1])
                 st = str(subtypes[i] or "").strip().lower()
-                if st in ("neighborhood", "macrohood", "hamlet") and d <= 2500.0:
+                if st in _SUBURB_SUBTYPES and d <= 2500.0:
                     if best_suburb is None or d < best_suburb[0]:
                         best_suburb = (d, nm)
                 elif d <= 8000.0:
@@ -1395,18 +1483,28 @@ def _resolve_locality(md, lat, lon, deadline, town_hint="", cell_cache=None):
 
     town_name = best_town[1] if best_town else _clean(town_hint)
     if not town_name:
-        best_ne = None
-        for tlat, tlon, tname in (randomplace.towns() or ()):
-            d = dist_m(lat, lon, tlat, tlon)
-            if d <= 15000.0 and (best_ne is None or d < best_ne[0]):
-                best_ne = (d, tname)
-        if best_ne:
-            town_name = _clean(best_ne[1])
+        ta = _towns_arrays()
+        if ta is not None:
+            t_lats, t_lons, t_names = ta
+            dlat_b = 15000.0 / M_LAT
+            dlon_b = 15000.0 / (M_LAT * _cos_lat(lat))
+            cand_idx = np.flatnonzero((np.abs(t_lats - lat) <= dlat_b) & (np.abs(t_lons - lon) <= dlon_b))
+            best_ne = None
+            for idx_t in cand_idx.tolist():
+                d = dist_m(lat, lon, float(t_lats[idx_t]), float(t_lons[idx_t]))
+                if d <= 15000.0 and (best_ne is None or d < best_ne[0]):
+                    best_ne = (d, t_names[idx_t])
+            if best_ne:
+                town_name = _clean(best_ne[1])
 
     suburb_name = best_suburb[1] if best_suburb else ""
     if town_name and suburb_name and town_name.lower() != suburb_name.lower():
-        return f"{town_name} · {suburb_name}"
-    return town_name or suburb_name or ""
+        res_loc = f"{town_name} · {suburb_name}"
+    else:
+        res_loc = town_name or suburb_name or ""
+    if lk is not None:
+        rc["locality"][lk] = res_loc
+    return res_loc
 
 
 def _enrich_stops_locality(md, stops, deadline):
@@ -1520,8 +1618,8 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
 def _select_taxi_ride_profile(pu_name, do_name, tier, seed):
     """Deterministically select taxi ride archetype (standard/express/vip) and passenger load (1-3 pax, 80-240 kg)."""
     combined = f"{pu_name} {do_name}".lower()
-    is_transit_hub = any(k in combined for k in ("airport", "station", "terminal", "ferry", "train", "rail"))
-    is_vip_venue = any(k in combined for k in ("hotel", "resort", "museum", "theatre", "theater", "palace", "restaurant"))
+    is_transit_hub = any(k in combined for k in _TAXI_TRANSIT_WORDS)
+    is_vip_venue = any(k in combined for k in _TAXI_VIP_WORDS)
     roll = _stable_index(seed, f"taxi_arch:{tier}", 100)
     if is_transit_hub and roll < 55:
         arch = "express"
@@ -1549,17 +1647,25 @@ def _select_taxi_ride_profile(pu_name, do_name, tier, seed):
 
 def _towns_in_band(lat, lon, min_km, max_km, heading, seed, tag):
     """Rank Natural Earth populated places in [min_km, max_km], biased gently toward heading."""
-    ts = randomplace.towns()
-    if not ts:
+    ta = _towns_arrays()
+    if ta is None:
+        return []
+    t_lats, t_lons, t_names = ta
+    min_m, max_m = min_km * 1000.0, max_km * 1000.0
+    dlat_b = max_m / M_LAT + 0.05
+    dlon_b = max_m / (M_LAT * _cos_lat(lat)) + 0.05
+    cand_idx = np.flatnonzero((np.abs(t_lats - lat) <= dlat_b) & (np.abs(t_lons - lon) <= dlon_b))
+    if not len(cand_idx):
         return []
     hits = []
-    min_m, max_m = min_km * 1000.0, max_km * 1000.0
     mid_m = 0.5 * (min_m + max_m)
-    for tlat, tlon, tname in ts:
+    span_m = max(1.0, max_m - min_m)
+    for idx_t in cand_idx.tolist():
+        tlat, tlon, tname = float(t_lats[idx_t]), float(t_lons[idx_t]), t_names[idx_t]
         d = dist_m(lat, lon, tlat, tlon)
         if min_m <= d <= max_m:
             ang = _heading_diff(heading, bearing_deg(lat, lon, tlat, tlon)) if heading is not None else 0.0
-            score = abs(d - mid_m) / max(1.0, max_m - min_m) + (ang / 180.0) * 0.65
+            score = abs(d - mid_m) / span_m + (ang / 180.0) * 0.65
             hits.append((score, tlat, tlon, tname))
     hits.sort(key=lambda r: (r[0], r[3]))
     if not hits:
@@ -1821,7 +1927,7 @@ def _infra_bus_stops(md, lat, lon, deadline):
         for i in range(n):
             cls = str(classes[i] or "").strip().lower()
             tags = _tags_dict(attrs, i)
-            if cls not in ("bus_stop", "platform", "bus_station", "stop_position") and tags.get("highway") != "bus_stop":
+            if cls not in _BUS_STOP_CLASSES and tags.get("highway") != "bus_stop":
                 continue
             if tags.get("railway") == "platform" and tags.get("bus") != "yes":
                 continue
@@ -2081,7 +2187,7 @@ def _generate_logistics_short(md, req, deadline):
         if not b["name"]:
             continue
         d = dist_m(lat, lon, b["lat"], b["lon"])
-        if 200.0 <= d <= max_r_m and b["class"] in (LOGISTICS_COMMERCIAL_CLASSES | LOGISTICS_HUB_CLASSES):
+        if 200.0 <= d <= max_r_m and b["class"] in _LOGISTICS_ALL_BLD_CLASSES:
             dom = classify_poi_cargo_domain("", "", b["class"], b.get("tags"), b["name"])
             sec = derive_sector_label("", "", b["class"], b.get("tags"), b["name"])
             candidates.append((1, 0.6, b["lat"], b["lon"], b["name"], dom, sec))
@@ -2281,13 +2387,12 @@ def _generate_logistics_haul(md, req, deadline):
 
 def _resolve_route_cargo_domain(stops):
     """Pick the most specific semantic cargo domain from delivery stops (preferring food/medical/fuel/hardware over general)."""
-    priority = {"fuel": 5, "medical": 4, "food": 4, "hardware": 3, "retail": 2, "industrial": 1, "general": 0}
     best_dom = "general"
     best_prio = -1
     deliveries = [s for s in stops if s.get("kind") != "loading"] or stops
     for s in deliveries:
         dom = s.get("_poiDomain") or classify_poi_cargo_domain(name=s.get("name", ""))
-        p = priority.get(dom, 0)
+        p = _DOMAIN_PRIORITY.get(dom, 0)
         if p > best_prio:
             best_prio = p
             best_dom = dom
@@ -2421,21 +2526,21 @@ def _extract_addr_fields(attrs, i, tags):
     st = ""
     loc = ""
     if attrs:
-        for k in ("housenumber", "number", "addr_housenumber", "addr:housenumber"):
+        for k in _ADDR_HN_KEYS:
             col = attrs.get(k)
             if col is not None and i < len(col):
                 v = _clean(col[i])
                 if v:
                     hn = v
                     break
-        for k in ("street", "addr_street", "addr:street"):
+        for k in _ADDR_ST_KEYS:
             col = attrs.get(k)
             if col is not None and i < len(col):
                 v = _clean(col[i])
                 if v:
                     st = v
                     break
-        for k in ("locality", "city", "addr_city", "addr:city"):
+        for k in _ADDR_LOC_KEYS:
             col = attrs.get(k)
             if col is not None and i < len(col):
                 v = _clean(col[i])
@@ -2560,7 +2665,7 @@ def _collect_parcel_candidates(md, keys, deadline):
                 if pid in seen:
                     continue
                 st_op = str(status[i] or "").lower()
-                if st_op in ("permanently_closed", "temporarily_closed", "closed"):
+                if st_op in _CLOSED_STATUSES:
                     continue
                 nm = _clean(names[i])
                 if not nm:
@@ -2630,13 +2735,13 @@ def _generate_parcel(md, req, deadline):
     # Filter & rank candidates within tier reach
     max_r_m = max(2500.0, target_km * 1350.0)
     min_r_m = 80.0
-    pool = []
+    scored_pool = []
     for c in candidates:
         d = dist_m(lat, lon, c["lat"], c["lon"])
         if min_r_m <= d <= max_r_m:
-            pool.append(c)
-    pool.sort(key=lambda c: (-c["prio"], dist_m(lat, lon, c["lat"], c["lon"]), c["fid"]))
-    pool = pool[:96]
+            scored_pool.append((d, c))
+    scored_pool.sort(key=lambda item: (-item[1]["prio"], item[0], item[1]["fid"]))
+    pool = [item[1] for item in scored_pool[:96]]
 
     min_gap = 65.0 if tier == "local" else (110.0 if tier == "city" else 160.0)
     picked = []
@@ -2799,6 +2904,8 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
         return {"ok": False, "mode": req["mode"], "tier": req["tier"], "stops": [],
                 "error": "No map data available (enable Roads in settings)"}
     deadline = time.monotonic() + max(0.2, float(deadline_s))
+    prev_cache = _get_req_cache()
+    _req_tls.cache = {"cells": {}, "tags": {}, "locality": {}}
     try:
         if req["mode"] == "taxi":
             res = _generate_taxi(md, req, deadline)
@@ -2817,6 +2924,8 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
     except Exception as e:
         log.warning("transport job %s/%s failed: %s: %s", req["mode"], req["tier"], type(e).__name__, e)
         res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+    finally:
+        _req_tls.cache = prev_cache
     res.setdefault("mode", req["mode"])
     res.setdefault("tier", req["tier"])
     res.setdefault("stops", [])
