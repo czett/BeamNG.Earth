@@ -896,5 +896,36 @@ class FuelStationsTest(unittest.TestCase):
             self.assertIsInstance(s["locality"], str)
 
 
+class CargoSensitivityTest(unittest.TestCase):
+    def test_distribution_and_tier_gating(self):
+        # local tier, taxi, and bus always return standard (0.0)
+        for m, t in (("logistics", "local"), ("parcel", "local"), ("taxi", "city"), ("bus", "full")):
+            for seed in range(25):
+                s = tm.assign_cargo_sensitivity(m, t, "general", "pallets", seed)
+                self.assertEqual(s["cargoSensitivity"], "standard")
+                self.assertEqual(s["hazardBonusMult"], 0.0)
+                self.assertEqual(s["sensitivityLabel"], "")
+
+        # city/regional/long on logistics & parcel hit ~35% fragile and ~20% hazmat
+        counts = {"standard": 0, "fragile": 0, "hazmat": 0}
+        for seed in range(200):
+            s = tm.assign_cargo_sensitivity("logistics", "city", "industrial", "machinery", seed)
+            counts[s["cargoSensitivity"]] += 1
+            if s["cargoSensitivity"] == "fragile":
+                self.assertEqual(s["hazardBonusMult"], 0.35)
+                self.assertTrue(s["sensitivityLabel"].startswith("Fragile"))
+            elif s["cargoSensitivity"] == "hazmat":
+                self.assertEqual(s["hazardBonusMult"], 0.50)
+                self.assertTrue(s["sensitivityLabel"].startswith("Hazmat ADR"))
+            else:
+                self.assertEqual(s["hazardBonusMult"], 0.0)
+                self.assertEqual(s["sensitivityLabel"], "")
+
+        self.assertGreaterEqual(counts["fragile"], 50)
+        self.assertLessEqual(counts["fragile"], 90)
+        self.assertGreaterEqual(counts["hazmat"], 25)
+        self.assertLessEqual(counts["hazmat"], 55)
+
+
 if __name__ == "__main__":
     unittest.main()

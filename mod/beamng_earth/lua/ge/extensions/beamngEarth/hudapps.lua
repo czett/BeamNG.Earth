@@ -112,7 +112,10 @@ local function transportKey(tr)
   trKeyBuf[57] = rf and tostring(math.floor((rf.litersAdded or 0) * 10 + 0.5)) or ''
   trKeyBuf[58] = rf and tostring(math.floor((rf.costTotal or 0) * 100 + 0.5)) or ''
   trKeyBuf[59] = rf and tostring(rf.overdraftHit or '') or ''
-  return table.concat(trKeyBuf, '\2', 1, 59)
+  trKeyBuf[60] = tostring(tr.cargoSensitivity or '')
+  trKeyBuf[61] = tostring(tr.sensitivityLabel or '')
+  trKeyBuf[62] = tr.cargoIntegrity ~= nil and tostring(math.floor((tonumber(tr.cargoIntegrity) or 0) * 10 + 0.5)) or ''
+  return table.concat(trKeyBuf, '\2', 1, 62)
 end
 
 local function key(p)

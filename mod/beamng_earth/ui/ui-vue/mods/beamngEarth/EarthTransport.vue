@@ -146,6 +146,22 @@
               <b class="tm-num">{{ active.score }}/100</b>
             </div>
           </div>
+          <div v-if="active.cargoSensitivity === 'fragile' || active.cargoSensitivity === 'hazmat'" class="tm-integrity">
+            <div class="tm-integrity-row">
+              <div class="tm-integrity-title">
+                <span class="tm-sens-badge" :class="'sens-' + active.cargoSensitivity">{{ sensitivityBadgeLabel(active.cargoSensitivity) }}</span>
+                <span v-if="active.sensitivityLabel" class="tm-integrity-lbl">{{ active.sensitivityLabel }}</span>
+              </div>
+              <b class="tm-num tm-integrity-pct" :class="'tier-' + integrityTier(active.cargoIntegrity)">{{ Math.round(active.cargoIntegrity ?? 100) }}%</b>
+            </div>
+            <div class="tm-bar">
+              <span
+                class="tm-bar-fill integrity"
+                :class="'tier-' + integrityTier(active.cargoIntegrity)"
+                :style="{ width: Math.max(0, Math.min(100, active.cargoIntegrity ?? 100)) + '%' }"
+              ></span>
+            </div>
+          </div>
           <div v-if="active.trailerMissing" class="tm-bay-hint is-warn">
             {{ active.bayHint || 'Trailer missing · Go back & hitch your trailer' }}
           </div>
@@ -218,6 +234,10 @@
           <div><span>Collisions</span><b class="tm-num">{{ summary.collisions }}</b></div>
           <div v-if="summary.mode === 'logistics' && summary.cargoKg"><span>Cargo</span><b class="tm-num">{{ formatCargo(summary.cargoKg) }}</b></div>
           <div v-else-if="summary.mode === 'parcel'"><span>Parcels</span><b class="tm-num">{{ summary.parcelsDelivered ?? 0 }}/{{ summary.parcelsTotal ?? 0 }}<span v-if="summary.parcelsReturned > 0"> (+{{ summary.parcelsReturned }} ret)</span></b></div>
+          <div v-if="summary.cargoSensitivity === 'fragile' || summary.cargoSensitivity === 'hazmat'">
+            <span>Integrity</span>
+            <b class="tm-num">{{ Math.round(summary.cargoIntegrity ?? 100) }}%</b>
+          </div>
           <div class="is-score"><span>Score</span><b class="tm-num">{{ summary.score }}/100</b></div>
         </div>
 
@@ -239,6 +259,10 @@
           <div v-if="summary.payout.tipOrStreakBonus > 0" class="tm-payout-row is-bonus">
             <span>{{ summary.mode === 'taxi' ? 'Tip &amp; Streak Bonus' : 'Clean Streak Bonus' }}</span>
             <b class="tm-num">{{ formatMoney(summary.payout.tipOrStreakBonus, { signed: true }) }}</b>
+          </div>
+          <div v-if="summary.payout.hazardBonus > 0" class="tm-payout-row is-bonus">
+            <span>{{ summary.cargoSensitivity === 'hazmat' ? 'Hazmat ADR Bonus' : 'Fragile Cargo Bonus' }}</span>
+            <b class="tm-num">{{ formatMoney(summary.payout.hazardBonus, { signed: true }) }}</b>
           </div>
           <div v-if="summary.payout.damagePenalty > 0" class="tm-payout-row is-penalty">
             <span>Damage / Skip Deduction</span>
@@ -308,7 +332,7 @@ import {
   TRANSPORT_MODES, selectedMode, selectedTier, currentTiers,
   transportState, busy, actionError,
   setMode, setTier, startJob, skipStop, cancelJob, dismissSummary, nextPassenger, resetCareerStats, findNearestFuel,
-  modeLabel, tierLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, formatMoney, formatHeading, toArray, start, stop,
+  modeLabel, tierLabel, stopTypeLabel, stopKindLabel, formatDist, formatDur, formatMoney, formatHeading, sensitivityBadgeLabel, integrityTier, toArray, start, stop,
 } from "./earthTransportStore.js"
 
 const props = defineProps({
@@ -831,6 +855,39 @@ const errText = computed(() => actionError.value || st.value.error || "")
 .tm-bar-fill { display: block; height: 100%; transition: width 0.14s linear; }
 .tm-bar-fill.dwell { background: #3ddc84; }
 .tm-bar-fill.fallback { background: #a9d94c; }
+.tm-integrity {
+  margin-top: 4px;
+  padding: 5px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.tm-integrity-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+.tm-integrity-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.tm-integrity-lbl { color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-sens-badge {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+.tm-sens-badge.sens-fragile { background: rgba(245, 158, 11, 0.20); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.45); }
+.tm-sens-badge.sens-hazmat { background: rgba(239, 68, 68, 0.22); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.50); }
+.tm-integrity-pct.tier-good { color: #34d399; }
+.tm-integrity-pct.tier-warn { color: #f59e0b; }
+.tm-integrity-pct.tier-crit { color: #ef4444; }
+.tm-bar-fill.integrity.tier-good { background: #34d399; }
+.tm-bar-fill.integrity.tier-warn { background: #f59e0b; }
+.tm-bar-fill.integrity.tier-crit { background: #ef4444; }
 .tm-bay-hint { font-size: 11px; color: #7dd3fc; margin-top: 2px; }
 .tm-bay-hint.is-warn { color: #fbbf24; font-weight: 600; }
 
