@@ -2532,6 +2532,9 @@ local function drawUi(dt)
       end
     end
   end
+  if st.inOurLevel and st.active and not credits.hiddenByUi() then
+    require('beamngEarth/speedCameras').drawFlash(rawget(_G, 'ui_imgui'))
+  end
   hudapps.update(st.clock or 0, hudTexts)
   if st.inOurLevel then
     hudapps.hookCityZone(minimapName)
@@ -2972,6 +2975,18 @@ local function onUpdate(dtReal, dtSim)
   t = mark('ui', t)
   local frameMs = frameMs0
   statusbar.frame(frameMs0)
+  if st.inOurLevel and st.active then
+    local deEnh = require('beamngEarth/deEnhancer')
+    if deEnh.isEnabled() then
+      local apiMod = rawget(_G, 'beamngEarth_api')
+      if apiMod and type(apiMod.speedLimit) == 'function' then
+        local okL, lim = pcall(apiMod.speedLimit)
+        statusbar.setSpeedLimit(okL and lim or nil)
+      end
+    else
+      statusbar.setSpeedLimit(nil)
+    end
+  end
   if st.inOurLevel and net.isConnected() then
     local stg2 = rawget(_G, 'beamngEarth_settings')
     -- (the 3D map: where the view is, not the car: map3d.lua's target; its screen shows statusbar.location())

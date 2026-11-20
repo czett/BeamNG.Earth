@@ -79,8 +79,17 @@ COLUMNS = {
     "lanes": "TRY_CAST(regexp_extract(lanes, '^\\s*([0-9]+)\\s*$', 1) AS INTEGER)",
     "width": (f"TRY_CAST(regexp_extract(width, {_NUM}, 1) AS DOUBLE) * "
               "CASE WHEN width LIKE '%ft%' OR width LIKE '%''%' THEN 0.3048 ELSE 1.0 END"),
-    "maxspeed": (f"TRY_CAST(regexp_extract(maxspeed, {_NUM}, 1) AS DOUBLE) * "
-                 "CASE WHEN maxspeed LIKE '%mph%' THEN 1.609344 ELSE 1.0 END"),
+    "maxspeed": (
+        "CASE "
+        "WHEN lower(trim(maxspeed)) = 'de:urban' THEN 50.0 "
+        "WHEN lower(trim(maxspeed)) = 'de:rural' THEN 100.0 "
+        "WHEN lower(trim(maxspeed)) IN ('de:living_street', 'de:walk', 'walk') THEN 10.0 "
+        "WHEN lower(trim(maxspeed)) IN ('de:zone30', 'de:zone:30', 'de:30') THEN 30.0 "
+        "WHEN lower(trim(maxspeed)) IN ('de:zone20', 'de:zone:20', 'de:20') THEN 20.0 "
+        "WHEN lower(trim(maxspeed)) IN ('de:zone10', 'de:zone:10', 'de:10') THEN 10.0 "
+        f"ELSE TRY_CAST(regexp_extract(maxspeed, {_NUM}, 1) AS DOUBLE) * "
+        "CASE WHEN maxspeed LIKE '%mph%' THEN 1.609344 ELSE 1.0 END END"
+    ),
     "sidewalk": "sidewalk",
     "lit": "lit",
     "smoothness": "smoothness",

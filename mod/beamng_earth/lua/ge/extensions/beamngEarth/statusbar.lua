@@ -24,7 +24,8 @@ M.WHERE_MIN_S = 2.0
 M.WHERE_PLACE_S = 120
 M.FPS_ALPHA = 0.05
 
-local loc = { street = '', place = '', region = '', country = '' }
+local loc = { street = '', place = '', region = '', country = '', speedLimitKph = nil }
+local liveLimit = nil      -- optional live limit table { kph, unit } from navgraph/api when DE enhancer enabled
 local last = nil           -- { x, y, t, px, py, pt } of the last request (street / place)
 local nextId = 0
 local fps = nil
@@ -32,8 +33,37 @@ M.SHOW_FPS = false     -- (the user, 2026-10-15: Steam has an fps overlay, we do
 local textU32, backU32, vecs = nil, nil, nil
 M.draws, M.measures, M.requests = 0, 0, 0
 
--- Pure: the bar's text from the location, the loading line (nil when loaded) and the fps (nil: unknown).
-function M.compose(l, loading, f)
+-- Pure: format a speed limit ({ kph, ms, unit } or numeric kph) into a crisp HUD badge, or nil.
+function M.formatSpeedLimit(info)
+  if info == nil then return nil end
+  local kph, unit
+  if type(info) == 'number' then
+    kph, unit = info, 'kmh'
+  elseif type(info) == 'table' then
+    unit = info.unit or 'kmh'
+    if info.kph ~= nil then
+      kph = tonumber(info.kph)
+    elseif info.ms ~= nil then
+      kph = tonumber(info.ms) * 3.6
+    end
+  end
+  if not kph or kph ~= kph then return nil end
+  if kph <= 0 then return 'Autobahn ∞' end
+  if unit == 'mph' then
+    local mph = math.max(5, math.floor((kph / 1.609344) / 5 + 0.5) * 5)
+    return string.format('%d mph', mph)
+  end
+  local rounded = math.max(5, math.floor(kph / 5 + 0.5) * 5)
+  return string.format('%d km/h', rounded)
+end
+
+function M.setSpeedLimit(info)
+  liveLimit = info
+end
+
+-- Pure: the bar's text from the location, the loading line (nil when loaded), the fps (nil: unknown),
+-- and an optional speed-limit badge (nil: omitted).
+function M.compose(l, loading, f, limitText)
   local parts = {}
   if l and l.street ~= nil and l.street ~= '' then parts[#parts + 1] = l.street end
   local where = {}
@@ -42,6 +72,7 @@ function M.compose(l, loading, f)
     if v ~= nil and v ~= '' and v ~= where[#where] then where[#where + 1] = v end
   end
   if #where > 0 then parts[#parts + 1] = table.concat(where, ', ') end
+  if limitText and limitText ~= '' then parts[#parts + 1] = limitText end
   if loading and loading ~= '' then parts[#parts + 1] = loading end
   if f then parts[#parts + 1] = string.format('%d fps', math.floor(f + 0.5)) end
   return table.concat(parts, M.SEP)
@@ -85,7 +116,10 @@ function M.request(now, player, online)
     pt = last and last.pt }
   if placeDue then last.plat, last.plon, last.pt = player.lat, player.lon, now end
   -- a jump (a teleport): the old street and place go at once
-  if moved ~= math.huge and moved > M.JUMP_M then loc = { street = '', place = '', region = '', country = '' } end
+  if moved ~= math.huge and moved > M.JUMP_M then
+    loc = { street = '', place = '', region = '', country = '', speedLimitKph = nil }
+    liveLimit = nil
+  end
   nextId = nextId + 1
   M.requests = M.requests + 1
   return { type = 'where', id = nextId, lat = player.lat, lon = player.lon, online = placeDue and true or false }
@@ -95,6 +129,11 @@ end
 function M.onResult(msg)
   if type(msg) ~= 'table' then return end
   if msg.street ~= nil then loc.street = tostring(msg.street) end
+  if msg.speedLimitKph ~= nil then
+    loc.speedLimitKph = tonumber(msg.speedLimitKph)
+  else
+    loc.speedLimitKph = nil
+  end
   if msg.place ~= nil or msg.country ~= nil then
     loc.place, loc.region, loc.country = msg.place or '', msg.region or '', msg.country or ''
   end
@@ -104,7 +143,8 @@ function M.location() return loc end
 
 -- A teleport or a new level: the old place goes.
 function M.reset()
-  loc = { street = '', place = '', region = '', country = '' }
+  loc = { street = '', place = '', region = '', country = '', speedLimitKph = nil }
+  liveLimit = nil
   last = nil
 end
 
@@ -205,7 +245,8 @@ end
 
 -- The bar's location line now (the UI app's too: hudapps.lua), '' when there is nothing to say.
 function M.text(status, line)
-  return M.compose(loc, nil, M.SHOW_FPS and fps or nil)
+  local limText = M.formatSpeedLimit(liveLimit ~= nil and liveLimit or loc.speedLimitKph)
+  return M.compose(loc, nil, M.SHOW_FPS and fps or nil, limText)
 end
 
 -- The loading line under it (the user, 2026-10-23: "make loading on a separate line"), '' when none.

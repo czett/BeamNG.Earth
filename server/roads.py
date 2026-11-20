@@ -3338,6 +3338,15 @@ def _road_specs(feats, urban_fn, left_hand, towns=None):
         towns[:] = d["towns"].tolist()
     import germanroads          # (Germany's surveyed widths, lanes and surfaces where the map has none)
     de = germanroads.adjust_specs(feats, out)
+    import de_enhancer
+    if de_enhancer.enabled():
+        from de_street_enhancer import speed_limits as _de_sl
+        prop_kmh = _de_sl.propagate_urban_limits(feats, de, country="DE")
+        if prop_kmh:
+            de = [
+                (sp._replace(kmh=prop_kmh[i]) if (sp is not None and sp.kmh is None and i in prop_kmh) else sp)
+                for i, sp in enumerate(de)
+            ]
     surveyed = {i for i, (x, y) in enumerate(zip(out, de)) if x is not None and y is not None and x.width != y.width}
     out = franceroads.adjust_specs(feats, de)
     if european:
@@ -3549,11 +3558,18 @@ def _osm_values(feats, name, lo, hi):
     if col.dtype.kind in "fiub":
         v = col[:n].astype(np.float64)
     else:
-        def num(x):
-            try:
-                return float(x)
-            except (TypeError, ValueError):
-                return np.nan
+        if name == "maxspeed":
+            from de_street_enhancer import speed_limits as _de_sl
+
+            def num(x):
+                got = _de_sl.parse_maxspeed_kph(x)
+                return np.nan if (got is None or got <= 0.0) else float(got)
+        else:
+            def num(x):
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return np.nan
         v = np.array([num(x) for x in col[:n].tolist()], np.float64)
     with np.errstate(invalid="ignore"):
         bad = ~np.isfinite(v)
@@ -13201,7 +13217,7 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
                rail_mesh=None, garage_sound=(), wells=(), guardrail_rows=None, custom_entries=None, decals=True,
                bld_none=False, barrier_mesh=None, barrier_chunks=(), turbines=(), signs=None, towns=None,
                walk_ground=None, speed_traps=(), bus_col=None,
-               de_streets=None, de_shops=None, de_faces=None):
+               de_streets=None, de_shops=None, de_faces=None, de_speed_cameras=()):
     """Write a tile's chunks (atomically), its sidewalk mesh (walks: build_tile's runs, if any:
     `walks_<a>_<tx>_<ty>.cdae`, announced in the tile as "walk": {shape, pos}) and its road mesh
     (road_mesh: roadmesh.build's result: `road_<a>_<tx>_<ty>.cdae`, "road": {shape, pos}; the mod then
@@ -13233,6 +13249,8 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
         data["turbines"] = list(turbines)
     if speed_traps:
         data["speedTraps"] = speed_traps
+    if de_speed_cameras:
+        data["deSpeedCameras"] = list(de_speed_cameras)
     if road_mesh is not None:
         x0, y0, _, _ = tile_bbox(tx, ty)
         shape = f"road_{aid}_{tx}_{ty}.cdae"

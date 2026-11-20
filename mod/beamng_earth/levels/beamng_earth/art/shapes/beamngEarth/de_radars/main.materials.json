@@ -1,0 +1,132 @@
+{
+  "bne_de_radar_post": {
+    "name": "bne_de_radar_post",
+    "mapTo": "bne_de_radar_post",
+    "class": "Material",
+    "persistentId": "89f52305-6e26-50c3-9bcc-54c66a27d2ac",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.64,
+          0.67,
+          0.7,
+          1.0
+        ],
+        "metallicFactor": 0.72,
+        "roughnessFactor": 0.42
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_radar_housing": {
+    "name": "bne_de_radar_housing",
+    "mapTo": "bne_de_radar_housing",
+    "class": "Material",
+    "persistentId": "a6805d9a-f4b2-553f-9c41-9fa058b3a753",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.16,
+          0.18,
+          0.21,
+          1.0
+        ],
+        "metallicFactor": 0.35,
+        "roughnessFactor": 0.55
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_radar_glass": {
+    "name": "bne_de_radar_glass",
+    "mapTo": "bne_de_radar_glass",
+    "class": "Material",
+    "persistentId": "cce0f338-b124-589b-aa32-8a96aa4cc90b",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.05,
+          0.06,
+          0.08,
+          1.0
+        ],
+        "metallicFactor": 0.15,
+        "roughnessFactor": 0.12
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_radar_lens_red": {
+    "name": "bne_de_radar_lens_red",
+    "mapTo": "bne_de_radar_lens_red",
+    "class": "Material",
+    "persistentId": "dcb6d569-4177-59ac-8fc4-1279a7dbf0d3",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.82,
+          0.08,
+          0.08,
+          1.0
+        ],
+        "metallicFactor": 0.1,
+        "roughnessFactor": 0.14,
+        "emissiveFactor": [
+          0.22,
+          0.02,
+          0.02
+        ]
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_radar_stripe": {
+    "name": "bne_de_radar_stripe",
+    "mapTo": "bne_de_radar_stripe",
+    "class": "Material",
+    "persistentId": "a49e7833-6616-57a8-8c79-6f4cc36bc5d7",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.88,
+          0.14,
+          0.12,
+          1.0
+        ],
+        "metallicFactor": 0.1,
+        "roughnessFactor": 0.38
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  }
+}

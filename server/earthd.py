@@ -3634,7 +3634,13 @@ class Server:
         if radar_props:
             props = (props or []) + radar_props
         de_streets_blob = None
+        de_speed_cameras = []
         if self.out_dir is not None and self.vfs_dir is not None:
+            _de_ground = lambda x, y: (
+                np.zeros(0, np.float64)
+                if len(x) == 0
+                else roadmeshmod.drawn_ground(anchor.frame, drawn, np.c_[x, y], self.anchor_q(anchor))
+            )
             st_face, de_streets_blob, de_yard_rows = de_enhancer.finish_streets_and_yards(
                 self.mapdata,
                 anchor.frame,
@@ -3649,11 +3655,7 @@ class Server:
                 de_drives_all,
                 de_garage_drives,
                 de_rings,
-                lambda x, y: (
-                    np.zeros(0, np.float64)
-                    if len(x) == 0
-                    else roadmeshmod.drawn_ground(anchor.frame, drawn, np.c_[x, y], self.anchor_q(anchor))
-                ),
+                _de_ground,
                 self.out_dir,
                 self.vfs_dir,
                 de_detail=de_detail,
@@ -3662,6 +3664,11 @@ class Server:
                 de_faces_map.update(st_face)
             if de_yard_rows:
                 props = (props or []) + de_yard_rows
+            de_radar_props, de_speed_cameras = de_enhancer.build_speed_cameras(
+                self.mapdata, anchor.frame, tx, ty, box, near_roads, de_rings, _de_ground, de_detail=de_detail
+            )
+            if de_radar_props:
+                props = (props or []) + de_radar_props
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
                                    rail_mesh=rmesh, guardrail_rows=guardrail_rows, garage_sound=garage_sound,
@@ -3675,7 +3682,8 @@ class Server:
                                    speed_traps=speed_traps,
                                    de_streets=de_streets_blob,
                                    de_shops=de_shops_blob,
-                                   de_faces=(de_faces_map or None))
+                                   de_faces=(de_faces_map or None),
+                                   de_speed_cameras=de_speed_cameras)
 
     def set_dej(self, on):
         """The settings page's German junction signs switch (message german_junctions): True when it changed (the road
@@ -8417,11 +8425,22 @@ class Connection:
         out = {"type": "where_result", "id": msg.get("id"), "street": ""}
         loop = asyncio.get_running_loop()
         if self.s.surface is not None:
+            import de_enhancer
+            de_on = de_enhancer.enabled()
+
             def street():
                 layers, _ = self.s.surface.roads(lat, lon)
-                return geocodemod.nearest_street(layers, lat, lon, routes=self.s.surface.road_routes(lat, lon))
+                st_name = geocodemod.nearest_street(layers, lat, lon, routes=self.s.surface.road_routes(lat, lon))
+                lim = None
+                if de_on:
+                    cc = navgraphmod.country_at(self.s.airports_db, lat, lon, _borders(self.s))
+                    lim = geocodemod.nearest_speed_limit_kph(layers, lat, lon, country=cc)
+                return st_name, lim
             try:
-                out["street"] = await loop.run_in_executor(self.s.ui_pool, street)
+                st_name, lim = await loop.run_in_executor(self.s.ui_pool, street)
+                out["street"] = st_name
+                if lim is not None:
+                    out["speedLimitKph"] = round(float(lim), 1)
             except Exception as e:      # a cell being written, an odd feature: no street this time
                 log.debug("where: street: %s: %s", type(e).__name__, e)
         if msg.get("online"):

@@ -1936,7 +1936,13 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     if radar_props:
         props = (props or []) + radar_props
     de_streets_blob = None
+    de_speed_cameras = []
     if out_dir is not None and vfs_dir is not None:
+        _de_ground = lambda x, y: (
+            np.zeros(0, np.float64)
+            if len(x) == 0
+            else roadmeshmod.drawn_ground(frame, drawn, np.c_[x, y], q)
+        )
         st_face, de_streets_blob, de_yard_rows = de_enhancer.finish_streets_and_yards(
             _s.md,
             frame,
@@ -1951,11 +1957,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
             de_drives_all,
             de_garage_drives,
             de_rings,
-            lambda x, y: (
-                np.zeros(0, np.float64)
-                if len(x) == 0
-                else roadmeshmod.drawn_ground(frame, drawn, np.c_[x, y], q)
-            ),
+            _de_ground,
             out_dir,
             vfs_dir,
             de_detail=de_detail,
@@ -1964,7 +1966,13 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
             de_faces_map.update(st_face)
         if de_yard_rows:
             props = (props or []) + de_yard_rows
+        de_radar_props, de_speed_cameras = de_enhancer.build_speed_cameras(
+            _s.md, frame, tx, ty, box, near_roads, de_rings, _de_ground, de_detail=de_detail
+        )
+        if de_radar_props:
+            props = (props or []) + de_radar_props
     P.de_streets, P.de_shops, P.de_faces = de_streets_blob, de_shops_blob, (de_faces_map or None)
+    P.de_speed_cameras = de_speed_cameras
     P.signs = signs
     P.chunks, P.ctx, P.walks, P.box, P.origin = chunks, ctx, walks, box, (x0, y0, 0.0)
     P.custom, P.custom_entries = _custom, _entries
@@ -2010,7 +2018,8 @@ def _roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, 
                                speed_traps=P.speed_traps, bus_col=P.bus_col,
                                de_streets=getattr(P, "de_streets", None),
                                de_shops=getattr(P, "de_shops", None),
-                               de_faces=getattr(P, "de_faces", None)) + (P.fuel_pads, P.fuel_tried)
+                               de_faces=getattr(P, "de_faces", None),
+                               de_speed_cameras=getattr(P, "de_speed_cameras", ())) + (P.fuel_pads, P.fuel_tried)
     mark("write")
     return out
 
@@ -2118,7 +2127,8 @@ def _write_geo_content(out_dir, vfs_dir, tile, P):
                                    speed_traps=getattr(P, "speed_traps", ()), bus_col=getattr(P, "bus_col", None),
                                    de_streets=getattr(P, "de_streets", None),
                                    de_shops=getattr(P, "de_shops", None),
-                                   de_faces=getattr(P, "de_faces", None))
+                                   de_faces=getattr(P, "de_faces", None),
+                                   de_speed_cameras=getattr(P, "de_speed_cameras", ()))
         with open(os.path.join(tmpdir, f"roads_0_{tile}_None.json"), encoding="utf-8") as f:
             data = json.loads(f.read())
         files = roadsmod.shape_files(0, tile, None)

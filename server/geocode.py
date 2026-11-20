@@ -914,3 +914,37 @@ def nearest_street(roads_layers, lat, lon, max_m=STREET_M, routes=None):
             if dist < bd:
                 best, bd = label, dist
     return best
+
+
+def nearest_speed_limit_kph(roads_layers, lat, lon, max_m=STREET_M, country=None):
+    """Polished speed limit (km/h, 0 = unlimited, None = unknown) of the nearest road within max_m."""
+    import math
+    import numpy as np
+    from de_street_enhancer import speed_limits
+
+    mx = 111320.0 * dmath.cos(math.radians(lat))
+    best_lim, bd = None, max_m
+    for f in roads_layers or ():
+        if f is None or len(f.kind) == 0:
+            continue
+        classes = f.attrs.get("class")
+        for i in range(len(f.kind)):
+            a = f.coord_off[f.ring_off[f.part_off[i]]]
+            b = f.coord_off[f.ring_off[f.part_off[i + 1]]]
+            ll = f.lonlat[a:b]
+            if len(ll) < 2:
+                continue
+            xy = np.column_stack([(ll[:, 0] - lon) * mx, (ll[:, 1] - lat) * 110540.0])
+            p, q = xy[:-1], xy[1:]
+            d = q - p
+            L2 = np.maximum((d * d).sum(1), 1e-9)
+            t = np.clip(-(p * d).sum(1) / L2, 0.0, 1.0)
+            dist = float(np.min(dnp.hypot(*(p + d * t[:, None]).T)))
+            if dist >= bd:
+                continue
+            cls = str(classes[i]) if classes is not None else "unknown"
+            spec = type("_Sp", (), {"cls": cls, "urban": cls in ("residential", "living_street"), "kmh": None})()
+            lim = speed_limits.resolve_feature_limit_kph(f, i, spec, country=country)
+            if lim is not None:
+                best_lim, bd = lim, dist
+    return best_lim

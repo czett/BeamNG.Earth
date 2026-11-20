@@ -972,7 +972,41 @@ function M.regionOf(cc)
   return type(cc) == 'string' and regionOfCountry[string.upper(cc)] or nil
 end
 
-function M.regionalGroupParams(cc, getSetting)
+M.EU_POLICE_CONFIGS = {
+  { model = 'etk800', config = 'polizei' },
+  { model = 'vivace', config = 'police' },
+  { model = 'etkc', config = 'police' },
+  { model = 'sunburst', config = 'police' },
+}
+
+local function deStreetImmersionOn()
+  local ok, de = pcall(require, 'beamngEarth/deEnhancer')
+  return ok and type(de) == 'table' and type(de.isEnabled) == 'function' and de.isEnabled() == true
+end
+
+function M.appendEuPolicePatrols(group, cc, available)
+  if type(group) ~= 'table' or M.regionOf(cc) ~= 'europe' then return group end
+  local hasPolice = false
+  for _, v in ipairs(group) do
+    if type(v) == 'table' then
+      local cfg = tostring(v.config or v.name or ''):lower()
+      if cfg:find('police', 1, true) or cfg:find('polizei', 1, true) then
+        hasPolice = true
+        break
+      end
+    end
+  end
+  if hasPolice then return group end
+  for _, p in ipairs(M.EU_POLICE_CONFIGS) do
+    if available == nil or available[p.model .. ':' .. p.config] then
+      group[#group + 1] = { model = p.model, config = p.config }
+      break
+    end
+  end
+  return group
+end
+
+function M.regionalGroupParams(cc, getSetting, includePolice)
   local region = M.regionOf(cc)
   if not region or not getSetting or not getSetting('trafficSmartSelections') then return nil end
   local params = { filters = { Type = { car = 1, truck = 0.6 }, Region = { [region] = 1, default = 1 } },
@@ -984,7 +1018,8 @@ function M.regionalGroupParams(cc, getSetting)
     params.filters.Type = { proptraffic = 1 }
     params.minPop = 0
   else
-    params.filters['Config Type'] = { Police = 0, other = 1 }
+    local euPolice = (region == 'europe') and (includePolice == true or (includePolice == nil and deStreetImmersionOn()))
+    params.filters['Config Type'] = { Police = euPolice and 0.12 or 0, other = 1 }
     if params.allMods then params.filters.Type.automation = 1; params.minPop = 0 end
   end
   return params, region
@@ -993,7 +1028,8 @@ end
 local function regionalGroup()
   local st = rawget(_G, 'settings')
   local cc = graph and graph.rules and graph.rules.country
-  local params, region = M.regionalGroupParams(cc, st and st.getValue and function(k) return st.getValue(k) end)
+  local euPolice = deStreetImmersionOn()
+  local params, region = M.regionalGroupParams(cc, st and st.getValue and function(k) return st.getValue(k) end, euPolice)
   M.trafficRegionKey = region or 'none'
   M.trafficRegion = nil
   if not params then return nil end
@@ -1001,6 +1037,7 @@ local function regionalGroup()
   if not (core_multiSpawn and core_multiSpawn.createGroup) then return nil end
   local ok, g = pcall(core_multiSpawn.createGroup, M.GROUP_SIZE, params)
   if not ok or type(g) ~= 'table' or not g[1] then return nil end
+  if euPolice and region == 'europe' then M.appendEuPolicePatrols(g, cc) end
   M.trafficRegion = region
   log('I', 'beamngEarth', string.format('traffic: %s vehicles (%s)', region, tostring(cc)))
   return g
