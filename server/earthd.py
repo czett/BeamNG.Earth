@@ -3541,6 +3541,7 @@ class Server:
             props = (props or []) + radar_props
         de_streets_blob = None
         de_speed_cameras = []
+        de_roadworks = []
         if self.out_dir is not None and self.vfs_dir is not None:
             _de_ground = lambda x, y: (
                 np.zeros(0, np.float64)
@@ -3575,6 +3576,11 @@ class Server:
             )
             if de_radar_props:
                 props = (props or []) + de_radar_props
+            de_rw_props, de_roadworks = de_enhancer.build_roadworks(
+                self.mapdata, anchor.frame, tx, ty, box, near_roads, de_rings, _de_ground, de_detail=de_detail
+            )
+            if de_rw_props:
+                props = (props or []) + de_rw_props
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
                                    rail_mesh=rmesh, guardrail_rows=guardrail_rows, garage_sound=garage_sound,
@@ -3589,7 +3595,8 @@ class Server:
                                    de_streets=de_streets_blob,
                                    de_shops=de_shops_blob,
                                    de_faces=(de_faces_map or None),
-                                   de_speed_cameras=de_speed_cameras)
+                                   de_speed_cameras=de_speed_cameras,
+                                   de_roadworks=de_roadworks)
 
     def set_dej(self, on):
         """The settings page's German junction signs switch (message german_junctions): True when it changed (the road

@@ -484,6 +484,7 @@ local function dropTile(key)
   if t.park then require('beamngEarth/parking').dropKey(key) end
   if t.speedTraps then speedtraps.dropKey(key) end
   if t.deSpeedCameras then M._speedCameras.dropKey(key) end
+  if t.deRoadworks then M._speedCameras.dropKey(key) end
   if t.fuel then require('beamngEarth/gasstations').dropKey(key) end
   if t.sound then require('beamngEarth/ambience').dropSpaces(key) end
   if t.wells then require('beamngEarth/pumpjacks').dropKey(key) end
@@ -862,6 +863,25 @@ function M.mapRows(pl, rows, xi, yawi, rad)
   end
   return out
 end
+function M.mapRoadworks(pl, rows)
+  if type(rows) ~= 'table' then return rows end
+  local out = {}
+  for i, r in ipairs(rows) do
+    if type(r) == 'table' then
+      local n = {}
+      for k, v in pairs(r) do n[k] = v end
+      if type(r[2]) == 'number' and type(r[3]) == 'number' and type(r[4]) == 'number' and type(r[5]) == 'number' then
+        local x0, y0 = geotile.apply(pl, r[2], r[3], 0)
+        local x1, y1 = geotile.apply(pl, r[4], r[5], 0)
+        n[2], n[3], n[4], n[5] = x0, y0, x1, y1
+      end
+      out[i] = n
+    else
+      out[i] = r
+    end
+  end
+  return out
+end
 function M.mapFlat(pl, flat, stride, xi, yawi)
   if type(flat) ~= 'table' then return flat end
   local out, dyaw = {}, math.rad(geotile.yawOf(pl))
@@ -954,6 +974,10 @@ local function geoRows(key, t, data, replacing)
     local rows = M.mapRows(pl, data.deSpeedCameras, 2, 5)
     M._speedCameras.onRows(key, M.mapRows(pl, rows, 8))
     t.deSpeedCameras = true
+  end
+  if type(data.deRoadworks) == 'table' and data.deRoadworks[1] then
+    M._speedCameras.onRoadworks(key, M.mapRoadworks(pl, data.deRoadworks))
+    t.deRoadworks = true
   end
   if type(data.fuel) == 'table' and data.fuel[1] then
     require('beamngEarth/gasstations').onRows(t.anchor, key, M.mapStations(pl, data.fuel))
@@ -1563,6 +1587,10 @@ function M.onTile(msg, currentAnchor, a)
   if type(data.deSpeedCameras) == 'table' and data.deSpeedCameras[1] then
     M._speedCameras.onRows(key, data.deSpeedCameras)
     tiles[key].deSpeedCameras = true
+  end
+  if type(data.deRoadworks) == 'table' and data.deRoadworks[1] then
+    M._speedCameras.onRoadworks(key, data.deRoadworks)
+    tiles[key].deRoadworks = true
   end
   sinceChange = stopwatch.new()
   if road then                -- the tile's road mesh replaces its DecalRoads (server/roadmesh.py)

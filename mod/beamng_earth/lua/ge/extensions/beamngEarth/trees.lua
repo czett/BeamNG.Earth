@@ -419,6 +419,8 @@ M.CATALOG.fr_hedge = { M.CATALOG.shrub[1] } -- Stock East Coast USA broadleaf sh
 M.CATALOG.fr_fence_hedge = M.CATALOG.fr_hedge -- Older server rows still use the same stock bush.
 M.CATALOG.de_hedge = { { ECA .. 'trees/ECA_coast_bush/generibush', 1.35 } } -- Stock ECA broadleaf bush, Z-boosted to manicured DE hedge height.
 M.CATALOG.de_radar = { { '/levels/beamng_earth/art/shapes/beamngEarth/de_radars/bne_de_radar', 2.65 } }
+M.CATALOG.de_barrier = { { '/levels/beamng_earth/art/shapes/beamngEarth/de_roadworks/bne_de_barrier', 1.15 } }
+M.CATALOG.de_sign_123 = { { '/levels/beamng_earth/art/shapes/beamngEarth/de_roadworks/bne_de_sign_123', 2.45 } }
 M.HEDGE_SXY = 0.75
 M.HEDGE_Z_BOOST = 1.65
 function M.hedgeScale(h, refH)
@@ -429,8 +431,12 @@ M.GROUP_MAX_M.fr_hedge = 350
 M.GROUP_MAX_M.fr_fence_hedge = 350
 M.GROUP_MAX_M.de_hedge = 160
 M.GROUP_MAX_M.de_radar = 450
+M.GROUP_MAX_M.de_barrier = 450
+M.GROUP_MAX_M.de_sign_123 = 450
 M.ONE_SPELLING.de_hedge = true
 M.ONE_SPELLING.de_radar = true
+M.ONE_SPELLING.de_barrier = true
+M.ONE_SPELLING.de_sign_123 = true
 M.NO_COLLIDE.fr_hedge = true
 M.NO_COLLIDE.fr_fence_hedge = true
 M.NO_COLLIDE.de_hedge = true
@@ -578,6 +584,7 @@ for group, a in pairs(require('beamngEarth/europeStopAssets')) do
 end
 local MATERIALS = {
   '/levels/beamng_earth/art/shapes/beamngEarth/de_radars',
+  '/levels/beamng_earth/art/shapes/beamngEarth/de_roadworks',
   '/levels/beamng_earth/art/shapes/beamngEarth/fr_radars',
   '/levels/beamng_earth/art/shapes/beamngEarth/fr_fences',
   '/levels/beamng_earth/art/shapes/beamngEarth/europe_stops',

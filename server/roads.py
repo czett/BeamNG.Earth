@@ -13122,7 +13122,7 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
                rail_mesh=None, garage_sound=(), wells=(), guardrail_rows=None, custom_entries=None, decals=True,
                bld_none=False, barrier_mesh=None, barrier_chunks=(), turbines=(), signs=None, towns=None,
                walk_ground=None, speed_traps=(), bus_col=None,
-               de_streets=None, de_shops=None, de_faces=None, de_speed_cameras=()):
+               de_streets=None, de_shops=None, de_faces=None, de_speed_cameras=(), de_roadworks=()):
     """Write a tile's chunks (atomically), its sidewalk mesh (walks: build_tile's runs, if any:
     `walks_<a>_<tx>_<ty>.cdae`, announced in the tile as "walk": {shape, pos}) and its road mesh
     (road_mesh: roadmesh.build's result: `road_<a>_<tx>_<ty>.cdae`, "road": {shape, pos}; the mod then
@@ -13156,6 +13156,8 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks=None, road_mesh=None
         data["speedTraps"] = speed_traps
     if de_speed_cameras:
         data["deSpeedCameras"] = list(de_speed_cameras)
+    if de_roadworks:
+        data["deRoadworks"] = list(de_roadworks)
     if road_mesh is not None:
         x0, y0, _, _ = tile_bbox(tx, ty)
         shape = f"road_{aid}_{tx}_{ty}.cdae"

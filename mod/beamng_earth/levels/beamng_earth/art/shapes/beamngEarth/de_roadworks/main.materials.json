@@ -1,0 +1,132 @@
+{
+  "bne_de_rw_post": {
+    "name": "bne_de_rw_post",
+    "mapTo": "bne_de_rw_post",
+    "class": "Material",
+    "persistentId": "d5b6f49a-1a72-520d-a2f8-00b21c00340e",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.66,
+          0.69,
+          0.72,
+          1.0
+        ],
+        "metallicFactor": 0.72,
+        "roughnessFactor": 0.4
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_rw_rubber": {
+    "name": "bne_de_rw_rubber",
+    "mapTo": "bne_de_rw_rubber",
+    "class": "Material",
+    "persistentId": "c4a14591-636d-5a82-a3d0-efeba81f2c0e",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.12,
+          0.13,
+          0.15,
+          1.0
+        ],
+        "metallicFactor": 0.05,
+        "roughnessFactor": 0.75
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_rw_red": {
+    "name": "bne_de_rw_red",
+    "mapTo": "bne_de_rw_red",
+    "class": "Material",
+    "persistentId": "4a68a4cf-e05b-523e-81b5-ffe4eb5e7fbd",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.86,
+          0.1,
+          0.1,
+          1.0
+        ],
+        "metallicFactor": 0.08,
+        "roughnessFactor": 0.36
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_rw_white": {
+    "name": "bne_de_rw_white",
+    "mapTo": "bne_de_rw_white",
+    "class": "Material",
+    "persistentId": "5728b355-59e9-5870-91a7-36e8df142b78",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.92,
+          0.92,
+          0.9,
+          1.0
+        ],
+        "metallicFactor": 0.06,
+        "roughnessFactor": 0.34
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  },
+  "bne_de_rw_amber": {
+    "name": "bne_de_rw_amber",
+    "mapTo": "bne_de_rw_amber",
+    "class": "Material",
+    "persistentId": "40862225-bff0-569e-bc68-d9455e776b87",
+    "Stages": [
+      {
+        "baseColorFactor": [
+          0.96,
+          0.62,
+          0.08,
+          1.0
+        ],
+        "metallicFactor": 0.1,
+        "roughnessFactor": 0.18,
+        "emissiveFactor": [
+          0.55,
+          0.32,
+          0.02
+        ]
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "METAL",
+    "materialTag0": "beamng",
+    "materialTag1": "beamngEarth",
+    "version": 1.5
+  }
+}
