@@ -1627,4 +1627,248 @@ do
   N.reset()
 end
 
+-- 10. Deferred Post-Spawn partsTree Delivery Skins, Recycling Persistence & Anti-Loop Guards
+do
+  local sg = {}
+  local keys = {
+    'gameplay_traffic', 'getObjectByID', 'core_vehicle_partmgmt', 'core_vehicle_manager',
+    'core_camera', 'map', 'be', 'simTimeAuthority', 'os', 'readFile', 'jsonDecode',
+  }
+  for _, k in ipairs(keys) do sg[k] = rawget(_G, k) end
+  local function v(x, y, z) return { x = x, y = y, z = z or 0 } end
+  readFile = function() return '{}' end
+  jsonDecode = function() return { nodes = { n0 = { 0, 0, 0, 4 }, n1 = { 10, 0, 0, 4 } }, edges = { { 'n0', 'n1', 0, 1, 1, 13.8, 1, 4 } } } end
+  local clock0 = os.clock
+  local simNow = 5000
+  os.clock = function() return simNow end
+  simTimeAuthority = { getPause = function() return false end }
+  be = { getPlayerVehicleID = function() return -1 end }
+  core_camera = { getPosition = function() return v(0, 0, 0) end }
+
+  local townEdge = {
+    inNode = 't0', outNode = 't1', oneWay = false, highway = false, unlimited = false,
+    speedLimit = 13.8, lanes = '-+', lanesOut = 1, lanesIn = 1, inRadius = 3.5, outRadius = 3.5,
+  }
+  local townNodes = {
+    t0 = { pos = v(-200, 0, 0), radius = 3.5, links = { t1 = townEdge } },
+    t1 = { pos = v(200, 0, 0), radius = 3.5, links = { t0 = townEdge } },
+  }
+  map = {
+    getMap = function() return { nodes = townNodes } end,
+    findClosestRoad = function() return 't0', 't1' end,
+  }
+
+  local function makePartsTree(bodyPart, paintChosen, paintSuitable, boxSlot, boxSuitable)
+    local children = {
+      van_body = { id = 'van_body', chosenPartName = bodyPart or 'van_body_cargo' },
+      van_engine = { id = 'van_engine', chosenPartName = 'van_engine_v8' },
+      paint_design = {
+        id = 'paint_design',
+        chosenPartName = paintChosen or '',
+        suitablePartNames = paintSuitable or {},
+      },
+    }
+    if boxSlot then
+      children[boxSlot] = {
+        id = boxSlot,
+        chosenPartName = '',
+        suitablePartNames = boxSuitable or {},
+      }
+    end
+    return { id = 'main', chosenPartName = 'van', children = children }
+  end
+
+  local configs = {}
+  local vehObjects = {}
+  local trafficData = {}
+  local respawnCalls = {}
+  local dynFields = {}
+  local posRestores = {}
+  local aiModes = {}
+
+  local function makeLiveCar(id, model, partConfigPath, x, y, vx, vy)
+    local pos = v(x, y, 0)
+    local vel = v(vx or 8, vy or 0, 0)
+    local dir = v(1, 0, 0)
+    local cmds = {}
+    dynFields[id] = {}
+    local obj = {
+      partConfig = partConfigPath,
+      _cmds = cmds,
+      getActive = function() return true end,
+      getJBeamFilename = function() return model end,
+      getPosition = function() return pos end,
+      getRotation = function() return { x = 0, y = 0, z = 0, w = 1 } end,
+      getVelocity = function() return vel end,
+      getDirectionVector = function() return dir end,
+      setDynDataFieldbyName = function(_, k, _, val) dynFields[id][k] = val end,
+      setPosRot = function(_, nx, ny, nz)
+        pos = v(nx, ny, nz)
+        posRestores[id] = (posRestores[id] or 0) + 1
+      end,
+      queueLuaCommand = function(_, c) cmds[#cmds + 1] = c end,
+    }
+    vehObjects[id] = obj
+    return obj
+  end
+
+  core_vehicle_manager = {
+    getVehicleData = function(id)
+      local cfg = configs[id]
+      if not cfg then return nil end
+      return { config = cfg }
+    end,
+  }
+  core_vehicle_partmgmt = {
+    getConfigOfVehicle = function(id) return configs[id] end,
+    setConfigOfVehicle = function(obj, inData, respawn)
+      local vid
+      for id, o in pairs(vehObjects) do if o == obj then vid = id break end end
+      respawnCalls[#respawnCalls + 1] = { id = vid, inData = inData, respawn = respawn }
+      if vid and inData and inData.partsTree then
+        configs[vid].parts = nil
+        configs[vid].partsTree = inData.partsTree
+        -- Simulate BeamNG's onVehicleSpawned firing synchronously with traffic resetting useRandomPaint
+        if trafficData[vid] then
+          trafficData[vid].useRandomPaint = true
+        end
+        N.onVehicleSpawned(vid)
+      end
+    end,
+  }
+  getObjectByID = function(id) return vehObjects[id] end
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function() return trafficData end,
+  }
+
+  -- 10a. Deferred post-spawn partsTree application: waits for respawnActive=false and partsTree ready,
+  -- applies paint_design via partsTree (preserving sibling parts), prevents player auto-enter, clears useRandomPaint,
+  -- and does NOT trigger spawn loops on onVehicleSpawned.
+  N.reset()
+  N.enabled = true
+  N.trafficRegion = 'europe'
+  makeLiveCar(901, 'van', 'vehicles/van/h15_vanster_cargo.pc', 0, 0, 8, 0)
+  trafficData[901] = {
+    isAi = true, model = 'van', respawnCount = 0, respawnActive = true, state = 'reset', useRandomPaint = true,
+    setAiMode = function(_, m) aiModes[901] = m end,
+  }
+  -- Tick 1: vehicle still mid-spawn (respawnActive=true, no partsTree yet) -> deferred, 0 respawns!
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == 0,
+    'deferred livery: waits while respawnActive=true / partsTree unready without calling partmgmt')
+  T.check(N.getVehiclePersona(901) and N.getVehiclePersona(901).persona == 'commuter',
+    'deferred livery: unskinned van does not act as courier before livery is applied')
+
+  -- Traffic spawn finishes: partsTree is now populated with vanilla + mod skins (Beamcom, HHL, Nile, Post-It)
+  trafficData[901].respawnActive = false
+  trafficData[901].state = 'active'
+  configs[901] = {
+    partConfigFilename = 'vehicles/van/h15_vanster_cargo.pc',
+    partsTree = makePartsTree('van_body_cargo', '', {
+      'van_skin_police', 'van_skin_twotone', 'van_skin_beamcom', 'van_skin_hhl', 'van_skin_nile', 'van_skin_Post-ItDelivery',
+    }),
+  }
+  -- Tick 2: defer window elapsed -> applies paint_design via partsTree once!
+  simNow = 5001
+  N.updateTrafficDirector(0.45, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == 1 and respawnCalls[1].id == 901,
+    'deferred livery: applies paint_design exactly once after traffic spawn init completes')
+  T.check(respawnCalls[1].inData.partsTree ~= nil and respawnCalls[1].inData.parts == nil,
+    'deferred livery: mutates modern partsTree (not obsolete flat .parts) so sibling slots stay intact')
+  T.check(configs[901].partsTree.children.van_body.chosenPartName == 'van_body_cargo'
+    and configs[901].partsTree.children.van_engine.chosenPartName == 'van_engine_v8',
+    'deferred livery: preserves cargo body and engine slots inside partsTree')
+  local appliedSkin901 = configs[901].partsTree.children.paint_design.chosenPartName
+  T.check(appliedSkin901 == 'van_skin_hhl' or appliedSkin901 == 'van_skin_nile'
+    or appliedSkin901 == 'van_skin_Post-ItDelivery' or appliedSkin901 == 'van_skin_beamcom',
+    'deferred livery: selects valid delivery paint_design from partsTree.suitablePartNames')
+  T.check(dynFields[901].autoEnterVehicle == 'false',
+    'deferred livery: sets autoEnterVehicle="false" before respawn so player is never pulled into AI van')
+  T.check(trafficData[901].useRandomPaint == false and aiModes[901] == 'traffic',
+    'deferred livery: clears useRandomPaint and restores AI traffic mode in onVehicleSpawned')
+  T.check(N.getVehiclePersona(901) and N.getVehiclePersona(901).persona == 'courier',
+    'deferred livery: promotes skinned cargo van to courier persona once paint_design is applied')
+
+  -- Tick 3: steady-state ticks never re-apply (anti-loop guard)
+  simNow = 5002
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == 1, 'deferred livery: steady-state ticks cause zero extra respawns (no spawn loop)')
+
+  -- 10b. Persistence across traffic pool recycling (forceTeleport / respawnCount increment / onVehicleSwitched):
+  -- Skin still intact -> keeps useRandomPaint=false with ZERO respawns!
+  trafficData[901].respawnCount = 1
+  trafficData[901].useRandomPaint = true
+  N.onVehicleSwitched(901, 100, 0)
+  simNow = 5003
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == 1 and trafficData[901].useRandomPaint == false,
+    'recycling persistence: intact paint_design after respawnCount/switch needs zero respawns and re-locks useRandomPaint=false')
+
+  -- If an external reload wipes paint_design, director re-applies the persisted skin cleanly once!
+  configs[901].partsTree.children.paint_design.chosenPartName = ''
+  N.onVehicleSpawned(901)
+  simNow = 5004
+  N.updateTrafficDirector(0.45, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == 2 and configs[901].partsTree.children.paint_design.chosenPartName == appliedSkin901,
+    'recycling persistence: re-applies persisted paint_design if an external reload cleared it')
+
+  -- 10c. md_series dual-slot skinning (paint_design + skin_md_series_cargobox)
+  makeLiveCar(902, 'md_series', 'vehicles/md_series/md70_boxtruck.pc', 20, 0, 8, 0)
+  trafficData[902] = { isAi = true, model = 'md_series', respawnCount = 0, respawnActive = false, state = 'active', useRandomPaint = true }
+  configs[902] = {
+    partConfigFilename = 'vehicles/md_series/md70_boxtruck.pc',
+    partsTree = makePartsTree('md_series_cab_reg', '', { 'md_series_skin_hhl', 'md_series_skin_bps' },
+      'skin_md_series_cargobox', { 'md_series_cargobox_skin_hhl', 'md_series_cargobox_skin_bps' }),
+  }
+  simNow = 5005
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  local mdCabSkin = configs[902].partsTree.children.paint_design.chosenPartName
+  local mdBoxSkin = configs[902].partsTree.children.skin_md_series_cargobox.chosenPartName
+  T.check((mdCabSkin == 'md_series_skin_hhl' and mdBoxSkin == 'md_series_cargobox_skin_hhl')
+    or (mdCabSkin == 'md_series_skin_bps' and mdBoxSkin == 'md_series_cargobox_skin_bps'),
+    'md_series dual-slot: applies matching brand livery to both paint_design and skin_md_series_cargobox')
+
+  -- 10d. Windowed passenger van detected via obj.partConfig AND via partsTree body clue -> never courier, never skinned!
+  local beforeRespawns = #respawnCalls
+  makeLiveCar(903, 'van', 'vehicles/van/h15_vanster_passenger.pc', 40, 0, 8, 0)
+  trafficData[903] = { isAi = true, model = 'van', respawnCount = 0, respawnActive = false, state = 'active' }
+  configs[903] = {
+    partConfigFilename = 'vehicles/van/h15_vanster_passenger.pc',
+    partsTree = makePartsTree('van_body_passenger', '', { 'van_skin_beamcom', 'van_skin_hhl' }),
+  }
+  -- 10e. Unbranded vehicle with ZERO delivery paint_design parts in suitablePartNames -> downgraded to commuter, no courier stops!
+  makeLiveCar(904, 'pickup', 'vehicles/pickup/d15_cargobox.pc', 60, 0, 8, 0)
+  trafficData[904] = { isAi = true, model = 'pickup', respawnCount = 0, respawnActive = false, state = 'active' }
+  configs[904] = {
+    partConfigFilename = 'vehicles/pickup/d15_cargobox.pc',
+    partsTree = makePartsTree('pickup_cargobox', '', { 'pickup_skin_old', 'pickup_skin_twotone' }),
+  }
+  N.onDeliveryPoints('t_unbranded', { { x = 65, y = 2, z = 0 } })
+  simNow = 5006
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 })
+  T.check(#respawnCalls == beforeRespawns,
+    'strict courier filter: neither windowed passenger van nor unbranded pickup triggers livery respawn')
+  T.check(N.getVehiclePersona(903) and N.getVehiclePersona(903).persona ~= 'courier'
+    and not N.isCourierDwelling(903),
+    'strict courier filter: windowed passenger config (from obj.partConfig/partsTree) never receives courier stops')
+  T.check(N.getVehiclePersona(904) and N.getVehiclePersona(904).persona == 'commuter'
+    and not N.isCourierDwelling(904),
+    'strict courier filter: unbranded cargo pickup without delivery livery drives as commuter and never takes courier stops')
+
+  -- 10f. navgraph.transform rebases anchor-tile deliveryPoints alongside busStops
+  N.onDeliveryPoints('a1:0_0', { { x = 100, y = 200, z = 5 } })
+  local xf = { apply = function(_, x, y, z) return x + 10, y - 20, z + 1 end }
+  -- Seed a minimal graph so transform() executes
+  N.onMessage({ anchorId = 1, path = 'x', serial = 2 }, 1)
+  N.transform(xf, 2)
+  local dp = N.deliveryPoints()['a1:0_0']
+  T.check(dp and dp[1] and dp[1].x == 110 and dp[1].y == 180 and dp[1].z == 6,
+    'transform: rebases anchor-tile deliveryPoints into the new anchor frame')
+
+  os.clock = clock0
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
 T.done('test_navgraph')

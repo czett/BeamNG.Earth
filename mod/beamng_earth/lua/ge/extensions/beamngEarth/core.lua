@@ -4159,8 +4159,14 @@ M.onVehicleSwitched = function(oldId, newId, player)
 end
 -- (vehicles spawned / removed, traffic's pooled ones shown / hidden: a slow frame's context in the anonymous summary;
 -- GitHub #594, freezes as traffic despawns)
-M.onVehicleSpawned = function() M._psum.mod.note('spawn') end
-M.onVehicleDestroyed = function() M._psum.mod.note('despawn') end
+M.onVehicleSpawned = function(id)
+  M._psum.mod.note('spawn')
+  if st.inOurLevel and navgraph.onVehicleSpawned then pcall(navgraph.onVehicleSpawned, id) end
+end
+M.onVehicleDestroyed = function(id)
+  M._psum.mod.note('despawn')
+  if st.inOurLevel and navgraph.onVehicleDestroyed then pcall(navgraph.onVehicleDestroyed, id) end
+end
 M.onVehicleActiveChanged = function(_, active) M._psum.mod.note(active and 'spawn' or 'despawn') end
 M.onClientEndMission = onClientEndMission
 M.onExit = function() notePlayerPos(true); if st.inOurLevel then pcall(trees.saveShapes, true) end end           -- the game closing (a crash or a kill: the last periodic one)

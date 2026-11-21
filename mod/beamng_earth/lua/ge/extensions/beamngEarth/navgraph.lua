@@ -904,9 +904,12 @@ syncTrafficPool = function(gt)
   return safe
 end
 
+local onVehicleSwitchedLivery -- forward-declared (defined with traffic director below)
+
 -- core forwards the game's switch hook so a newly occupied traffic car is protected before the next guard tick.
-function M.onVehicleSwitched(_, _, player)
+function M.onVehicleSwitched(oldId, newId, player)
   localplayers.observe(player)
+  if onVehicleSwitchedLivery then onVehicleSwitchedLivery(oldId, newId) end
   local gt = gameplay_traffic
   if gt and gt.getState() == 'on' then syncTrafficPool(gt) end
 end
@@ -1139,12 +1142,18 @@ M.COURIER_PAINTS = {
   },
 }
 
+M.LIVERY_MAX_RETRIES = 3
+M.LIVERY_RETRY_S = 0.5
+M.LIVERY_DEFER_S = 0.35
+
 local director = {
   accum = 0,
   clock = 0,
   rosterArchetype = {},
   rosterEntry = {},
   liveryApplied = {},
+  liveryState = {},
+  pendingLivery = {},
   personas = {},
   busStops = {},
   busStopCount = 0,
@@ -1410,39 +1419,257 @@ function M.pickDeliveryPaintDesign(model, installedParts, seedOrOpts)
   return candidates[idx].name
 end
 
+local PAINT_SLOT_IDS = { paint_design = true, skin_traffic_evvan = true, skin_traffic_robotvan = true }
+local BOX_SKIN_SLOT_IDS = { skin_md_series_cargobox = true, skin_us_semi_cargobox = true, skin_boxTruck = true }
+local jbeamIOMod = nil
+
+local function getJbeamIO()
+  local g = rawget(_G, 'jbeamIO')
+  if type(g) == 'table' and type(g.getAvailableParts) == 'function' then return g end
+  if jbeamIOMod == nil then
+    local ok, mod = pcall(require, 'jbeam/io')
+    jbeamIOMod = (ok and type(mod) == 'table' and type(mod.getAvailableParts) == 'function') and mod or false
+  end
+  return jbeamIOMod ~= false and jbeamIOMod or nil
+end
+
+local function deepCopyValue(v, seen)
+  if type(v) ~= 'table' then return v end
+  if seen[v] then return seen[v] end
+  local out = {}
+  seen[v] = out
+  for k, val in pairs(v) do
+    out[k] = deepCopyValue(val, seen)
+  end
+  return out
+end
+
+local function findSlotInPartsTree(node, slotSet)
+  if type(node) ~= 'table' then return nil end
+  if type(node.id) == 'string' and slotSet[node.id] then return node end
+  if type(node.children) == 'table' then
+    for k, child in pairs(node.children) do
+      if type(child) == 'table' then
+        if (type(child.id) == 'string' and slotSet[child.id]) or (type(k) == 'string' and slotSet[k]) then
+          return child
+        end
+        local found = findSlotInPartsTree(child, slotSet)
+        if found then return found end
+      end
+    end
+  end
+  return nil
+end
+
+local function collectBodyClueFromPartsTree(node)
+  if type(node) ~= 'table' then return nil end
+  local nid = type(node.id) == 'string' and node.id:lower() or ''
+  local chosen = type(node.chosenPartName) == 'string' and node.chosenPartName:lower() or ''
+  if chosen ~= '' and (nid:find('body', 1, true) or nid:find('upfit', 1, true) or nid:find('tailgate', 1, true)
+      or nid:find('glass', 1, true) or nid:find('door', 1, true)) then
+    if chosen:find('passenger', 1, true) or chosen:find('minibus', 1, true) or chosen:find('shuttle', 1, true)
+        or chosen:find('tailgateglass', 1, true) or chosen:find('windowed', 1, true) or chosen:find('schoolbus', 1, true)
+        or chosen:find('prisonbus', 1, true) or chosen:find('camper', 1, true) or chosen:find('combi', 1, true) then
+      return chosen
+    end
+  end
+  if type(node.children) == 'table' then
+    for _, child in pairs(node.children) do
+      local hit = collectBodyClueFromPartsTree(child)
+      if hit then return hit end
+    end
+  end
+  return nil
+end
+
+-- Extract normalized config basename from live BeamNG vehicle data / scene object / traffic table.
+function M.vehicleConfigKey(obj, trafficEntry, vdata)
+  local raw = nil
+  if type(vdata) == 'table' and type(vdata.config) == 'table' and type(vdata.config.partConfigFilename) == 'string'
+      and vdata.config.partConfigFilename ~= '' then
+    raw = vdata.config.partConfigFilename
+  end
+  if (not raw or raw == '') and obj then
+    local ok, pc = pcall(function() return obj.partConfig end)
+    if ok and type(pc) == 'string' and pc ~= '' and pc:sub(1, 1) ~= '{' then
+      raw = pc
+    end
+  end
+  if (not raw or raw == '') and type(trafficEntry) == 'table' then
+    if type(trafficEntry.config) == 'string' and trafficEntry.config ~= '' then
+      raw = trafficEntry.config
+    elseif type(trafficEntry.partConfig) == 'string' and trafficEntry.partConfig ~= '' and trafficEntry.partConfig:sub(1, 1) ~= '{' then
+      raw = trafficEntry.partConfig
+    end
+  end
+  if type(raw) ~= 'string' or raw == '' then return '' end
+  local base = raw:gsub('\\', '/')
+  base = base:match('([^/]+)$') or base
+  base = base:gsub('%.pc$', '')
+  return base
+end
+
+local function partNameInList(name, avail)
+  if type(name) ~= 'string' or name == '' then return false end
+  if type(avail) ~= 'table' then return true end
+  if #avail > 0 then
+    for i = 1, #avail do
+      local v = avail[i]
+      if v == name or (type(v) == 'table' and v.name == name) then return true end
+    end
+    return false
+  end
+  return avail[name] ~= nil and avail[name] ~= false
+end
+
+local function pickBoxSkinForPaint(paintDesign, boxSuitable)
+  if type(boxSuitable) ~= 'table' or #boxSuitable == 0 then return nil end
+  local pdl = tostring(paintDesign or ''):lower()
+  local pdTok = normalizeTokens(pdl)
+  local best, bestScore = nil, -1
+  local brandTokens = { 'hhl', 'bps', 'rrt', 'nile', 'postit', 'post', 'dhl', 'ups', 'dpd', 'beamcom', 'fdc' }
+  local wantBrand = nil
+  for i = 1, #brandTokens do
+    local bt = brandTokens[i]
+    if pdTok:find(' ' .. bt .. ' ', 1, true) or pdl:find(bt, 1, true) then
+      wantBrand = bt
+      break
+    end
+  end
+  for i = 1, #boxSuitable do
+    local p = boxSuitable[i]
+    if type(p) == 'string' and p ~= '' then
+      local pl = p:lower()
+      if not hasAnyKeyword(pl, NON_DELIVERY_SKIN_KEYWORDS) then
+        local sc = 0
+        if wantBrand and pl:find(wantBrand, 1, true) then
+          sc = sc + 100
+        elseif isDeliveryPaintDesignPart(p) or pl:find('cargobox_skin_bng', 1, true)
+            or pl:find('cargobox_skin_beamindustries', 1, true) or pl:find('cargobox_skin_cola', 1, true) then
+          sc = sc + 20
+        end
+        if sc > bestScore then
+          best, bestScore = p, sc
+        end
+      end
+    end
+  end
+  return bestScore > 0 and best or nil
+end
+
+local function captureVehiclePose(obj)
+  if not obj then return nil end
+  local pose = {}
+  if obj.getPosition then
+    local ok, p = pcall(obj.getPosition, obj)
+    if ok and p and p.x then pose.x, pose.y, pose.z = p.x, p.y, p.z end
+  end
+  if obj.getRotation then
+    local ok, r = pcall(obj.getRotation, obj)
+    if ok and r and r.w then pose.rx, pose.ry, pose.rz, pose.rw = r.x, r.y, r.z, r.w end
+  end
+  if obj.getVelocity then
+    local ok, u = pcall(obj.getVelocity, obj)
+    if ok and u and u.x then
+      pose.vx, pose.vy, pose.vz = u.x, u.y, u.z
+      pose.speed = math.sqrt(u.x * u.x + u.y * u.y)
+    end
+  end
+  if obj.getDirectionVector then
+    local ok, f = pcall(obj.getDirectionVector, obj)
+    if ok and f and f.x then pose.fx, pose.fy, pose.fz = f.x, f.y, f.z end
+  end
+  return pose.x and pose or nil
+end
+
+local function restoreCourierAfterRespawn(vehId, st, obj, t, lightsOn)
+  if type(st) ~= 'table' then return end
+  if type(t) == 'table' then
+    t.useRandomPaint = false
+    if type(t.setAiMode) == 'function' then
+      pcall(t.setAiMode, t, 'traffic', true)
+    end
+  end
+  local targetObj = obj or (getObjectByID and getObjectByID(vehId)) or nil
+  local pose = st.restorePose
+  if targetObj and type(pose) == 'table' and pose.x then
+    -- Only restore position if veh:respawn shifted the vehicle away from where it was driving.
+    if targetObj.getPosition and targetObj.setPosRot and pose.rw then
+      local okP, curP = pcall(targetObj.getPosition, targetObj)
+      if okP and curP and curP.x then
+        local d2 = (curP.x - pose.x) ^ 2 + (curP.y - pose.y) ^ 2
+        if d2 > 2.25 then
+          pcall(targetObj.setPosRot, targetObj, pose.x, pose.y, pose.z, pose.rx, pose.ry, pose.rz, pose.rw)
+        end
+      end
+    end
+    local p = director.personas[vehId]
+    local cmd = p and M.personaAiCommand(p, lightsOn) or nil
+    if cmd and targetObj.queueLuaCommand then
+      pcall(targetObj.queueLuaCommand, targetObj, cmd)
+    end
+    if pose.speed and pose.speed >= 2.0 and targetObj.queueLuaCommand then
+      pcall(targetObj.queueLuaCommand, targetObj, string.format('ai.driveInLane("on") ai.setSpeed(%.2f)', pose.speed))
+    end
+  end
+  st.restorePose = nil
+  st.pendingRestore = false
+end
+
 -- Apply a delivery paint_design part (or preserve an active paint_design) on a spawned courier vehicle via
--- core_vehicle_partmgmt, falling back to M.COURIER_PAINTS only if no delivery paint_design exists on that model.
-function M.applyVehicleLivery(vehId, entry)
+-- BeamNG's modern partsTree config (preserving all sibling slots, vehicle pose, and preventing player auto-enter),
+-- with legacy flat-parts fallback for older stubs and M.COURIER_PAINTS fallback only when no livery exists.
+function M.applyVehicleLivery(vehId, entry, opts)
   if type(entry) ~= 'table' then return { applied = 'none' } end
   local pm = rawget(_G, 'core_vehicle_partmgmt')
   local vm = rawget(_G, 'core_vehicle_manager')
-  local obj = getObjectByID and getObjectByID(vehId) or nil
+  local obj = (type(opts) == 'table' and opts.obj) or (getObjectByID and getObjectByID(vehId)) or nil
+  local trafficEntry = type(opts) == 'table' and opts.trafficEntry or nil
+  local now = (type(opts) == 'table' and tonumber(opts.now)) or director.clock
   local model = entry.model or (obj and obj.getJBeamFilename and obj:getJBeamFilename()) or ''
-  local cfgStr = tostring(entry.config or ''):lower()
-  local isBox = cfgStr:find('box', 1, true) ~= nil or cfgStr:find('deliverytruck', 1, true) ~= nil
-    or cfgStr:find('upfit', 1, true) ~= nil
 
-  -- 1. Check for an already-active paint_design on the vehicle; never override an active paint_design with solid paint.
-  local existingPd = nil
+  local curCfg = nil
   if pm and type(pm.getConfigOfVehicle) == 'function' then
-    local ok, curCfg = pcall(pm.getConfigOfVehicle, vehId)
-    if ok and type(curCfg) == 'table' and type(curCfg.parts) == 'table' then
-      local pd = curCfg.parts.paint_design
-      if type(pd) == 'string' and pd ~= '' and pd ~= 'none' then existingPd = pd end
-    end
+    local ok, c = pcall(pm.getConfigOfVehicle, vehId)
+    if ok and type(c) == 'table' then curCfg = c end
   end
   local vdata = nil
   if vm and type(vm.getVehicleData) == 'function' then
     local ok, vd = pcall(vm.getVehicleData, vehId)
-    if ok and type(vd) == 'table' then
-      vdata = vd
-      if not existingPd and type(vd.config) == 'table' and type(vd.config.parts) == 'table' then
-        local pd = vd.config.parts.paint_design
-        if type(pd) == 'string' and pd ~= '' and pd ~= 'none' then existingPd = pd end
-      end
-    end
+    if ok and type(vd) == 'table' then vdata = vd end
   end
+
+  local cfgObj = curCfg or (vdata and type(vdata.config) == 'table' and vdata.config) or nil
+  local partsTree = cfgObj and type(cfgObj.partsTree) == 'table' and cfgObj.partsTree or nil
+  local legacyParts = cfgObj and type(cfgObj.parts) == 'table' and cfgObj.parts or nil
+
+  -- If live BeamNG partmgmt/manager exist but neither partsTree nor legacy parts is loaded yet, defer cleanly.
+  if not partsTree and not legacyParts and (pm or vm) and entry.installedParts == nil and entry.paintDesign == nil then
+    return { applied = 'deferred', reason = 'parts_tree_not_ready' }
+  end
+
+  local resolvedCfg = (type(entry.config) == 'string' and entry.config ~= '') and entry.config
+    or M.vehicleConfigKey(obj, trafficEntry, vdata)
+  local cfgStr = tostring(resolvedCfg or ''):lower()
+  local isBox = cfgStr:find('box', 1, true) ~= nil or cfgStr:find('deliverytruck', 1, true) ~= nil
+    or cfgStr:find('upfit', 1, true) ~= nil
+
+  -- 1. Check for an already-active paint_design on the vehicle (modern partsTree first, then legacy .parts).
+  local paintNode = partsTree and findSlotInPartsTree(partsTree, PAINT_SLOT_IDS) or nil
+  local boxNode = partsTree and findSlotInPartsTree(partsTree, BOX_SKIN_SLOT_IDS) or nil
+  if boxNode then isBox = true end
+
+  local existingPd = nil
+  if paintNode and type(paintNode.chosenPartName) == 'string' and paintNode.chosenPartName ~= ''
+      and paintNode.chosenPartName ~= 'none' then
+    existingPd = paintNode.chosenPartName
+  elseif legacyParts and type(legacyParts.paint_design) == 'string' and legacyParts.paint_design ~= ''
+      and legacyParts.paint_design ~= 'none' then
+    existingPd = legacyParts.paint_design
+  end
+
   if existingPd and (entry.hasDeliveryLivery == true or isDeliveryPaintDesignPart(existingPd)) then
+    if type(trafficEntry) == 'table' then trafficEntry.useRandomPaint = false end
     entry.paintDesign = existingPd
     entry.hasDeliveryLivery = true
     entry.paint = nil
@@ -1450,42 +1677,114 @@ function M.applyVehicleLivery(vehId, entry)
     return { applied = 'existing_paint_design', paintDesign = existingPd, preserved = true }
   end
   if entry.hasDeliveryLivery == true and not entry.paintDesign then
+    if type(trafficEntry) == 'table' then trafficEntry.useRandomPaint = false end
     entry.paint = nil
     entry.paintName = nil
     return { applied = 'preserved_livery', preserved = true }
   end
 
-  -- 2. Resolve a delivery paint_design part from entry.paintDesign, entry.installedParts, or vehicle's available parts.
-  local chosenPd = entry.paintDesign
-  if not chosenPd then
-    local avail = entry.installedParts
-    if not avail and vdata then
-      if type(vdata.availableParts) == 'table' then
-        avail = vdata.availableParts
-      elseif vdata.ioCtx and rawget(_G, 'jbeamIO') and type(jbeamIO.getAvailableParts) == 'function' then
-        local okP, parts = pcall(jbeamIO.getAvailableParts, vdata.ioCtx)
+  -- 2. Discover compatible installed delivery paint_design parts (installedParts -> partsTree.suitablePartNames -> jbeam/io).
+  local avail = entry.installedParts
+  if not avail and paintNode and type(paintNode.suitablePartNames) == 'table' and #paintNode.suitablePartNames > 0 then
+    avail = paintNode.suitablePartNames
+  end
+  if not avail and vdata then
+    if type(vdata.availableParts) == 'table' then
+      avail = vdata.availableParts
+    elseif vdata.ioCtx then
+      local jio = getJbeamIO()
+      if jio then
+        local okP, parts = pcall(jio.getAvailableParts, vdata.ioCtx)
         if okP and type(parts) == 'table' then avail = parts end
       end
     end
+  end
+
+  local chosenPd = entry.paintDesign
+  if chosenPd and avail and not partNameInList(chosenPd, avail) then
+    chosenPd = nil
+  end
+  if not chosenPd then
     chosenPd = M.pickDeliveryPaintDesign(model, avail, { seed = vehId, region = entry.region, isBox = isBox })
   end
 
   if chosenPd and chosenPd ~= '' then
     local appliedOk = false
-    if pm then
-      if obj and type(pm.setConfigOfVehicle) == 'function' then
-        appliedOk = pcall(pm.setConfigOfVehicle, obj, { parts = { paint_design = chosenPd } }, true)
-      elseif type(pm.setConfig) == 'function' then
-        appliedOk = pcall(pm.setConfig, { parts = { paint_design = chosenPd } }, true, vehId)
-      elseif type(pm.setPartsConfig) == 'function' then
-        appliedOk = pcall(pm.setPartsConfig, { paint_design = chosenPd }, true)
+    local chosenBox = boxNode and pickBoxSkinForPaint(chosenPd, boxNode.suitablePartNames) or nil
+    if type(trafficEntry) == 'table' then trafficEntry.useRandomPaint = false end
+
+    if partsTree and paintNode then
+      -- Modern BeamNG 0.35+ partsTree path: mutate ONLY the skin slot(s) on a deep copy so all other parts stay intact!
+      local treeCopy = deepCopyValue(partsTree, {})
+      local targetPaintNode = findSlotInPartsTree(treeCopy, PAINT_SLOT_IDS)
+      if targetPaintNode then targetPaintNode.chosenPartName = chosenPd end
+      if chosenBox then
+        local targetBoxNode = findSlotInPartsTree(treeCopy, BOX_SKIN_SLOT_IDS)
+        if targetBoxNode then targetBoxNode.chosenPartName = chosenBox end
       end
+      -- Ensure obsolete flat `.parts` is nil so jbeam/slotSystem.lua takes the `partsTree` branch.
+      if vdata and type(vdata.config) == 'table' then vdata.config.parts = nil end
+      if curCfg then curCfg.parts = nil end
+      -- Prevent BeamNG manager.lua from teleporting the player into the AI vehicle during respawn.
+      if obj and obj.setDynDataFieldbyName then
+        pcall(obj.setDynDataFieldbyName, obj, 'autoEnterVehicle', 0, 'false')
+      end
+      local pose = captureVehiclePose(obj)
+      local st = director.liveryState[vehId] or {}
+      st.paintDesign = chosenPd
+      st.boxSkin = chosenBox
+      st.applying = true
+      st.verified = false
+      st.pendingRestore = true
+      st.restorePose = pose
+      st.appliedAt = now
+      st.respawnCount = trafficEntry and (tonumber(trafficEntry.respawnCount) or 0) or (st.respawnCount or 0)
+      director.liveryState[vehId] = st
+
+      if pm then
+        if obj and type(pm.setConfigOfVehicle) == 'function' then
+          appliedOk = pcall(pm.setConfigOfVehicle, obj, { partsTree = treeCopy }, true)
+        elseif type(pm.setConfig) == 'function' then
+          appliedOk = pcall(pm.setConfig, { partsTree = treeCopy }, true, vehId)
+        end
+      end
+      if not appliedOk and obj and type(obj.respawn) == 'function' and rawget(_G, 'serialize') then
+        local fullCfg = deepCopyValue(cfgObj, {})
+        fullCfg.parts = nil
+        fullCfg.partsTree = treeCopy
+        appliedOk = pcall(obj.respawn, obj, serialize(fullCfg))
+      end
+      if not appliedOk then
+        st.applying = false
+        st.pendingRestore = false
+        return { applied = 'deferred', reason = 'apply_failed', paintDesign = chosenPd, ok = false }
+      end
+      -- If respawn did not synchronously invoke onVehicleSpawned, leave applying=true for onVehicleSpawned / next tick.
+      entry.paintDesign = chosenPd
+      entry.hasDeliveryLivery = true
+      entry.paint = nil
+      entry.paintName = nil
+      return { applied = 'paint_design', paintDesign = chosenPd, boxSkin = chosenBox, via = 'partsTree', ok = true }
+    else
+      -- Legacy flat-parts path (for older stubs / mocks without partsTree)
+      if obj and obj.setDynDataFieldbyName then
+        pcall(obj.setDynDataFieldbyName, obj, 'autoEnterVehicle', 0, 'false')
+      end
+      if pm then
+        if obj and type(pm.setConfigOfVehicle) == 'function' then
+          appliedOk = pcall(pm.setConfigOfVehicle, obj, { parts = { paint_design = chosenPd } }, true)
+        elseif type(pm.setConfig) == 'function' then
+          appliedOk = pcall(pm.setConfig, { parts = { paint_design = chosenPd } }, true, vehId)
+        elseif type(pm.setPartsConfig) == 'function' then
+          appliedOk = pcall(pm.setPartsConfig, { paint_design = chosenPd }, true)
+        end
+      end
+      entry.paintDesign = chosenPd
+      entry.hasDeliveryLivery = true
+      entry.paint = nil
+      entry.paintName = nil
+      return { applied = 'paint_design', paintDesign = chosenPd, via = 'parts', ok = appliedOk }
     end
-    entry.paintDesign = chosenPd
-    entry.hasDeliveryLivery = true
-    entry.paint = nil
-    entry.paintName = nil
-    return { applied = 'paint_design', paintDesign = chosenPd, ok = appliedOk }
   end
 
   -- 3. Fallback to regional M.COURIER_PAINTS only when no delivery paint_design part exists on this model.
@@ -1505,6 +1804,49 @@ function M.applyVehicleLivery(vehId, entry)
 
   return { applied = 'none' }
 end
+
+onVehicleSwitchedLivery = function(oldId, newId)
+  if oldId and director.liveryState[oldId] then
+    director.liveryState[oldId].verified = false
+  end
+  if newId and director.liveryState[newId] then
+    director.liveryState[newId].verified = false
+  end
+end
+
+-- Hook forwarded from core.lua: handle post-spawn completion for our own livery respawns (zero loops)
+-- and defer inspection of externally spawned/replaced traffic vehicles until traffic init completes.
+function M.onVehicleSpawned(vehId)
+  if not vehId then return end
+  local st = director.liveryState[vehId]
+  if st and st.applying then
+    st.applying = false
+    st.verified = true
+    director.pendingLivery[vehId] = nil
+    local gt = rawget(_G, 'gameplay_traffic')
+    local data = gt and gt.getTrafficData and gt.getTrafficData() or nil
+    local t = type(data) == 'table' and data[vehId] or nil
+    restoreCourierAfterRespawn(vehId, st, nil, t, M.needsHeadlights())
+    return
+  end
+  if st then
+    st.verified = false
+  end
+  director.pendingLivery[vehId] = { queuedAt = director.clock, retries = 0 }
+end
+
+function M.onVehicleDestroyed(vehId)
+  if not vehId then return end
+  director.liveryState[vehId] = nil
+  director.pendingLivery[vehId] = nil
+  director.liveryApplied[vehId] = nil
+  director.personas[vehId] = nil
+  director.busDwell[vehId] = nil
+  director.courierDwell[vehId] = nil
+  director.highwayBoostAt[vehId] = nil
+end
+
+function M._directorLiveryState() return director.liveryState end -- (tests)
 
 local SPEEDER_KEYWORDS = {
   'ttsport', 'sport', 'gt4', 'gt3', 'gt2', 'gt', 'rs', 'redtail', 'battlehawk',
@@ -2372,12 +2714,18 @@ function M.updateTrafficDirector(dtReal, player, box)
   local activeBox = box or (applied and applied.box) or nil
   local lightsOn = M.needsHeadlights()
 
-  -- Clean stale personas / dwells / livery flags for despawned vehicles
+  -- Clean stale personas / dwells / livery state for despawned vehicles
   for id in pairs(director.personas) do
     if data[id] == nil then director.personas[id] = nil end
   end
   for id in pairs(director.liveryApplied) do
     if data[id] == nil then director.liveryApplied[id] = nil end
+  end
+  for id in pairs(director.liveryState) do
+    if data[id] == nil then director.liveryState[id] = nil end
+  end
+  for id in pairs(director.pendingLivery) do
+    if data[id] == nil then director.pendingLivery[id] = nil end
   end
   for id in pairs(director.busDwell) do
     if data[id] == nil then director.busDwell[id] = nil end
@@ -2389,6 +2737,8 @@ function M.updateTrafficDirector(dtReal, player, box)
     if data[id] == nil then director.highwayBoostAt[id] = nil end
   end
 
+  local vm = rawget(_G, 'core_vehicle_manager')
+  local pm = rawget(_G, 'core_vehicle_partmgmt')
   localplayers.snapshot(controlled)
   for id, t in pairs(data) do
     if type(t) == 'table' and t.isAi ~= false then
@@ -2406,37 +2756,154 @@ function M.updateTrafficDirector(dtReal, player, box)
           if fl > 1e-6 then dx, dy = f.x / fl, f.y / fl end
         end
 
-        -- 1. Assign or refresh persona (and inject dynamic delivery paint_design on couriers) on first sight / respawn
+        -- 1. Deferred post-spawn courier paint_design application, recycling verification & persona sync
         local rc = tonumber(t.respawnCount) or 0
         local curP = director.personas[id]
+        local lst = director.liveryState[id]
+        local pend = director.pendingLivery[id]
+        if lst and lst.paintDesign then
+          -- Never let gameplay_traffic/vehicle.lua C:onRespawn() overwrite a skinned courier with random solid paint.
+          t.useRandomPaint = false
+        end
+        if lst and lst.pendingRestore then
+          lst.applying = false
+          restoreCourierAfterRespawn(id, lst, o, t, lightsOn)
+        end
+
         local road = nil
-        if not curP or curP._respawnCount ~= rc then
+        local needsCheck = (not curP) or (curP._respawnCount ~= rc) or (pend ~= nil)
+          or (lst ~= nil and (lst.verified == false or lst.respawnCount ~= rc))
+        if needsCheck then
+          local vdata = nil
+          if vm and type(vm.getVehicleData) == 'function' then
+            local okV, vd = pcall(vm.getVehicleData, id)
+            if okV and type(vd) == 'table' then vdata = vd end
+          end
+          local curCfg = nil
+          if pm and type(pm.getConfigOfVehicle) == 'function' then
+            local okC, cc = pcall(pm.getConfigOfVehicle, id)
+            if okC and type(cc) == 'table' then curCfg = cc end
+          end
+          local cfgObj = curCfg or (vdata and type(vdata.config) == 'table' and vdata.config) or nil
+          local ptree = cfgObj and type(cfgObj.partsTree) == 'table' and cfgObj.partsTree or nil
+          local bodyClue = ptree and collectBodyClueFromPartsTree(ptree) or nil
+
           local model = t.model or (o.getJBeamFilename and o:getJBeamFilename()) or ''
-          local config = t.config or t.partConfig or ''
+          local config = M.vehicleConfigKey(o, t, vdata)
           local rkey = tostring(model):lower() .. ':' .. tostring(config):lower()
           road = map and map.getMap and closestRoad(p.x, p.y, p.z) or nil
           local isAutobahn = road ~= nil and road.unlimited == true
           local rArch = director.rosterArchetype[rkey]
           local rEntry = director.rosterEntry[rkey]
+          local metaEntry = nil
+          if rEntry or bodyClue then
+            metaEntry = {
+              model = model,
+              config = config,
+              name = rEntry and rEntry.name or nil,
+              body = bodyClue or (rEntry and rEntry.body) or nil,
+              region = M.trafficRegion or 'europe',
+              hasDeliveryLivery = rEntry and rEntry.hasDeliveryLivery or nil,
+              paintDesign = rEntry and rEntry.paintDesign or nil,
+              paint = rEntry and rEntry.paint or nil,
+              paintName = rEntry and rEntry.paintName or nil,
+              installedParts = rEntry and rEntry.installedParts or nil,
+            }
+          end
+
           local liveryEntry = nil
-          if rArch == 'courier' or (rArch == nil and M.classifyVehicle(model, config, rEntry) == 'courier') then
-            if M.isCargoCourierConfig(model, config, rEntry) then
-              liveryEntry = {
-                model = model,
-                config = config,
-                region = M.trafficRegion or 'europe',
-                hasDeliveryLivery = rEntry and rEntry.hasDeliveryLivery or nil,
-                paintDesign = rEntry and rEntry.paintDesign or nil,
-                paint = rEntry and rEntry.paint or nil,
-                paintName = rEntry and rEntry.paintName or nil,
-              }
-              if director.liveryApplied[id] ~= rc then
-                director.liveryApplied[id] = rc
-                M.applyVehicleLivery(id, liveryEntry)
+          local isCourierCandidate = (rArch == 'courier' or (rArch == nil and M.classifyVehicle(model, config, metaEntry) == 'courier'))
+            and M.isCargoCourierConfig(model, config, metaEntry)
+          if isCourierCandidate then
+            liveryEntry = metaEntry or {
+              model = model,
+              config = config,
+              region = M.trafficRegion or 'europe',
+            }
+            local spawnBusy = (t.respawnActive == true) or (t.state == 'reset')
+            local deferWait = pend ~= nil and (director.clock - (pend.queuedAt or 0)) < M.LIVERY_DEFER_S
+
+            -- Check active skin currently mounted on the vehicle (modern partsTree or legacy .parts).
+            local pNode = ptree and findSlotInPartsTree(ptree, PAINT_SLOT_IDS) or nil
+            local curPd = nil
+            if pNode and type(pNode.chosenPartName) == 'string' and pNode.chosenPartName ~= '' and pNode.chosenPartName ~= 'none' then
+              curPd = pNode.chosenPartName
+            elseif cfgObj and type(cfgObj.parts) == 'table' and type(cfgObj.parts.paint_design) == 'string'
+                and cfgObj.parts.paint_design ~= '' and cfgObj.parts.paint_design ~= 'none' then
+              curPd = cfgObj.parts.paint_design
+            end
+
+            if lst and lst.paintDesign and curPd == lst.paintDesign then
+              -- Skin persisted across traffic pool recycling (forceTeleport / onRespawn / onVehicleSwitched): no respawn needed.
+              t.useRandomPaint = false
+              lst.respawnCount = rc
+              lst.verified = true
+              director.pendingLivery[id] = nil
+              director.liveryApplied[id] = rc
+              liveryEntry.paintDesign = lst.paintDesign
+              liveryEntry.hasDeliveryLivery = true
+              liveryEntry.paint = nil
+              liveryEntry.paintName = nil
+            elseif spawnBusy or deferWait then
+              if not pend then
+                director.pendingLivery[id] = { queuedAt = director.clock, retries = 0 }
+              end
+              liveryEntry.hasDeliveryLivery = false
+              liveryEntry.paintDesign = nil
+            elseif not (lst and lst.applying) then
+              local retries = (lst and lst.retries or 0) + (pend and pend.retries or 0)
+              local nextAt = lst and lst.nextRetryAt or -math.huge
+              if lst and lst.paintDesign and not liveryEntry.paintDesign then
+                liveryEntry.paintDesign = lst.paintDesign
+              end
+              if retries < M.LIVERY_MAX_RETRIES and director.clock >= nextAt then
+                local res = M.applyVehicleLivery(id, liveryEntry, { trafficEntry = t, obj = o, now = director.clock })
+                if res.applied == 'deferred' then
+                  local nextRetries = retries + 1
+                  if nextRetries < M.LIVERY_MAX_RETRIES then
+                    director.pendingLivery[id] = { queuedAt = director.clock, retries = nextRetries }
+                    if lst then
+                      lst.retries = nextRetries
+                      lst.nextRetryAt = director.clock + M.LIVERY_RETRY_S
+                    end
+                  else
+                    director.pendingLivery[id] = nil
+                  end
+                  liveryEntry.hasDeliveryLivery = false
+                  liveryEntry.paintDesign = nil
+                elseif res.applied == 'paint_design' or res.applied == 'existing_paint_design' or res.applied == 'preserved_livery' then
+                  t.useRandomPaint = false
+                  local stNow = director.liveryState[id] or {}
+                  stNow.paintDesign = res.paintDesign or liveryEntry.paintDesign
+                  stNow.boxSkin = res.boxSkin or stNow.boxSkin
+                  stNow.respawnCount = rc
+                  stNow.verified = (res.applied ~= 'paint_design') or (res.via ~= 'partsTree') or (stNow.applying == false)
+                  stNow.retries = (res.applied == 'paint_design' and lst and lst.paintDesign) and (retries + 1) or 0
+                  stNow.nextRetryAt = director.clock + M.LIVERY_RETRY_S
+                  director.liveryState[id] = stNow
+                  director.pendingLivery[id] = nil
+                  director.liveryApplied[id] = rc
+                else
+                  -- Model/config has no delivery livery -> never assign 'courier' stops to unbranded vehicles.
+                  director.pendingLivery[id] = nil
+                  director.liveryApplied[id] = rc
+                  liveryEntry.hasDeliveryLivery = false
+                  liveryEntry.paintDesign = nil
+                end
+              else
+                director.pendingLivery[id] = nil
+                if not (curPd and isDeliveryPaintDesignPart(curPd)) then
+                  liveryEntry.hasDeliveryLivery = false
+                  liveryEntry.paintDesign = nil
+                end
               end
             end
+          else
+            director.pendingLivery[id] = nil
+            if lst then director.liveryState[id] = nil end
           end
-          local assigned = M.assignVehiclePersona(id, model, config, isAutobahn, rArch, liveryEntry or rEntry)
+
+          local assigned = M.assignVehiclePersona(id, model, config, isAutobahn, rArch, liveryEntry or metaEntry)
           assigned._respawnCount = rc
           director.personas[id] = assigned
           curP = assigned
@@ -2760,8 +3227,16 @@ function M.transform(xf, anchorId)
   end
   graph = { anchor = anchorId, serial = graph.serial, nodes = nodes, edges = graph.edges, signals = graph.signals,
             rules = graph.rules, lines = lines, trafficProfile = graph.trafficProfile, mph = graph.mph, moved = true }
-  -- Transform anchor-tile bus stops into the new frame (geotile stops are refreshed by roads.replace)
+  -- Transform anchor-tile bus stops and delivery points into the new frame (geotile items are refreshed by roads.replace)
   for key, list in pairs(director.busStops) do
+    if type(key) ~= 'string' or key:sub(1, 2) ~= 'g:' then
+      for i = 1, #list do
+        local s = list[i]
+        s.x, s.y, s.z = xf:apply(s.x, s.y, s.z)
+      end
+    end
+  end
+  for key, list in pairs(director.deliveryPoints) do
     if type(key) ~= 'string' or key:sub(1, 2) ~= 'g:' then
       for i = 1, #list do
         local s = list[i]
@@ -3108,6 +3583,8 @@ function M.reset()
   director.rosterArchetype = {}
   director.rosterEntry = {}
   director.liveryApplied = {}
+  director.liveryState = {}
+  director.pendingLivery = {}
   director.personas = {}
   director.busStops = {}
   director.busStopCount = 0
