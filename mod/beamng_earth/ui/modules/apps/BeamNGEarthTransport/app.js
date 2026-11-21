@@ -1,17 +1,27 @@
 // BeamNG.Earth Transport Modes HUD app (lua/ge/extensions/beamngEarth/hudapps.lua + transportModes.lua).
+// Styled with native BeamNG HUD surfaces, Overpass typography, and --bng-* color tokens.
 // Hidden when no job is active/pending/summarized so idle driving has zero visual clutter.
 angular.module('beamng.apps')
 .directive('beamngEarthTransport', [function () {
-  var CARD = 'background:rgba(16,20,26,0.90);color:#edf1f6;border:1px solid rgba(255,255,255,0.12);' +
-    'border-radius:6px;padding:9px 12px;font-size:13px;line-height:1.35;box-shadow:0 4px 16px rgba(0,0,0,0.48);'
-  var BTN = 'background:rgba(255,255,255,0.07);color:#e4ebf2;border:1px solid rgba(255,255,255,0.16);' +
-    'border-radius:4px;padding:3px 9px;font-size:11px;font-weight:600;cursor:pointer;'
+  var CARD = 'background:rgba(var(--bng-off-black-rgb,26,26,26),0.78);color:var(--bng-off-white,#f0f0f0);' +
+    'border-radius:var(--bng-corners-2,0.5rem);padding:8px 11px;font-family:"Overpass",var(--fnt-defs,sans-serif);' +
+    'font-size:13px;line-height:1.35;'
+  var RIBBON = 'display:inline-block;width:0.35em;height:0.95em;margin-right:6px;vertical-align:-1px;' +
+    'transform:matrix(0.94,0,-0.38,1,0,0);background:var(--bng-orange-b400,#ff6600);'
+  var BTN = 'background:rgba(var(--bng-ter-blue-gray-800-rgb,45,52,64),0.82);color:var(--bng-off-white,#f0f0f0);' +
+    'border:1px solid rgba(var(--bng-cool-gray-500-rgb,130,136,148),0.45);border-radius:var(--bng-corners-1,0.25rem);' +
+    'padding:3px 10px;font-family:"Overpass",var(--fnt-defs,sans-serif);font-size:11.5px;font-weight:700;cursor:pointer;'
+  var PRIMARY_BTN = 'background:var(--bng-orange-b400,#ff6600);color:var(--bng-off-white,#fff);' +
+    'border:1px solid var(--bng-orange-400,#ff6600);border-radius:var(--bng-corners-1,0.25rem);' +
+    'padding:3px 10px;font-family:"Overpass",var(--fnt-defs,sans-serif);font-size:11.5px;font-weight:700;cursor:pointer;'
+  var PILL = 'padding:1px 6px;border-radius:var(--bng-corners-1,0.25rem);font-weight:700;font-size:10px;' +
+    'letter-spacing:0.03em;white-space:nowrap;'
   var NUM = 'font-variant-numeric:tabular-nums;'
-  var MODE_STYLE = {
-    taxi: { color: '#f59e0b', bg: 'rgba(245,158,11,0.18)', border: 'rgba(245,158,11,0.45)' },
-    bus: { color: '#38bdf8', bg: 'rgba(56,189,248,0.18)', border: 'rgba(56,189,248,0.45)' },
-    logistics: { color: '#ff6600', bg: 'rgba(255,102,0,0.18)', border: 'rgba(255,102,0,0.45)' },
-    parcel: { color: '#34d399', bg: 'rgba(52,211,153,0.18)', border: 'rgba(52,211,153,0.45)' }
+  var MODE_ACCENT = {
+    taxi: 'var(--bng-ter-yellow-400,#e0b020)',
+    bus: 'var(--bng-add-blue-400,#5299e0)',
+    logistics: 'var(--bng-orange-b400,#ff6600)',
+    parcel: 'var(--bng-add-green-400,#44c078)'
   }
 
   function fmtDist(m, metric) {
@@ -32,88 +42,88 @@ angular.module('beamng.apps')
   return {
     template:
       '<div class="bngApp" style="width:100%;height:100%;background:transparent;box-shadow:none;overflow:visible;">' +
-        '<div ng-if="tr && !hidden" ng-style="{\'border-left\': \'3px solid \' + (tr.state === \'refueling\' ? \'#38bdf8\' : modeStyle.color)}" style="' + CARD + '">' +
+        '<div ng-if="tr && !hidden" style="' + CARD + '">' +
           '<div ng-if="tr.state === \'refueling\' && tr.refueling">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;font-size:11.5px;' + NUM + '">' +
-              '<span style="font-weight:700;color:#e0f2fe;">{{ refuelTitle }}</span>' +
-              '<span ng-if="refuelReceipt" style="font-weight:700;color:#7dd3fc;white-space:nowrap;">{{ refuelReceipt }}</span>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;font-size:12px;' + NUM + '">' +
+              '<span style="font-weight:800;font-style:italic;"><span style="' + RIBBON + 'background:var(--bng-add-blue-400,#5299e0);"></span>{{ refuelTitle }}</span>' +
+              '<span ng-if="refuelReceipt" style="font-weight:700;color:var(--bng-add-blue-200,#9cc8f0);white-space:nowrap;">{{ refuelReceipt }}</span>' +
             '</div>' +
-            '<div style="height:6px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
-              '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:#38bdf8;transition:width 0.14s linear;"></div>' +
+            '<div style="height:6px;background:rgba(255,255,255,0.15);overflow:hidden;">' +
+              '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:var(--bng-add-blue-400,#5299e0);"></div>' +
             '</div>' +
           '</div>' +
           '<div ng-if="tr.state === \'pending\'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">' +
-              '<span style="font-weight:600;letter-spacing:0.01em;">Finding {{ tr.mode }} stops...</span>' +
+              '<span style="font-weight:700;font-style:italic;"><span ng-style="{background: modeAccent}" style="' + RIBBON + '"></span>Finding {{ tr.mode }} stops...</span>' +
               '<button ng-click="cancel()" style="' + BTN + '">Cancel</button>' +
             '</div>' +
           '</div>' +
           '<div ng-if="tr.state === \'active\'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:5px;">' +
               '<div style="display:flex;align-items:center;gap:5px;min-width:0;flex-wrap:wrap;">' +
-                '<span ng-style="{color: modeStyle.color, background: modeStyle.bg, borderColor: modeStyle.border}" ' +
-                  'style="padding:1px 6px;border-radius:3px;border:1px solid transparent;font-weight:700;font-size:10px;letter-spacing:0.05em;text-transform:uppercase;">{{ tr.mode }}</span>' +
-                '<span ng-style="{color: stopTypeColor, background: stopTypeBg}" ' +
-                  'style="padding:1px 6px;border-radius:3px;font-weight:600;font-size:10px;letter-spacing:0.02em;white-space:nowrap;">{{ stopTypeLabel }}</span>' +
-                '<span ng-if="stopSectorLabel" style="padding:1px 5px;border-radius:3px;font-weight:600;font-size:10px;color:#b4c5d6;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);white-space:nowrap;">{{ stopSectorLabel }}</span>' +
+                '<span style="font-weight:800;font-style:italic;font-size:12.5px;text-transform:uppercase;letter-spacing:0.03em;">' +
+                  '<span ng-style="{background: modeAccent}" style="' + RIBBON + '"></span>{{ tr.mode }}' +
+                '</span>' +
+                '<span style="' + PILL + 'background:var(--bng-ter-blue-gray-800,#303846);color:var(--bng-cool-gray-100,#dadde2);">{{ stopTypeLabel }}</span>' +
+                '<span ng-if="stopSectorLabel" style="' + PILL + 'background:rgba(var(--bng-ter-blue-gray-700-rgb,58,68,82),0.65);color:var(--bng-cool-gray-200,#c8ccd4);">{{ stopSectorLabel }}</span>' +
               '</div>' +
               '<div style="display:flex;align-items:center;gap:6px;white-space:nowrap;' + NUM + '">' +
-                '<span ng-if="tr.fuelPct != null" ng-style="tr.lowFuel ? {background:\'rgba(245,158,11,0.22)\',color:\'#fbbf24\',borderColor:\'rgba(245,158,11,0.50)\'} : {background:\'rgba(56,189,248,0.14)\',color:\'#7dd3fc\',borderColor:\'rgba(56,189,248,0.34)\'}" style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-size:10px;font-weight:600;">Fuel {{ tr.fuelPct }}%</span>' +
-                '<span style="font-weight:600;font-size:11px;color:#b8c4d0;">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
+                '<span ng-if="tr.fuelPct != null" ng-style="tr.lowFuel ? {background:\'var(--bng-ter-yellow-700,#6b5816)\',color:\'var(--bng-off-white,#f0f0f0)\'} : {background:\'var(--bng-ter-blue-gray-800,#303846)\',color:\'var(--bng-cool-gray-200,#c8ccd4)\'}" style="' + PILL + '">Fuel {{ tr.fuelPct }}%</span>' +
+                '<span style="font-weight:700;font-size:11.5px;color:var(--bng-cool-gray-200,#c8ccd4);">{{ tr.mode === \'taxi\' ? (tr.passengerOnBoard ? \'Drop-off\' : \'Pickup\') : (\'Stop \' + tr.stopIndex + \'/\' + tr.stopCount) }}</span>' +
               '</div>' +
             '</div>' +
-            '<div style="font-weight:600;font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopName }}</div>' +
-            '<div ng-if="stopSubtitle" style="font-size:11px;color:#93a0ad;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stopSubtitle }}</div>' +
-            '<div ng-if="subText" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:#cdd6df;' + NUM + '">' +
+            '<div style="font-weight:700;font-size:14px;color:var(--bng-off-white,#f0f0f0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.stopName }}</div>' +
+            '<div ng-if="stopSubtitle" style="font-size:11.5px;color:var(--bng-cool-gray-300,#b4b8c2);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stopSubtitle }}</div>' +
+            '<div ng-if="subText" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;font-size:11.5px;color:var(--bng-cool-gray-200,#c8ccd4);' + NUM + '">' +
               '<span>{{ subText }}</span>' +
-              '<span ng-if="subBadge" ng-style="tr.trailerMissing ? {background:\'rgba(245,158,11,0.22)\',color:\'#fbbf24\'} : {}" style="padding:1px 5px;border-radius:3px;background:rgba(61,220,132,0.16);color:#6ae696;font-size:10px;font-weight:600;white-space:nowrap;">{{ subBadge }}</span>' +
+              '<span ng-if="subBadge" ng-style="tr.trailerMissing ? {background:\'var(--bng-ter-yellow-700,#6b5816)\',color:\'var(--bng-off-white,#f0f0f0)\'} : {background:\'var(--bng-add-green-700,#1f6640)\',color:\'var(--bng-off-white,#f0f0f0)\'}" style="' + PILL + '">{{ subBadge }}</span>' +
             '</div>' +
-            '<div ng-if="tr.mode === \'bus\' && tr.nextStopName" style="font-size:11px;color:#93a0ad;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Next Stop after this: {{ tr.nextStopName }}</div>' +
-            '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);font-size:12px;color:#cdd6df;' + NUM + '">' +
-              '<div><span style="color:#8c99a6;font-size:10px;display:block;text-transform:uppercase;">Next</span><b style="color:#fff;">{{ tr.distM != null ? distText : \'-\' }}</b></div>' +
-              '<div><span style="color:#8c99a6;font-size:10px;display:block;text-transform:uppercase;">ETA</span><b style="color:#fff;">{{ etaText || \'-\' }}</b></div>' +
-              '<div style="text-align:right;"><span style="color:#8c99a6;font-size:10px;display:block;text-transform:uppercase;">Score</span><b style="color:#fff;">{{ tr.score }}/100</b></div>' +
+            '<div ng-if="tr.mode === \'bus\' && tr.nextStopName" style="font-size:11px;color:var(--bng-cool-gray-300,#b4b8c2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Next Stop after this: {{ tr.nextStopName }}</div>' +
+            '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.12);font-size:12px;' + NUM + '">' +
+              '<div><span style="color:var(--bng-cool-gray-300,#b4b8c2);font-size:10px;display:block;text-transform:uppercase;">Next</span><b style="color:var(--bng-off-white,#f0f0f0);">{{ tr.distM != null ? distText : \'-\' }}</b></div>' +
+              '<div><span style="color:var(--bng-cool-gray-300,#b4b8c2);font-size:10px;display:block;text-transform:uppercase;">ETA</span><b style="color:var(--bng-off-white,#f0f0f0);">{{ etaText || \'-\' }}</b></div>' +
+              '<div style="text-align:right;"><span style="color:var(--bng-cool-gray-300,#b4b8c2);font-size:10px;display:block;text-transform:uppercase;">Score</span><b style="color:var(--bng-off-white,#f0f0f0);">{{ tr.score }}/100</b></div>' +
             '</div>' +
-            '<div ng-if="tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\'" style="margin-top:6px;padding:4px 7px;border-radius:4px;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.08);">' +
-              '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10.5px;margin-bottom:3px;' + NUM + '">' +
+            '<div ng-if="tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\'" style="margin-top:6px;padding:5px 7px;border-radius:var(--bng-corners-1,0.25rem);background:rgba(var(--bng-ter-blue-gray-900-rgb,28,32,40),0.75);">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;margin-bottom:3px;' + NUM + '">' +
                 '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
-                  '<span ng-style="tr.cargoSensitivity === \'hazmat\' ? {background:\'rgba(239,68,68,0.22)\',color:\'#fca5a5\',borderColor:\'rgba(239,68,68,0.50)\'} : {background:\'rgba(245,158,11,0.20)\',color:\'#fbbf24\',borderColor:\'rgba(245,158,11,0.45)\'}" ' +
-                    'style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-size:9.5px;font-weight:800;letter-spacing:0.05em;white-space:nowrap;">{{ tr.cargoSensitivity === \'hazmat\' ? \'GEFAHRGUT · +50%\' : \'FRAGILE · +35%\' }}</span>' +
-                  '<span ng-if="tr.sensitivityLabel" style="color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.sensitivityLabel }}</span>' +
+                  '<span ng-style="tr.cargoSensitivity === \'hazmat\' ? {background:\'var(--bng-add-red-700,#7a2620)\',color:\'var(--bng-off-white,#f0f0f0)\'} : {background:\'var(--bng-ter-yellow-700,#6b5816)\',color:\'var(--bng-off-white,#f0f0f0)\'}" ' +
+                    'style="' + PILL + '">{{ tr.cargoSensitivity === \'hazmat\' ? \'GEFAHRGUT · +50%\' : \'FRAGILE · +35%\' }}</span>' +
+                  '<span ng-if="tr.sensitivityLabel" style="color:var(--bng-cool-gray-200,#c8ccd4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.sensitivityLabel }}</span>' +
                 '</div>' +
                 '<b ng-style="{color: integrityColor}" style="white-space:nowrap;">{{ integrityPct }}%</b>' +
               '</div>' +
-              '<div style="height:5px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
-                '<div ng-style="{width: integrityPct + \'%\', background: integrityColor}" style="height:100%;transition:width 0.14s linear;"></div>' +
+              '<div style="height:5px;background:rgba(255,255,255,0.15);overflow:hidden;">' +
+                '<div ng-style="{width: integrityPct + \'%\', background: integrityColor}" style="height:100%;"></div>' +
               '</div>' +
             '</div>' +
-            '<div ng-if="tr.trailerMissing" style="margin-top:5px;font-size:11px;color:#fbbf24;font-weight:600;">' +
+            '<div ng-if="tr.trailerMissing" style="margin-top:5px;font-size:11.5px;color:var(--bng-ter-yellow-300,#e8c448);font-weight:700;">' +
               '{{ tr.bayHint || \'Trailer missing · Go back &amp; hitch your trailer\' }}' +
             '</div>' +
             '<div ng-if="!tr.trailerMissing && tr.dwellFrac > 0" style="margin-top:6px;">' +
-              '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;font-weight:600;' + NUM + '" ng-style="{color: dwellTextColor}">' +
+              '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;font-weight:700;font-style:italic;' + NUM + '" ng-style="{color: dwellTextColor}">' +
                 '<span>{{ dwellLabel }}</span>' +
                 '<span>{{ dwellTimer }}</span>' +
               '</div>' +
-              '<div style="height:6px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
-                '<div ng-style="{width: dwellPct + \'%\', background: dwellBarColor}" style="height:100%;transition:width 0.14s linear;"></div>' +
+              '<div style="height:6px;background:rgba(255,255,255,0.15);overflow:hidden;">' +
+                '<div ng-style="{width: dwellPct + \'%\', background: dwellBarColor}" style="height:100%;"></div>' +
               '</div>' +
             '</div>' +
-            '<div ng-if="!tr.trailerMissing && tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11px;color:#7dd3fc;">' +
+            '<div ng-if="!tr.trailerMissing && tr.dwellFrac <= 0 && tr.distM != null && tr.distM <= (tr.trailerState === \'staged\' ? 50 : 35)" style="margin-top:5px;font-size:11.5px;color:var(--bng-add-blue-200,#9cc8f0);">' +
               '{{ tr.trailerState === \'staged\' ? \'Back up to hitch staged trailer\' : \'Pull into bay &amp; stop\' }}' +
             '</div>' +
-            '<div ng-if="tr.refueling && (tr.refueling.active || tr.refueling.done || tr.refueling.holdS > 0)" style="margin-top:6px;padding:5px 7px;border-radius:4px;background:rgba(14,34,48,0.88);border:1px solid rgba(56,189,248,0.38);">' +
+            '<div ng-if="tr.refueling && (tr.refueling.active || tr.refueling.done || tr.refueling.holdS > 0)" style="margin-top:6px;padding:5px 7px;border-radius:var(--bng-corners-1,0.25rem);background:rgba(var(--bng-ter-blue-gray-900-rgb,28,32,40),0.82);">' +
               '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;margin-bottom:3px;' + NUM + '">' +
-                '<span style="font-weight:700;color:#e0f2fe;">{{ refuelTitle }}</span>' +
-                '<span ng-if="refuelReceipt" style="font-weight:700;color:#7dd3fc;white-space:nowrap;">{{ refuelReceipt }}</span>' +
+                '<span style="font-weight:700;color:var(--bng-off-white,#f0f0f0);">{{ refuelTitle }}</span>' +
+                '<span ng-if="refuelReceipt" style="font-weight:700;color:var(--bng-add-blue-200,#9cc8f0);white-space:nowrap;">{{ refuelReceipt }}</span>' +
               '</div>' +
-              '<div style="height:5px;background:rgba(255,255,255,0.14);border-radius:3px;overflow:hidden;">' +
-                '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:#38bdf8;transition:width 0.14s linear;"></div>' +
+              '<div style="height:5px;background:rgba(255,255,255,0.15);overflow:hidden;">' +
+                '<div ng-style="{width: refuelBarPct + \'%\'}" style="height:100%;background:var(--bng-add-blue-400,#5299e0);"></div>' +
               '</div>' +
             '</div>' +
-            '<div ng-if="tr.lowFuel && !(tr.refueling && tr.refueling.active)" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:5px;padding:4px 7px;border-radius:4px;background:rgba(245,158,11,0.14);border:1px solid rgba(245,158,11,0.36);font-size:10.5px;">' +
-              '<span style="color:#fbbf24;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ lowFuelText }}</span>' +
-              '<button ng-click="findFuel()" style="background:rgba(56,189,248,0.20);color:#bae6fd;border:1px solid rgba(56,189,248,0.46);border-radius:3px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Find Nearest Fuel</button>' +
+            '<div ng-if="tr.lowFuel && !(tr.refueling && tr.refueling.active)" style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:5px;padding:4px 7px;border-radius:var(--bng-corners-1,0.25rem);background:rgba(var(--bng-ter-yellow-800-rgb,72,58,18),0.55);font-size:11px;">' +
+              '<span style="color:var(--bng-ter-yellow-200,#f0d466);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ lowFuelText }}</span>' +
+              '<button ng-click="findFuel()" style="' + PRIMARY_BTN + 'padding:2px 8px;font-size:10.5px;white-space:nowrap;">Find Fuel</button>' +
             '</div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
               '<button ng-click="skip()" style="flex:1;' + BTN + '">Skip Stop</button>' +
@@ -122,17 +132,19 @@ angular.module('beamng.apps')
           '</div>' +
           '<div ng-if="tr.state === \'summary\'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">' +
-              '<span ng-style="{color: modeStyle.color}" style="font-weight:700;font-size:11px;letter-spacing:0.04em;text-transform:uppercase;">{{ tr.mode }} · Complete</span>' +
-              '<span style="font-weight:700;color:#f59e0b;' + NUM + '" ng-if="tr.totalEarned > 0">+${{ tr.totalEarned.toFixed(2) }} · <span style="color:#6ae696;">{{ tr.score }}/100</span></span>' +
-              '<span style="font-weight:700;color:#6ae696;' + NUM + '" ng-if="!(tr.totalEarned > 0)">{{ tr.score }}/100</span>' +
+              '<span style="font-weight:800;font-style:italic;font-size:12px;letter-spacing:0.03em;text-transform:uppercase;">' +
+                '<span ng-style="{background: modeAccent}" style="' + RIBBON + '"></span>{{ tr.mode }} · Complete' +
+              '</span>' +
+              '<span style="font-weight:700;color:var(--bng-orange-300,#ff944d);' + NUM + '" ng-if="tr.totalEarned > 0">+${{ tr.totalEarned.toFixed(2) }} · <span style="color:var(--bng-add-green-300,#66d492);">{{ tr.score }}/100</span></span>' +
+              '<span style="font-weight:700;color:var(--bng-add-green-300,#66d492);' + NUM + '" ng-if="!(tr.totalEarned > 0)">{{ tr.score }}/100</span>' +
             '</div>' +
-            '<div style="font-size:12px;color:#d6dee6;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.stopsCompleted >= 2 ? \'Pickup -> Drop-off\' : \'Ride Skipped\') : (\'Stops \' + tr.stopsCompleted + \'/\' + tr.stopCount) }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
-            '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:11.5px;color:#fbbf24;margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }}</div>' +
-            '<div ng-if="tr.mode === \'parcel\'" style="font-size:11.5px;color:#6ee7b7;margin-top:2px;font-weight:600;' + NUM + '">Parcels {{ tr.parcelsDelivered || 0 }}/{{ tr.parcelsTotal || 0 }}<span ng-if="tr.parcelsReturned > 0"> (+{{ tr.parcelsReturned }} returns)</span></div>' +
-            '<div ng-if="(tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\') && tr.payout && tr.payout.hazardBonus > 0" style="font-size:11.5px;color:#34d399;margin-top:2px;font-weight:600;' + NUM + '">{{ tr.cargoSensitivity === \'hazmat\' ? \'Gefahrgut Bonus\' : \'Fragile Bonus\' }} +${{ tr.payout.hazardBonus.toFixed(2) }} ({{ integrityPct }}% integrity)</div>' +
-            '<div style="font-size:11px;color:#93a0ad;margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}<span ng-if="tr.driverRank"> · {{ tr.driverRank }}</span></div>' +
+            '<div style="font-size:12px;color:var(--bng-cool-gray-100,#dadde2);' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.stopsCompleted >= 2 ? \'Pickup -> Drop-off\' : \'Ride Skipped\') : (\'Stops \' + tr.stopsCompleted + \'/\' + tr.stopCount) }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
+            '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:11.5px;color:var(--bng-orange-200,#ffb380);margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }}</div>' +
+            '<div ng-if="tr.mode === \'parcel\'" style="font-size:11.5px;color:var(--bng-add-green-300,#66d492);margin-top:2px;font-weight:600;' + NUM + '">Parcels {{ tr.parcelsDelivered || 0 }}/{{ tr.parcelsTotal || 0 }}<span ng-if="tr.parcelsReturned > 0"> (+{{ tr.parcelsReturned }} returns)</span></div>' +
+            '<div ng-if="(tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\') && tr.payout && tr.payout.hazardBonus > 0" style="font-size:11.5px;color:var(--bng-add-green-300,#66d492);margin-top:2px;font-weight:600;' + NUM + '">{{ tr.cargoSensitivity === \'hazmat\' ? \'Gefahrgut Bonus\' : \'Fragile Bonus\' }} +${{ tr.payout.hazardBonus.toFixed(2) }} ({{ integrityPct }}% integrity)</div>' +
+            '<div style="font-size:11px;color:var(--bng-cool-gray-300,#b4b8c2);margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}<span ng-if="tr.driverRank"> · {{ tr.driverRank }}</span></div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
-              '<button ng-if="tr.mode === \'taxi\'" ng-click="nextPassenger()" style="flex:1;background:#ff6600;color:#fff;border:1px solid #ff7a1f;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer;">Next Passenger</button>' +
+              '<button ng-if="tr.mode === \'taxi\'" ng-click="nextPassenger()" style="flex:1;' + PRIMARY_BTN + '">Next Passenger</button>' +
               '<button ng-click="dismiss()" style="flex:1;' + BTN + '">Dismiss</button>' +
             '</div>' +
           '</div>' +
@@ -143,17 +155,15 @@ angular.module('beamng.apps')
       'use strict'
       scope.tr = null
       scope.hidden = false
-      scope.modeStyle = MODE_STYLE.taxi
+      scope.modeAccent = MODE_ACCENT.taxi
       scope.stopTypeLabel = 'Kerbside Stop'
-      scope.stopTypeColor = '#b4c5d6'
-      scope.stopTypeBg = 'rgba(255,255,255,0.08)'
       scope.distText = ''
       scope.etaText = ''
       scope.dwellPct = 0
       scope.dwellLabel = 'Hold in bay'
       scope.dwellTimer = ''
-      scope.dwellTextColor = '#6ae696'
-      scope.dwellBarColor = '#3ddc84'
+      scope.dwellTextColor = 'var(--bng-add-green-300,#66d492)'
+      scope.dwellBarColor = 'var(--bng-add-green-400,#44c078)'
       scope.subText = ''
       scope.subBadge = ''
       scope.stopSubtitle = ''
@@ -199,11 +209,9 @@ angular.module('beamng.apps')
           scope.tr = tr
           scope.hidden = !!(data && data.hidden)
           if (tr) {
-            scope.modeStyle = MODE_STYLE[tr.mode] || MODE_STYLE.taxi
+            scope.modeAccent = MODE_ACCENT[tr.mode] || MODE_ACCENT.taxi
             var isBay = tr.stopType === 'loading_bay'
             scope.stopTypeLabel = isBay ? 'Loading Bay' : 'Kerbside Stop'
-            scope.stopTypeColor = isBay ? '#7dd3fc' : '#b4c5d6'
-            scope.stopTypeBg = isBay ? 'rgba(56,189,248,0.15)' : 'rgba(255,255,255,0.08)'
             scope.stopSectorLabel = tr.stopSectorLabel || ''
             var addr = (tr.stopAddress || '').trim()
             var loc = (tr.stopLocality || '').trim()
@@ -221,8 +229,8 @@ angular.module('beamng.apps')
             var remS = Math.max(0, targetS - curS)
             scope.dwellLabel = tr.dwellLabel || (isFallback ? 'Kerbside fallback' : 'Hold in bay')
             scope.dwellTimer = curS.toFixed(1) + ' / ' + targetS.toFixed(1) + ' s (' + remS.toFixed(1) + 's)'
-            scope.dwellTextColor = isFallback ? '#c8e972' : '#6ae696'
-            scope.dwellBarColor = isFallback ? '#a9d94c' : '#3ddc84'
+            scope.dwellTextColor = isFallback ? 'var(--bng-ter-yellow-300,#e8c448)' : 'var(--bng-add-green-300,#66d492)'
+            scope.dwellBarColor = isFallback ? 'var(--bng-ter-yellow-400,#e0b020)' : 'var(--bng-add-green-400,#44c078)'
             scope.subText = ''
             scope.subBadge = ''
             if (tr.mode === 'taxi') {
@@ -266,7 +274,7 @@ angular.module('beamng.apps')
             }
             var ipct = tr.cargoIntegrity != null ? Math.max(0, Math.min(100, Math.round(tr.cargoIntegrity))) : 100
             scope.integrityPct = ipct
-            scope.integrityColor = ipct >= 75 ? '#34d399' : (ipct >= 40 ? '#f59e0b' : '#ef4444')
+            scope.integrityColor = ipct >= 75 ? 'var(--bng-add-green-400,#44c078)' : (ipct >= 40 ? 'var(--bng-ter-yellow-400,#e0b020)' : 'var(--bng-add-red-400,#e05248)')
             if (tr.refueling) {
               var rf = tr.refueling
               if (rf.active) {
