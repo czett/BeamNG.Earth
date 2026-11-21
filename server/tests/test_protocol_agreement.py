@@ -520,7 +520,7 @@ TRANSPORT_STOP_FIELDS = {
     "address": F(str), "lat": F(NUM), "lon": F(NUM),
     "road": F(str), "roadClass": F(str), "bidirectional": F(bool),
     "bearing": F(NUM), "zoneRadius": F(NUM),
-    "dwellTargetS": F(NUM, OPT), "cargoDeltaKg": F(NUM, OPT),
+    "dwellTargetS": F(NUM, OPT), "dwellS": F(NUM, OPT), "role": F(str, OPT), "cargoDeltaKg": F(NUM, OPT),
     "paxBoard": F(int, OPT), "paxAlight": F(int, OPT),
     "targetArrivalS": F(NUM, OPT),
     "locality": F(str, OPT), "sectorLabel": F(str, OPT),

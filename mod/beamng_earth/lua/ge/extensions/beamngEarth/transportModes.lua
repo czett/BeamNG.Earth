@@ -6,7 +6,7 @@ local M = {}
 M.MODES = { taxi = true, bus = true, logistics = true, parcel = true }
 M.TIERS = {
   taxi = { short = true, city = true, regional = true, long = true },
-  bus = { partial = true, full = true },
+  bus = { partial = true, full = true, regional = true, long = true },
   logistics = { ['local'] = true, city = true, regional = true, long = true },
   parcel = { ['local'] = true, city = true, regional = true, long = true },
 }
@@ -288,6 +288,9 @@ function M.defaultDwellTargetS(mode, tier, stop, cargoKg, legKind)
   local kind = stop and tostring(stop.kind or ''):lower() or ''
   local name = stop and tostring(stop.name or ''):lower() or ''
   local lk = type(legKind) == 'string' and legKind:lower() or ''
+  if kind == 'rest_stop' then
+    return tonumber(stop and (stop.dwellS or stop.dwellTargetS)) or 8.0
+  end
   if mode == 'taxi' then
     local isHub = name:find('airport') or name:find('station') or name:find('terminal') or name:find('hotel') or name:find('hospital')
     if kind == 'pickup' then return isHub and 2.5 or 2.2 end
@@ -328,7 +331,10 @@ function M.dwellStatusLabel(mode, stopKind, dwellMode, legKind, upLegKind, trail
   local lk = type(legKind) == 'string' and legKind:lower() or ''
   local ulk = type(upLegKind) == 'string' and upLegKind:lower() or ''
   local base
-  if mode == 'taxi' then
+  if kind == 'rest_stop' then
+    local nm = stop and tostring(stop.name or '') or ''
+    base = nm ~= '' and ('Rest Stop · ' .. nm) or 'Rest Stop'
+  elseif mode == 'taxi' then
     base = (kind == 'pickup') and 'Passenger boarding' or 'Passenger alighting'
   elseif mode == 'bus' then
     base = 'Passengers boarding'
@@ -2606,6 +2612,8 @@ function M.onJobResult(msg)
       local stObj = {
         index = tonumber(s.index) or (#stops + 1),
         kind = tostring(s.kind or 'stop'),
+        role = s.role and tostring(s.role) or nil,
+        dwellS = tonumber(s.dwellS),
         stopType = tostring(s.stopType or 'kerbside'),
         name = tostring(s.name or ('Stop ' .. (#stops + 1))),
         address = tostring(s.address or ''),
@@ -2628,7 +2636,7 @@ function M.onJobResult(msg)
         parcelsRemaining = tonumber(s.parcelsRemaining),
         parcelsTotal = tonumber(s.parcelsTotal),
       }
-      local dtgt = tonumber(s.dwellTargetS)
+      local dtgt = tonumber(s.dwellTargetS) or tonumber(s.dwellS)
       if not dtgt or dtgt <= 0 then
         dtgt = M.defaultDwellTargetS(mode, tier, stObj, cargoKg)
       end
@@ -2918,7 +2926,9 @@ local function advanceStop(completed, isFallback)
       end
       applyCargoMassToJob(j, j.cargoCurrentKg)
     elseif j.mode == 'logistics' and doneStop then
-      if doneStop.kind == 'loading' then
+      if doneStop.kind == 'rest_stop' then
+        -- Mid-journey rest break: keep cargo mass and attached trailer intact.
+      elseif doneStop.kind == 'loading' then
         local loadKg = nextLeg and (tonumber(nextLeg.cargoMassKg) or 0) or (j.cargoKg or 0)
         j.cargoCurrentKg = loadKg
         j.totalCargoHauledKg = (j.totalCargoHauledKg or 0) + loadKg
@@ -3787,7 +3797,8 @@ function M.drawUi(hiddenByUi)
   if im.Begin('Transport Job##beamngEarthTransport', nil, flags) then
     if activeJob then
       local stop = activeJob.stops[activeJob.stopIndex]
-      local stype = (stop and stop.stopType == 'loading_bay') and 'Loading Bay' or 'Kerbside Stop'
+      local stype = (stop and stop.kind == 'rest_stop') and (stop.role or 'Rest Stop')
+        or ((stop and stop.stopType == 'loading_bay') and 'Loading Bay' or 'Kerbside Stop')
       im.TextUnformatted(string.format('%s · %s | Stop %d/%d', activeJob.mode:upper(), stype, activeJob.stopIndex, #activeJob.stops))
       im.TextUnformatted(stop and stop.name or '')
       if stop and stop.address ~= '' then im.TextUnformatted(stop.address) end
@@ -3890,6 +3901,7 @@ function M.hudPayload()
       stopLocality = stop and stop.locality or '',
       stopSectorLabel = stop and stop.sectorLabel or '',
       stopKind = stop and stop.kind or '',
+      stopRole = stop and stop.role or nil,
       stopType = stop and stop.stopType or 'kerbside',
       nextStopName = nextStop and nextStop.name or nil,
       nextStopLocality = nextStop and nextStop.locality or nil,

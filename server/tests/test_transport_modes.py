@@ -944,5 +944,116 @@ class CargoSensitivityTest(unittest.TestCase):
         self.assertLessEqual(p_counts["fragile"], 90)
 
 
+class CorridorRestAreaTest(unittest.TestCase):
+    def _build_corridor_with_rest_area(self, base_lat=48.00, base_lon=11.60, dist_km=50.0, detour_km=0.5, ra_name="Rasthof Holzkirchen"):
+        md = FakeMapData()
+        end_lat, end_lon = tm.offset_latlon(base_lat, base_lon, dist_km * 1000.0, 90.0)
+        mid_lat, mid_lon = tm.offset_latlon(base_lat, base_lon, dist_km * 500.0, 90.0)
+        ra_lat, ra_lon = tm.offset_latlon(mid_lat, mid_lon, detour_km * 1000.0, 0.0)
+
+        road_buckets = {}
+        infra_buckets = {}
+        place_buckets = {}
+
+        def add_road(fid, lat, lon, cls="secondary", name="A8"):
+            k = mapcells.cell_of(lat, lon)
+            road_buckets.setdefault(k, []).append(_make_road(fid, lat - 0.001, lon - 0.001, lat + 0.001, lon + 0.001, cls=cls, name=name))
+
+        # Origin, midpoint rest area, and destination roads
+        add_road("r_start", base_lat, base_lon, cls="secondary", name="Start Rd")
+        o_off_lat, o_off_lon = tm.offset_latlon(base_lat, base_lon, 700.0, 90.0)
+        add_road("r_start_off", o_off_lat, o_off_lon, cls="secondary", name="Depot Rd")
+        add_road("r_end", end_lat, end_lon, cls="secondary", name="Dest Rd")
+        add_road("r_ra", ra_lat, ra_lon, cls="service", name="Rasthof Zufahrt")
+
+        ra_k = mapcells.cell_of(ra_lat, ra_lon)
+        infra_buckets.setdefault(ra_k, []).append({
+            "id": "ra_osm_1",
+            "attrs": {
+                "class": "services",
+                "name": ra_name,
+                "tags": json.dumps({"highway": "services", "name": ra_name}),
+            },
+            "parts": [[np.array([[ra_lon, ra_lat]], np.float64)]],
+        })
+        place_buckets.setdefault(mapcells.cell_of(end_lat, end_lon), []).append(
+            _make_place("p_dest", end_lat, end_lon, "Dest Logistics", cat="warehouse")
+        )
+
+        for k, items in road_buckets.items():
+            md.put(k, "roads", FakeFeatures(items))
+        for k, items in infra_buckets.items():
+            md.put(k, "infrastructure", FakeFeatures(items))
+        for k, items in place_buckets.items():
+            md.put(k, "places", FakeFeatures(items))
+        return md, base_lat, base_lon, end_lat, end_lon, ra_lat, ra_lon
+
+    def test_find_corridor_rest_area_and_detour_cap(self):
+        # 1. Rest area right on corridor (~0.5 km off 50 km route -> ~0.04% detour) is discovered
+        md, sla, slo, ela, elo, _, _ = self._build_corridor_with_rest_area(dist_km=50.0, detour_km=0.5, ra_name="Rasthof Holzkirchen")
+        ra = tm.find_corridor_rest_area(md, sla, slo, ela, elo)
+        self.assertIsNotNone(ra)
+        self.assertEqual(ra["name"], "Rasthof Holzkirchen")
+        self.assertLessEqual(ra["detourRatio"], 0.25)
+        self.assertIn("locality", ra)
+
+        # 2. Rest area 22 km off-axis on a 50 km route -> > 25% detour overhead -> rejected
+        md_far, sla, slo, ela, elo, _, _ = self._build_corridor_with_rest_area(dist_km=50.0, detour_km=22.0, ra_name="Rasthof Far")
+        self.assertIsNone(tm.find_corridor_rest_area(md_far, sla, slo, ela, elo))
+
+    def test_regional_and_long_bus_and_logistics_insert_rest_stop_while_others_unchanged(self):
+        md, sla, slo, ela, elo, _, _ = self._build_corridor_with_rest_area(dist_km=50.0, detour_km=0.5, ra_name="Rasthof Holzkirchen")
+        fake_towns = [(ela, elo, "Rosenheim", 50000)]
+
+        # Find deterministic seeds that trigger vs skip on regional logistics & regional bus
+        log_hits = 0
+        bus_hits = 0
+        with mock.patch.object(tm.randomplace, "towns", return_value=fake_towns):
+            for seed in range(25):
+                rl = tm.generate_job(md, None, mode="logistics", tier="regional", lat=sla, lon=slo, heading=90.0, seed=seed)
+                self.assertTrue(rl["ok"])
+                rest_stops = [s for s in rl["stops"] if s.get("kind") == "rest_stop"]
+                if rest_stops:
+                    log_hits += 1
+                    rs = rest_stops[0]
+                    self.assertEqual(rs["role"], "Rest Stop")
+                    self.assertEqual(rs["dwellS"], 8.0)
+                    self.assertEqual(rs["dwellTargetS"], 8.0)
+                    self.assertEqual(rs["name"], "Rasthof Holzkirchen")
+                    self.assertEqual(rs["cargoDeltaKg"], 0)
+                    # Legs remain contiguous 1..N after split
+                    self.assertEqual(len(rl["legs"]), len(rl["stops"]) - 1)
+                    for idx_l, lg in enumerate(rl["legs"], 1):
+                        self.assertEqual(lg["fromStop"], idx_l)
+                        self.assertEqual(lg["toStop"], idx_l + 1)
+
+                rb = tm.generate_job(md, None, mode="bus", tier="regional", lat=sla, lon=slo, heading=90.0, seed=seed)
+                self.assertTrue(rb["ok"])
+                b_rest = [s for s in rb["stops"] if s.get("kind") == "rest_stop"]
+                if b_rest:
+                    bus_hits += 1
+                    self.assertEqual(b_rest[0]["role"], "Rest Stop")
+                    self.assertEqual(b_rest[0]["dwellS"], 8.0)
+                    self.assertEqual(b_rest[0]["paxBoard"], 0)
+                    self.assertEqual(b_rest[0]["paxAlight"], 0)
+
+        self.assertGreater(log_hits, 0)
+        self.assertLess(log_hits, 25)
+        self.assertGreater(bus_hits, 0)
+        self.assertLess(bus_hits, 25)
+
+        # local/city logistics and taxi/parcel must NEVER receive rest_stop waypoints
+        md_local = _seed_corridor_md(base_lat=sla, base_lon=slo)
+        with mock.patch.object(tm, "find_corridor_rest_area", return_value={
+            "lat": sla + 0.01, "lon": slo + 0.01, "name": "Rasthof Test", "locality": "",
+            "road": "A8", "roadClass": "service", "bearing": 90.0, "stopType": "loading_bay", "detourRatio": 0.01,
+        }):
+            for mode, tier in (("logistics", "local"), ("logistics", "city"), ("taxi", "regional"), ("parcel", "regional")):
+                for seed in range(5):
+                    r = tm.generate_job(md_local, None, mode=mode, tier=tier, lat=sla, lon=slo, heading=20.0, seed=seed)
+                    if r.get("ok"):
+                        self.assertFalse(any(s.get("kind") == "rest_stop" for s in r["stops"]), f"{mode}/{tier} should not insert rest_stop")
+
+
 if __name__ == "__main__":
     unittest.main()
