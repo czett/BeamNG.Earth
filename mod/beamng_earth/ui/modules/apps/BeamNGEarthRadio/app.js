@@ -72,6 +72,14 @@ angular.module('beamng.apps')
       var candidateIdx = 0
       var failedStations = 0
       var ignoreNextVol = false
+      var playToken = 0
+
+      var MEDIA_ERR_NAMES = {
+        1: 'MEDIA_ERR_ABORTED',
+        2: 'MEDIA_ERR_NETWORK',
+        3: 'MEDIA_ERR_DECODE',
+        4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
+      }
 
       var unclipped = false
       function unclip () {
@@ -101,36 +109,7 @@ angular.module('beamng.apps')
         return urls
       }
 
-      function playCandidate (url) {
-        if (!url) return
-        activeUrl = url
-        audio.src = url
-        audio.volume = Math.max(0, Math.min(1, Number(scope.radio && scope.radio.volume != null ? scope.radio.volume : scope.volUi)))
-        reportStatus('BUFFERING', '')
-        var p = audio.play()
-        if (p && typeof p.catch === 'function') {
-          p.catch(function () {
-            // Handled by audio error listener or autoplay block
-          })
-        }
-      }
-
-      function stopAudio () {
-        if (!audio.paused || activeUrl) {
-          try { audio.pause() } catch (e) {}
-          try { audio.removeAttribute('src'); audio.load() } catch (e) {}
-        }
-        activeUrl = ''
-      }
-
-      audio.addEventListener('playing', function () {
-        failedStations = 0
-        reportStatus('LIVE', '')
-      })
-      audio.addEventListener('waiting', function () {
-        if (scope.radio && scope.radio.playing) reportStatus('BUFFERING', '')
-      })
-      audio.addEventListener('error', function () {
+      function handleStreamFailure (code, detail) {
         if (!scope.radio || !scope.radio.playing) return
         candidateIdx += 1
         if (candidateIdx < candidateUrls.length) {
@@ -138,11 +117,74 @@ angular.module('beamng.apps')
           return
         }
         failedStations += 1
-        reportStatus('UNAVAILABLE', 'Stream unavailable')
+        var msg = detail || (code ? ('Stream unavailable (code ' + code + ')') : 'Stream unavailable')
+        reportStatus('UNAVAILABLE', msg)
         var list = scope.presets || []
         if (list.length > 1 && failedStations < list.length) {
           bngApi.engineLua('if beamngEarth_locationRadio then beamngEarth_locationRadio.nextStation() end')
         }
+      }
+
+      function playCandidate (url) {
+        if (!url) return
+        playToken += 1
+        var token = playToken
+        activeUrl = url
+        try { audio.pause() } catch (e) {}
+        audio.src = url
+        audio.volume = Math.max(0, Math.min(1, Number(scope.radio && scope.radio.volume != null ? scope.radio.volume : scope.volUi)))
+        try { audio.load() } catch (e) {}
+        reportStatus('BUFFERING', '')
+        var p = audio.play()
+        if (p && typeof p.catch === 'function') {
+          p.catch(function (err) {
+            if (token !== playToken || !activeUrl || !scope.radio || !scope.radio.playing) return
+            if (err && err.name === 'AbortError') return
+            var errCode = (audio.error && audio.error.code) || 0
+            console.warn(
+              '[BeamNGEarthRadio] audio.play() failed name=' + (err && err.name || 'Error') +
+              ' code=' + errCode +
+              ' msg=' + (err && err.message || '') +
+              ' url=' + url
+            )
+            // If no media error event fires for NotSupportedError/NotAllowedError, advance cleanly
+            if (err && err.name === 'NotSupportedError' && !audio.error) {
+              handleStreamFailure(4, 'NotSupportedError')
+            }
+          })
+        }
+      }
+
+      function stopAudio () {
+        playToken += 1
+        var hadUrl = !!activeUrl
+        activeUrl = ''
+        if (!audio.paused || hadUrl) {
+          try { audio.pause() } catch (e) {}
+          try { audio.removeAttribute('src'); audio.load() } catch (e) {}
+        }
+      }
+
+      audio.addEventListener('playing', function () {
+        if (!activeUrl) return
+        failedStations = 0
+        reportStatus('LIVE', '')
+      })
+      audio.addEventListener('waiting', function () {
+        if (activeUrl && scope.radio && scope.radio.playing) reportStatus('BUFFERING', '')
+      })
+      audio.addEventListener('error', function () {
+        if (!activeUrl || !scope.radio || !scope.radio.playing) return
+        var err = audio.error
+        var code = err ? err.code : 0
+        var codeName = MEDIA_ERR_NAMES[code] || 'UNKNOWN'
+        var errMsg = (err && err.message) ? err.message : ''
+        console.warn(
+          '[BeamNGEarthRadio] audio error code=' + code + ' (' + codeName + ')' +
+          (errMsg ? ' msg=' + errMsg : '') +
+          ' url=' + activeUrl
+        )
+        handleStreamFailure(code, code ? (codeName + ' (' + code + ')') : 'Stream unavailable')
       })
 
       function syncAudio (r) {
@@ -153,7 +195,8 @@ angular.module('beamng.apps')
         }
         audio.volume = Math.max(0, Math.min(1, Number(r.volume != null ? r.volume : 0.55)))
         var st = r.currentStation
-        if (st.id !== activeStationId || !activeUrl) {
+        var primaryChanged = candidateUrls.length > 0 && st.streamUrl !== candidateUrls[0]
+        if (st.id !== activeStationId || !activeUrl || primaryChanged) {
           activeStationId = st.id
           candidateUrls = buildCandidates(st)
           candidateIdx = 0

@@ -1342,6 +1342,8 @@ class Server:
         self.fin_worker_tries = 0
         self.base_worker = 0                # base photos the block processes rendered (blockworker.base_photo)
         self.map_port = None                # the in-game map's tile endpoint (maptiles.py), hello.mapPort
+        self.radio_port = None              # local HTTP audio relay & OGG transcoder (location_radio.py)
+        self.radio_relay = None             # its RadioStreamRelay instance
         self.feed = None                    # the companion feed (companionfeed.py), when on
         self.map_tiles = None               # its MapTiles: also written as files on request (map_tiles message)
         self.map_files = None               # the maptiles.TileFiles writing them (made by the first request)
@@ -8694,12 +8696,13 @@ class Connection:
                 log.debug("radio: place_names lookup: %s: %s", type(e).__name__, e)
         pool = getattr(self.s, "ui_pool", None)
         offline = bool(getattr(self.s, "offline", False))
+        radio_port = getattr(self.s, "radio_port", None)
         try:
             res = await loop.run_in_executor(
                 pool,
                 lambda: locationradiomod.resolve_stations(
                     lat, lon, place=place, region=region, country=country,
-                    online=req["online"], offline=offline,
+                    online=req["online"], offline=offline, proxy_port=radio_port,
                 ),
             )
         except Exception as e:
@@ -12944,6 +12947,16 @@ async def main_async(args, restart=None):
             log.info("map tiles on http://127.0.0.1:%d/tiles/{z}/{x}/{y}.jpg", server.map_port)
         except OSError as e:
             log.warning("map tiles off: %s", e)
+    radio_srv = None
+    try:                            # local HTTP radio stream relay & OGG transcoder (127.0.0.1 only)
+        server.radio_relay = locationradiomod.RadioStreamRelay()
+        radio_srv, server.radio_port = await server.radio_relay.start(0)
+        log.info("radio stream relay on http://127.0.0.1:%d/radio/stream (ffmpeg=%s)",
+                 server.radio_port, "on" if server.radio_relay.ffmpeg_path else "off")
+    except OSError as e:
+        server.radio_relay = None
+        server.radio_port = None
+        log.warning("radio stream relay off: %s", e)
     if telemetry_on:            # anonymous player count and data-source load (telemetry.py; BNE_TELEMETRY=off)
         import telemetry
         server.telemetry = telemetry.Reporter(
@@ -13031,6 +13044,10 @@ async def main_async(args, restart=None):
         sweeper.cancel()
         if map_srv is not None:
             map_srv.close()
+        if server.radio_relay is not None:
+            server.radio_relay.close()
+        elif radio_srv is not None:
+            radio_srv.close()
         if server.areas is not None:
             server.areas.close()
         net.close()                 # today's request counters

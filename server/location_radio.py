@@ -12,9 +12,12 @@ Two-tier station resolution:
      cache (256 cells) so offline or headless runs never stall.
 """
 from collections import OrderedDict
+import asyncio
 import json
 import logging
 import math
+import shutil
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +33,11 @@ CACHE_TTL_S = 1800.0
 MAX_STATIONS = 12
 GEO_CELL_DEG = 0.05  # ~5 km spatial cache cell
 ALLOWED_CODECS = ("MP3", "AAC", "AAC+", "OGG", "OPUS", "FLAC")
+RELAY_CHUNK_BYTES = 8192
+RELAY_STARTUP_TIMEOUT_S = 10.0
+RELAY_READ_TIMEOUT_S = 5.0
+RELAY_MAX_HEADER = 16384
+ALLOWED_DYNAMIC_MAX = 2048
 
 
 def _st(sid, name, freq, genre, scope, url, region_code, city="", country="", fallbacks=()):
@@ -653,8 +661,12 @@ def validate_request(msg):
 
 
 def resolve_stations(lat, lon, place="", region="", country="", online=True, offline=False,
-                     fetch=None, cache=None, timeout=API_TIMEOUT_S):
-    """Resolve two-tier local + regional radio lineup for (lat, lon)."""
+                     fetch=None, cache=None, timeout=API_TIMEOUT_S, proxy_port=None):
+    """Resolve two-tier local + regional radio lineup for (lat, lon).
+
+    When ``proxy_port`` is provided, ``streamUrl`` and ``fallbackUrls`` are rewritten
+    to route through the local HTTP audio relay/transcoder on 127.0.0.1:<proxy_port>.
+    """
     code, label, tier1 = resolve_tier1(lat, lon, place=place, region=region, country=country)
     norm_country = _norm_country(country) or (tier1[0]["country"] if tier1 else "")
     cache_obj = _DEFAULT_CACHE if cache is None else cache
@@ -682,6 +694,16 @@ def resolve_stations(lat, lon, place="", region="", country="", online=True, off
                 tier2 = []
 
     stations = _dedupe_merge(tier1, tier2, limit=MAX_STATIONS)
+    raw_urls = []
+    for st in stations:
+        if st.get("streamUrl"):
+            raw_urls.append(st["streamUrl"])
+        for fb in st.get("fallbackUrls") or ():
+            if fb:
+                raw_urls.append(fb)
+    register_allowed_urls(raw_urls)
+    if proxy_port:
+        stations = rewrite_stations_for_proxy(stations, proxy_port)
     return {
         "ok": True,
         "regionCode": code,
@@ -691,3 +713,362 @@ def resolve_stations(lat, lon, place="", region="", country="", online=True, off
         "source": source,
         "stations": stations,
     }
+
+
+# ---------------------------------------------------------------------------
+# Local HTTP Audio Relay & On-the-fly OGG/Vorbis Transcoder (for CEF <audio>)
+# ---------------------------------------------------------------------------
+
+def _collect_preset_urls():
+    urls = set()
+    for mz in METRO_ZONES:
+        for st in mz["stations"]:
+            if st.get("streamUrl"):
+                urls.add(st["streamUrl"])
+            for fb in st.get("fallbackUrls") or ():
+                if fb:
+                    urls.add(fb)
+    for preset in REGION_PRESETS.values():
+        for st in preset["stations"]:
+            if st.get("streamUrl"):
+                urls.add(st["streamUrl"])
+            for fb in st.get("fallbackUrls") or ():
+                if fb:
+                    urls.add(fb)
+    return frozenset(urls)
+
+
+_PRESET_URLS = _collect_preset_urls()
+_ALLOWED_LOCK = threading.Lock()
+_DYNAMIC_ALLOWED_URLS = OrderedDict()
+
+
+def is_valid_http_url(url):
+    """Return True if url is a well-formed http:// or https:// URL without control chars."""
+    if not isinstance(url, str) or not url or len(url) > 2048:
+        return False
+    if "\r" in url or "\n" in url or "\x00" in url:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc) and bool(parts.hostname)
+
+
+def register_allowed_urls(urls):
+    """Register resolved radio station URLs as valid targets for /radio/stream."""
+    if not urls:
+        return
+    with _ALLOWED_LOCK:
+        for u in urls:
+            if not is_valid_http_url(u) or u in _PRESET_URLS:
+                continue
+            _DYNAMIC_ALLOWED_URLS[u] = True
+            _DYNAMIC_ALLOWED_URLS.move_to_end(u)
+            while len(_DYNAMIC_ALLOWED_URLS) > ALLOWED_DYNAMIC_MAX:
+                _DYNAMIC_ALLOWED_URLS.popitem(last=False)
+
+
+def is_allowed_stream_url(url, extra_allowed=None):
+    """Validate that url is a well-formed HTTP(S) URL belonging to a known/resolved station."""
+    if not is_valid_http_url(url):
+        return False
+    if url in _PRESET_URLS:
+        return True
+    if extra_allowed is not None and url in extra_allowed:
+        return True
+    with _ALLOWED_LOCK:
+        return url in _DYNAMIC_ALLOWED_URLS
+
+
+def proxy_url(url, port, host="127.0.0.1"):
+    """Build the local HTTP relay URL for a raw upstream station stream URL."""
+    if not url or not port:
+        return url
+    return f"http://{host}:{int(port)}/radio/stream?url={urllib.parse.quote(url, safe='')}"
+
+
+def rewrite_stations_for_proxy(stations, port, host="127.0.0.1"):
+    """Return copies of station dicts with streamUrl & fallbackUrls routed through the local relay."""
+    if not port:
+        return stations
+    out = []
+    for st in stations:
+        s = dict(st)
+        if s.get("streamUrl"):
+            s["streamUrl"] = proxy_url(s["streamUrl"], port, host=host)
+        if s.get("fallbackUrls"):
+            s["fallbackUrls"] = [proxy_url(u, port, host=host) for u in s["fallbackUrls"] if u]
+        out.append(s)
+    return out
+
+
+def _is_native_ogg_url(url):
+    try:
+        path = urllib.parse.urlsplit(url).path.lower()
+    except ValueError:
+        return False
+    return path.endswith((".ogg", ".oga", ".opus"))
+
+
+def _sanitize_content_type(raw, default="audio/mpeg"):
+    val = str(raw or "").split(";", 1)[0].strip()
+    if not val or "\r" in val or "\n" in val or "/" not in val:
+        return default
+    return val
+
+
+class RadioStreamRelay:
+    """Local 127.0.0.1 HTTP streaming relay and on-the-fly OGG/Vorbis transcoder.
+
+    Serves ``GET /radio/stream?url=<encoded_station_url>`` with CORS headers
+    (``Access-Control-Allow-Origin: *``). When ``ffmpeg`` is available, MP3/AAC/HLS
+    streams are transcoded on-the-fly to CEF-native OGG/Vorbis (``audio/ogg``) and
+    the subprocess is terminated cleanly as soon as the client disconnects.
+    """
+
+    def __init__(self, ffmpeg_path=None, allowed_urls=None,
+                 startup_timeout_s=RELAY_STARTUP_TIMEOUT_S, chunk_bytes=RELAY_CHUNK_BYTES):
+        self.ffmpeg_path = shutil.which("ffmpeg") if ffmpeg_path is None else ffmpeg_path
+        self._extra_allowed = set(allowed_urls) if allowed_urls else None
+        self.startup_timeout_s = float(startup_timeout_s)
+        self.chunk_bytes = max(1024, int(chunk_bytes))
+        self._procs = set()
+        self._server = None
+        self.port = None
+
+    def is_allowed(self, url):
+        return is_allowed_stream_url(url, extra_allowed=self._extra_allowed)
+
+    async def start(self, port=0, host="127.0.0.1"):
+        """Start the local HTTP relay on host:port (0 = any free port). Returns (server, port)."""
+        srv = await asyncio.start_server(self.handle, host, port, limit=RELAY_MAX_HEADER)
+        self._server = srv
+        self.port = srv.sockets[0].getsockname()[1]
+        return srv, self.port
+
+    def close(self):
+        """Stop accepting new connections and terminate any active ffmpeg transcoders."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        for proc in list(self._procs):
+            self._procs.discard(proc)
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    async def _send_simple(writer, status, reason, ctype="text/plain", body=b"", extra_headers=""):
+        hdr = (
+            f"HTTP/1.1 {status} {reason}\r\n"
+            f"Content-Type: {ctype}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Cache-Control: no-store\r\n"
+            f"{extra_headers}"
+            "Connection: close\r\n\r\n"
+        )
+        try:
+            writer.write(hdr.encode("latin-1") + body)
+            await writer.drain()
+        except ConnectionError:
+            pass
+
+    @staticmethod
+    async def _send_stream_headers(writer, ctype):
+        hdr = (
+            "HTTP/1.1 200 OK\r\n"
+            f"Content-Type: {ctype}\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Cache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        writer.write(hdr.encode("latin-1"))
+        await writer.drain()
+
+    async def _terminate_proc(self, proc):
+        self._procs.discard(proc)
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    pass
+
+    async def _stream_ffmpeg(self, target_url, writer):
+        cmd = [
+            self.ffmpeg_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostdin",
+            "-user_agent", USER_AGENT,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-i", target_url,
+            "-vn",
+            "-c:a", "libvorbis",
+            "-q:a", "4",
+            "-f", "ogg",
+            "pipe:1",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as e:
+            log.warning("radio relay: failed to launch ffmpeg: %s", e)
+            await self._send_simple(writer, 502, "Bad Gateway", body=b"transcoder unavailable")
+            return
+
+        self._procs.add(proc)
+        try:
+            try:
+                first = await asyncio.wait_for(proc.stdout.read(self.chunk_bytes), timeout=self.startup_timeout_s)
+            except asyncio.TimeoutError:
+                log.debug("radio relay: ffmpeg startup timed out for %s", target_url)
+                await self._send_simple(writer, 502, "Bad Gateway", body=b"upstream timeout")
+                return
+            if not first:
+                err_tail = b""
+                try:
+                    err_tail = await asyncio.wait_for(proc.stderr.read(512), timeout=1.0)
+                except Exception:
+                    pass
+                log.debug("radio relay: ffmpeg produced no data for %s (%s)",
+                          target_url, err_tail.decode("utf-8", errors="replace").strip())
+                await self._send_simple(writer, 502, "Bad Gateway", body=b"upstream stream unavailable")
+                return
+
+            await self._send_stream_headers(writer, "audio/ogg")
+            writer.write(first)
+            await writer.drain()
+
+            while not writer.is_closing():
+                chunk = await proc.stdout.read(self.chunk_bytes)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                await writer.drain()
+        except (ConnectionError, BrokenPipeError, asyncio.CancelledError):
+            pass
+        finally:
+            await self._terminate_proc(proc)
+
+    async def _stream_direct(self, target_url, writer):
+        loop = asyncio.get_running_loop()
+        req = urllib.request.Request(target_url, headers={"User-Agent": USER_AGENT})
+        try:
+            resp = await loop.run_in_executor(
+                None, lambda: urllib.request.urlopen(req, timeout=self.startup_timeout_s)
+            )
+        except Exception as e:
+            log.debug("radio relay: upstream open failed for %s (%s: %s)", target_url, type(e).__name__, e)
+            await self._send_simple(writer, 502, "Bad Gateway", body=b"upstream stream unavailable")
+            return
+
+        try:
+            default_ct = "audio/ogg" if _is_native_ogg_url(target_url) else "audio/mpeg"
+            ctype = _sanitize_content_type(resp.headers.get("Content-Type"), default=default_ct)
+            first = await loop.run_in_executor(None, resp.read, self.chunk_bytes)
+            if not first:
+                await self._send_simple(writer, 502, "Bad Gateway", body=b"empty upstream stream")
+                return
+
+            await self._send_stream_headers(writer, ctype)
+            writer.write(first)
+            await writer.drain()
+
+            while not writer.is_closing():
+                chunk = await loop.run_in_executor(None, resp.read, self.chunk_bytes)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                await writer.drain()
+        except (ConnectionError, BrokenPipeError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            log.debug("radio relay: direct proxy ended for %s (%s: %s)", target_url, type(e).__name__, e)
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    async def handle(self, reader, writer):
+        try:
+            try:
+                head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), RELAY_READ_TIMEOUT_S)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+                return
+            try:
+                line = head.split(b"\r\n", 1)[0].decode("latin-1")
+                method, raw_target, _ = line.split(" ", 2)
+            except ValueError:
+                await self._send_simple(writer, 400, "Bad Request", body=b"bad request")
+                return
+
+            if method == "OPTIONS":
+                await self._send_simple(
+                    writer, 204, "No Content", body=b"",
+                    extra_headers="Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                                  "Access-Control-Allow-Headers: Range, Content-Type\r\n",
+                )
+                return
+            if method not in ("GET", "HEAD"):
+                await self._send_simple(writer, 405, "Method Not Allowed", body=b"GET only")
+                return
+
+            parts = urllib.parse.urlsplit(raw_target)
+            if parts.path == "/health":
+                body = b"" if method == "HEAD" else b"ok"
+                await self._send_simple(writer, 200, "OK", body=body)
+                return
+            if parts.path != "/radio/stream":
+                await self._send_simple(writer, 404, "Not Found", body=b"not found")
+                return
+
+            qs = urllib.parse.parse_qs(parts.query, keep_blank_values=False)
+            target_url = (qs.get("url") or [""])[0].strip()
+            if not is_valid_http_url(target_url):
+                await self._send_simple(writer, 400, "Bad Request", body=b"invalid stream url")
+                return
+            if not self.is_allowed(target_url):
+                await self._send_simple(writer, 403, "Forbidden", body=b"stream url not allowed")
+                return
+
+            use_ffmpeg = bool(self.ffmpeg_path) and not _is_native_ogg_url(target_url)
+            if method == "HEAD":
+                ctype = "audio/ogg" if use_ffmpeg else ("audio/ogg" if _is_native_ogg_url(target_url) else "audio/mpeg")
+                await self._send_simple(writer, 200, "OK", ctype=ctype, body=b"")
+                return
+
+            if use_ffmpeg:
+                await self._stream_ffmpeg(target_url, writer)
+            else:
+                await self._stream_direct(target_url, writer)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
