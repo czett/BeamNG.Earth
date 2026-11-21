@@ -43,4 +43,12 @@ T.check(O.rechtsfahrgebotShift(0, 2, 3.6, false, 'speeder', false) == 3.6, 'RHT 
 T.check(O.rechtsfahrgebotShift(0, 2, 3.6, false, 'speeder', true) == nil, 'RHT speeder stays left while passing')
 T.check(O.rechtsfahrgebotShift(1, 2, 3.6, true, 'truck', false) == -3.6, 'LHT truck in outer passing lane merges left')
 
+-- Polish Pass: dynamic speed-scaled overtake lookahead & 2.0 s post-lane-change cooldown
+T.check(O.lookaheadFor(25) == 80, 'lookaheadFor: floors at 80 m at moderate speed')
+T.check(math.abs(O.lookaheadFor(50) - 110) < 1e-6, 'lookaheadFor: scales to 110 m at 180 km/h (50 m/s)')
+T.check(O.lookaheadFor(56.94) > 125, 'lookaheadFor: > 125 m at 205 km/h Autobahn speed')
+T.check(O.laneChangeReady(nil, 100), 'laneChangeReady: true with no prior change')
+T.check(not O.laneChangeReady(100, 101.5), 'laneChangeReady: blocked within 2.0 s cooldown')
+T.check(O.laneChangeReady(100, 102.0), 'laneChangeReady: ready at >= 2.0 s cooldown')
+
 T.done('test_overtake')

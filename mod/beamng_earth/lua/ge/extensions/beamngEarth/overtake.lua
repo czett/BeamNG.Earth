@@ -30,6 +30,9 @@ M.SHIFT_S = 2.5         -- the move over takes this long at the car's speed (ai.
 M.SHIFT_MIN_M = 30
 M.PAST_M = 15
 M.COOLDOWN_S = 8
+M.LANE_CHANGE_COOLDOWN_S = 2.0
+M.LOOKAHEAD_MIN_M = 80
+M.LOOKAHEAD_TIME_S = 2.2
 M.GIVE_UP_S = 25
 M.MERGE_RIGHT_S = 2.0
 M.SPEEDER_HELD_S = 0.8
@@ -38,9 +41,20 @@ M.SPEEDER_LOOK_M = 80
 local held = {}         -- car id -> os.clock() it started being held
 local passing = {}      -- car id -> { lead, at }: passing it
 local lastPass = {}     -- car id -> os.clock() of its last pass
+local lastLaneChange = {} -- car id -> os.clock() of its last lane change (pass or merge-right)
 local campSince = {}    -- car id -> os.clock() it has been camping in a passing lane with no lead car
 local lastScan = -math.huge
 local stats = { passes = 0, mergesRight = 0 }
+
+-- Pure: dynamic speed-scaled overtake lookahead distance (m): math.max(80, v * 2.2).
+function M.lookaheadFor(v)
+  return math.max(M.LOOKAHEAD_MIN_M, (tonumber(v) or 0) * M.LOOKAHEAD_TIME_S)
+end
+
+-- Pure: true when the per-vehicle 2.0 s post-lane-change cooldown has elapsed.
+function M.laneChangeReady(lastAt, now)
+  return not lastAt or ((now or 0) - lastAt) >= M.LANE_CHANGE_COOLDOWN_S
+end
 
 -- Pure: the lanes going the car's way on an edge (lanes string: '+' along in -> out, '-' against; research §2.2),
 -- whether it drives along in -> out.
@@ -171,7 +185,8 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       local pinfo = personaFn and personaFn(c.id) or nil
       local pkind = pinfo and pinfo.persona or nil
       local isSpeeder = pkind == 'speeder'
-      local lookM = isSpeeder and M.SPEEDER_LOOK_M or M.LOOK_M
+      local lookM = isSpeeder and M.lookaheadFor(c.v) or math.max(M.LOOK_M, (c.v or 0) * M.LOOKAHEAD_TIME_S)
+      local scanAhead = math.max(120, lookM + 25)
       -- the others round it, in its frame
       local others, lead, gap = {}, nil, nil
       for _, o in ipairs(all) do
@@ -179,7 +194,7 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
           local d = o.p - c.p
           local ahead = d:dot(road.dir)
           local side = d:dot(road.right)
-          if math.abs(ahead) < 120 and o.f:dot(c.f) > 0.5 then
+          if math.abs(ahead) < scanAhead and o.f:dot(c.f) > 0.5 then
             others[#others + 1] = { ahead = ahead, side = side, v = o.v, id = o.id }
             if ahead > 0 and math.abs(side) < M.LANE_TOL_M and (not gap or ahead < gap) then lead, gap = o, ahead end
           end
@@ -200,12 +215,13 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       if canMergeRight and c.v >= M.MIN_MS then
         campSince[c.id] = campSince[c.id] or now
         local waitS = (pkind == 'truck' or pkind == 'bus') and 0.5 or M.MERGE_RIGHT_S
-        if now - campSince[c.id] >= waitS and now - (lastPass[c.id] or -math.huge) >= M.COOLDOWN_S * 0.5 then
+        if now - campSince[c.id] >= waitS and M.laneChangeReady(lastLaneChange[c.id], now)
+            and now - (lastPass[c.id] or -math.huge) >= M.LANE_CHANGE_COOLDOWN_S then
           if not (nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M))
               and M.laneClear(others, rightShift, M.CLEAR_BACK_M, M.CLEAR_AHEAD_M * 0.75, c.v) then
             c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
               rightShift))
-            lastPass[c.id], campSince[c.id], held[c.id] = now, nil, nil
+            lastLaneChange[c.id], lastPass[c.id], campSince[c.id], held[c.id] = now, now, nil, nil
             stats.mergesRight = (stats.mergesRight or 0) + 1
             return
           end
@@ -232,7 +248,8 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       end
       held[c.id] = held[c.id] or now
       local heldWait = isSpeeder and M.SPEEDER_HELD_S or M.HELD_S
-      if now - held[c.id] < heldWait or now - (lastPass[c.id] or -math.huge) < M.COOLDOWN_S then return end
+      if now - held[c.id] < heldWait or not M.laneChangeReady(lastLaneChange[c.id], now)
+          or now - (lastPass[c.id] or -math.huge) < M.COOLDOWN_S then return end
       local shift = M.passShift(road.k, road.n, road.w, leftHand)
       if not shift or c.v < M.MIN_MS then return end
       if nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M) then return end
@@ -240,21 +257,23 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
         shift))
       passing[c.id] = { lead = lead.id, at = now }
-      lastPass[c.id], held[c.id], campSince[c.id] = now, nil, nil
+      lastLaneChange[c.id], lastPass[c.id], held[c.id], campSince[c.id] = now, now, nil, nil
       stats.passes = stats.passes + 1
     end)
     if not ok then log('W', 'beamngEarth', 'overtake: ' .. tostring(err)) end
   end
   -- forget the cars that are gone
   for id in pairs(lastPass) do
-    if not carIds[id] and id ~= playerAuto then lastPass[id], held[id], passing[id], campSince[id] = nil, nil, nil, nil end
+    if not carIds[id] and id ~= playerAuto then
+      lastPass[id], lastLaneChange[id], held[id], passing[id], campSince[id] = nil, nil, nil, nil, nil
+    end
   end
 end
 
 function M.status() return { passes = stats.passes, mergesRight = stats.mergesRight or 0 } end
 
 function M.reset()
-  held, passing, lastPass, campSince, lastScan = {}, {}, {}, {}, -math.huge
+  held, passing, lastPass, lastLaneChange, campSince, lastScan = {}, {}, {}, {}, {}, -math.huge
 end
 
 return M

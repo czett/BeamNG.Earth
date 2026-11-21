@@ -1038,6 +1038,8 @@ M.HORIZON_SPAWN_MIN_M = 160
 M.HORIZON_SPAWN_MAX_M = 340
 M.HORIZON_SAFE_MIN_M = 95
 M.HORIZON_BEHIND_DESPAWN_M = 420
+M.HORIZON_SPAWN_SPACING_M = 140
+M.HORIZON_SPACING_TTL_S = 10.0
 
 M.BUS_STOP_RANGE_M = 18.0
 M.BUS_STOP_MAX_SPEED_MS = 14.0
@@ -1045,6 +1047,7 @@ M.BUS_STOP_COOLDOWN_S = 45.0
 M.BUS_STOP_DWELL_MIN_S = 3.5
 M.BUS_STOP_DWELL_MAX_S = 4.5
 M.BUS_STOP_LATERAL_MAX_M = 12.0
+M.BUS_STOP_CURB_OFFSET_M = 0.85
 
 M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
 M.COURIER_MODELS = { van = true, boxtruck = true, h_series = true, gavril_h = true }
@@ -1081,6 +1084,13 @@ local director = {
   busStopCount = 0,
   busDwell = {},
   busStopCooldowns = {},
+  recentSpawns = {
+    { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
+    { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
+    { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
+    { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
+  },
+  recentSpawnIdx = 0,
 }
 
 local function hasAnyKeyword(str, list)
@@ -1333,12 +1343,50 @@ function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetyp
   }
 end
 
+-- Whether ambient darkness (dusk/night/dawn) or rain/precipitation requires low-beam headlights on AI traffic.
+function M.needsHeadlights()
+  local env = rawget(_G, 'core_environment')
+  if type(env) == 'table' then
+    if type(env.getLightState) == 'function' then
+      local ok, st = pcall(env.getLightState)
+      if ok and type(st) == 'table' and st.isNight == true then return true end
+    end
+    if type(env.getTimeOfDay) == 'function' then
+      local ok, tod = pcall(env.getTimeOfDay)
+      if ok and type(tod) == 'table' then
+        local t = tonumber(tod.time)
+        if t and t >= 0.21 and t <= 0.79 then return true end
+      end
+    end
+    if type(env.getPrecipitation) == 'function' then
+      local ok, pr = pcall(env.getPrecipitation)
+      if ok and (tonumber(pr) or 0) > 0.05 then return true end
+    end
+  end
+  local w = rawget(_G, 'beamngEarth_weather')
+  if type(w) == 'table' then
+    if w.isRaining == true or (tonumber(w.rain) or 0) > 0.05 or (tonumber(w.precipitation) or 0) > 0.05 then
+      return true
+    end
+    if type(w.isPrecipitating) == 'function' then
+      local ok, pr = pcall(w.isPrecipitating)
+      if ok and pr == true then return true end
+    end
+  end
+  local stree = rawget(_G, 'scenetree')
+  if type(stree) == 'table' and stree.theRain then
+    local drops = tonumber(stree.theRain.numDrops) or 0
+    if drops > 0 then return true end
+  end
+  return false
+end
+
 -- Vehicle Lua command applying a persona's baseline AI parameters (called once per spawn/respawn).
-function M.personaAiCommand(p)
+function M.personaAiCommand(p, lightsOn)
   if type(p) ~= 'table' then return nil end
   local waitTime = (p.persona == 'speeder') and 0.6 or ((p.persona == 'truck' or p.persona == 'bus') and 1.8 or 1.2)
   local turnCoef = (p.persona == 'truck' or p.persona == 'bus') and 0.85 or ((p.persona == 'speeder') and 1.15 or 1.0)
-  return string.format(
+  local cmd = string.format(
     'ai.setAggression(%.2f) ai.driveInLane("%s") ai.setAvoidCars("%s") ai.setParameters({ trafficWaitTime = %.2f, turnForceCoef = %.2f })',
     tonumber(p.aggression) or 0.45,
     tostring(p.driveInLane or 'on'),
@@ -1346,6 +1394,10 @@ function M.personaAiCommand(p)
     waitTime,
     turnCoef
   )
+  if lightsOn then
+    cmd = cmd .. ' electrics.setLightsState(1)'
+  end
+  return cmd
 end
 
 function M.getVehiclePersona(vehId)
@@ -1408,7 +1460,10 @@ function M.stepBusStop(vehId, px, py, dx, dy, speed, now, obj)
       director.busStopCooldowns[dwell.stopId] = now + M.BUS_STOP_COOLDOWN_S
       stats.busStopsServed = (stats.busStopsServed or 0) + 1
       if obj and obj.queueLuaCommand then
-        obj:queueLuaCommand('electrics.set_warn_signal(0) ai.setSpeedMode("legal") ai.setMode("traffic")')
+        local resetOff = -(tonumber(dwell.curbOffset) or 0)
+        obj:queueLuaCommand(string.format(
+          'electrics.set_warn_signal(0) ai.driveInLane("on") ai.laneChange(nil, 12.0, %.2f) ai.setSpeedMode("legal") ai.setMode("traffic")',
+          resetOff))
       end
       return 'released', dwell.stopId
     end
@@ -1443,17 +1498,37 @@ function M.stepBusStop(vehId, px, py, dx, dy, speed, now, obj)
 
   local frac = (((math.abs(math.floor(tonumber(vehId) or 0)) * 131 + math.floor(now * 10)) % 101) / 100)
   local dwellS = M.BUS_STOP_DWELL_MIN_S + frac * (M.BUS_STOP_DWELL_MAX_S - M.BUS_STOP_DWELL_MIN_S)
+  local curbSign = (M.rules and M.rules.rightHandDrive) and -1 or 1
+  local curbOff = curbSign * M.BUS_STOP_CURB_OFFSET_M
   director.busDwell[vehId] = {
     stopId = bestStop.id,
     startedAt = now,
     releaseAt = now + dwellS,
     dwellS = dwellS,
+    curbOffset = curbOff,
   }
   director.busStopCooldowns[bestStop.id] = now + dwellS + M.BUS_STOP_COOLDOWN_S
   if obj and obj.queueLuaCommand then
-    obj:queueLuaCommand('electrics.set_warn_signal(1) ai.setSpeedMode("set") ai.setSpeed(0)')
+    obj:queueLuaCommand(string.format(
+      'electrics.set_warn_signal(1) ai.driveInLane("off") ai.laneChange(nil, 10.0, %.2f) ai.setSpeedMode("set") ai.setSpeed(0)',
+      curbOff))
   end
   return 'stopped', bestStop
+end
+
+-- Pure zero-alloc: true when candidate horizon spawn point (sx, sy) is >= minSpacingM from all recent horizon spawns.
+function M.horizonSpawnClear(sx, sy, recentSpawns, now, minSpacingM)
+  local minD = minSpacingM or M.HORIZON_SPAWN_SPACING_M
+  local minD2 = minD * minD
+  local ttl = M.HORIZON_SPACING_TTL_S
+  for i = 1, #recentSpawns do
+    local s = recentSpawns[i]
+    if s and (now - s.at) <= ttl then
+      local dx, dy = sx - s.x, sy - s.y
+      if dx * dx + dy * dy < minD2 then return false end
+    end
+  end
+  return true
 end
 
 -- Pure zero-alloc: true when AI vehicle at (vx, vy) lags > behindM behind player (px, py) heading unit (hx, hy).
@@ -1546,6 +1621,7 @@ function M.updateTrafficDirector(dtReal, player, box)
     if cp then camX, camY = cp.x, cp.y end
   end
   local activeBox = box or (applied and applied.box) or nil
+  local lightsOn = M.needsHeadlights()
 
   -- Clean stale personas / dwells for despawned vehicles
   for id in pairs(director.personas) do
@@ -1586,7 +1662,7 @@ function M.updateTrafficDirector(dtReal, player, box)
           director.personas[id] = assigned
           curP = assigned
           if t.risk ~= nil then t.risk = assigned.risk end
-          local cmd = M.personaAiCommand(assigned)
+          local cmd = M.personaAiCommand(assigned, lightsOn)
           if cmd and o.queueLuaCommand then o:queueLuaCommand(cmd) end
         end
 
@@ -1595,16 +1671,27 @@ function M.updateTrafficDirector(dtReal, player, box)
           M.stepBusStop(id, p.x, p.y, dx, dy, sp, now, o)
         end
 
-        -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m)
+        -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m, >= 140 m spacing)
         if hasHeading and not director.busDwell[id]
             and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
             and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
           local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY)
           if ax and gt.forceTeleport then
-            lastTeleport[id] = now
-            stillSince[id] = nil
-            stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
-            pcall(gt.forceTeleport, id, vec3(ax, ay, pz), vec3(ahx, ahy, 0), alo, ahi)
+            local mid = (alo + ahi) * 0.5
+            local sx, sy = ax + ahx * mid, ay + ahy * mid
+            if M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
+              lastTeleport[id] = now
+              stillSince[id] = nil
+              local slot = (director.recentSpawnIdx % #director.recentSpawns) + 1
+              director.recentSpawnIdx = slot
+              local rec = director.recentSpawns[slot]
+              rec.x, rec.y, rec.at = sx, sy, now
+              stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
+              pcall(gt.forceTeleport, id, vec3(ax, ay, pz), vec3(ahx, ahy, 0), alo, ahi)
+              if lightsOn and o.queueLuaCommand then
+                o:queueLuaCommand('electrics.setLightsState(1)')
+              end
+            end
           end
         end
       end
@@ -2168,6 +2255,8 @@ function M.reset()
   director.busStopCount = 0
   director.busDwell = {}
   director.busStopCooldowns = {}
+  director.recentSpawnIdx = 0
+  for i = 1, #director.recentSpawns do director.recentSpawns[i].at = -1e9 end
   M.restoreChoice()
   stats = { applies = 0, lastMs = 0, nodes = 0, edges = 0 }
   prep, waited = nil, 0

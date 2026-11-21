@@ -624,11 +624,12 @@ do
   local stFast = N.stepBusStop(50, 90, 0, 1, 0, 15.0, 100, busObj)
   T.check(stFast == 'none' and not N.isBusDwelling(50) and #cmds == 0, 'bus stop: ignored at >= 14 m/s')
 
-  -- Approaching within 18 m at 8 m/s along heading: triggers smooth stop + hazard signal
+  -- Approaching within 18 m at 8 m/s along heading: triggers smooth stop + hazard signal + curbside pull-over offset
   local stStop = N.stepBusStop(50, 90, 0, 1, 0, 8.0, 100, busObj)
   T.check(stStop == 'stopped' and N.isBusDwelling(50), 'bus stop: triggers dwell within 18 m')
-  T.check(#cmds == 1 and cmds[1]:find('electrics.set_warn_signal(1)', 1, true) and cmds[1]:find('ai.setSpeed(0)', 1, true),
-    'bus stop: commands hazard lights and smooth stop')
+  T.check(#cmds == 1 and cmds[1]:find('electrics.set_warn_signal(1)', 1, true) and cmds[1]:find('ai.setSpeed(0)', 1, true)
+    and cmds[1]:find('ai.driveInLane("off")', 1, true) and cmds[1]:find('ai.laneChange(nil, 10.0, 0.85)', 1, true),
+    'bus stop: commands hazard lights, right-curb pull-over offset, and smooth stop')
 
   -- Still dwelling at +2.0 s (< 3.5 s)
   local stDwell = N.stepBusStop(50, 95, 0, 1, 0, 0.0, 102, busObj)
@@ -637,8 +638,9 @@ do
   -- Released after 4.6 s (> 4.5 s max dwell)
   local stRel = N.stepBusStop(50, 95, 0, 1, 0, 0.0, 104.6, busObj)
   T.check(stRel == 'released' and not N.isBusDwelling(50), 'bus stop: releases after dwell completes')
-  T.check(#cmds == 2 and cmds[2]:find('electrics.set_warn_signal(0)', 1, true) and cmds[2]:find('ai.setMode("traffic")', 1, true),
-    'bus stop: clears hazard signal and resumes traffic flow')
+  T.check(#cmds == 2 and cmds[2]:find('electrics.set_warn_signal(0)', 1, true) and cmds[2]:find('ai.setMode("traffic")', 1, true)
+    and cmds[2]:find('ai.driveInLane("on")', 1, true) and cmds[2]:find('ai.laneChange(nil, 12.0, -0.85)', 1, true),
+    'bus stop: clears hazard signal, resets curb offset, and resumes traffic flow')
 
   -- Within 45 s per-stop cooldown: another bus (or same bus) cannot re-trigger
   local stCd = N.stepBusStop(51, 90, 0, 1, 0, 6.0, 130, busObj)
@@ -715,6 +717,80 @@ do
     'director: recycles vehicle > 420 m behind into [160, 340] m forward cone')
 
   os.clock = clock0
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 6. Polish Pass: 140 m horizon spawn spacing & dark/rain headlight sync
+do
+  local recent = { { x = 250, y = 0, at = 100 } }
+  T.check(not N.horizonSpawnClear(300, 0, recent, 102), 'horizonSpawnClear: blocks spawn within < 140 m of recent spawn')
+  T.check(N.horizonSpawnClear(400, 0, recent, 102), 'horizonSpawnClear: allows spawn >= 140 m away')
+  T.check(N.horizonSpawnClear(260, 0, recent, 115), 'horizonSpawnClear: allows spawn after TTL expires')
+
+  -- Headlight sync during night and rain
+  local env0, weather0 = rawget(_G, 'core_environment'), rawget(_G, 'beamngEarth_weather')
+  core_environment = { getLightState = function() return { isNight = false } end,
+                       getTimeOfDay = function() return { time = 0.0 } end }
+  beamngEarth_weather = { isRaining = false, precipitation = 0 }
+  T.check(not N.needsHeadlights(), 'needsHeadlights: false at clear midday')
+
+  core_environment = { getLightState = function() return { isNight = true } end }
+  T.check(N.needsHeadlights(), 'needsHeadlights: true at night')
+
+  core_environment = { getLightState = function() return { isNight = false } end,
+                       getTimeOfDay = function() return { time = 0.0 } end }
+  beamngEarth_weather = { isRaining = true }
+  T.check(N.needsHeadlights(), 'needsHeadlights: true during rain')
+
+  local pComm = N.assignVehiclePersona(99, 'vivace', '160_diesel', false)
+  local cmdDay = N.personaAiCommand(pComm, false)
+  local cmdRain = N.personaAiCommand(pComm, true)
+  T.check(cmdDay:find('setLightsState', 1, true) == nil, 'personaAiCommand: no forced lights in clear day')
+  T.check(cmdRain:find('electrics.setLightsState(1)', 1, true) ~= nil, 'personaAiCommand: enables low-beams in dark/rain')
+
+  -- Two behind-player vehicles recycled on same tick: second is skipped by 140 m corridor spacing
+  N.reset()
+  N.enabled = true
+  local sg = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+               be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
+  local clock0 = os.clock
+  os.clock = function() return 3000 end
+  local function v(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  local cmds301, cmds302, teleports = {}, {}, {}
+  local objs = {
+    [301] = { getActive = function() return true end, getPosition = function() return v(-500, 0, 0) end,
+              getVelocity = function() return v(10, 0, 0) end, getDirectionVector = function() return v(1, 0, 0) end,
+              queueLuaCommand = function(_, c) cmds301[#cmds301 + 1] = c end },
+    [302] = { getActive = function() return true end, getPosition = function() return v(-520, 0, 0) end,
+              getVelocity = function() return v(10, 0, 0) end, getDirectionVector = function() return v(1, 0, 0) end,
+              queueLuaCommand = function(_, c) cmds302[#cmds302 + 1] = c end },
+  }
+  getObjectByID = function(id) return objs[id] end
+  be = { getPlayerVehicleID = function() return 1 end }
+  core_camera = { getPosition = function() return v(0, 0, 0) end }
+  map = nil
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      return {
+        [301] = { isAi = true, model = 'citybus', config = 'city', respawnCount = 0 },
+        [302] = { isAi = true, model = 'etk800', config = '856_ttsport', respawnCount = 0 },
+      }
+    end,
+    forceTeleport = function(id) teleports[#teleports + 1] = id end,
+  }
+  local bigBox = { -600, -600, 600, 600 }
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 25, vy = 0 }, bigBox)
+  T.check(#teleports == 1, 'director: 140 m spacing prevents two vehicles clumping into the same corridor slot')
+  T.check((cmds301[1] and cmds301[1]:find('electrics.setLightsState(1)', 1, true) ~= nil)
+    and (cmds302[1] and cmds302[1]:find('electrics.setLightsState(1)', 1, true) ~= nil),
+    'director: syncs low-beam headlights on newly initialized vehicles during rain')
+
+  os.clock = clock0
+  core_environment, beamngEarth_weather = env0, weather0
   for k, val in pairs(sg) do _G[k] = val end
   N.reset()
 end
