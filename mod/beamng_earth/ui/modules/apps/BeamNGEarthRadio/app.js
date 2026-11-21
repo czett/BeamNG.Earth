@@ -1,33 +1,40 @@
 // BeamNG.Earth Location-Aware Car Radio HUD app (lua/ge/extensions/beamngEarth/hudapps.lua + locationRadio.lua).
 // Hosts the persistent HTML5 <audio> player for live MP3/AAC streams with automatic fallback.
+// Styled with native BeamNG HUD surfaces, Overpass typography, and --bng-* color tokens; hidden/opt-in by default.
 angular.module('beamng.apps')
 .directive('beamngEarthRadio', [function () {
-  var CARD = 'background:rgba(16,20,26,0.90);color:#edf1f6;border:1px solid rgba(255,255,255,0.12);' +
-    'border-left:3px solid #38bdf8;border-radius:6px;padding:9px 11px;font-size:12.5px;line-height:1.3;' +
-    'box-shadow:0 4px 16px rgba(0,0,0,0.48);'
-  var BTN = 'background:rgba(255,255,255,0.07);color:#e4ebf2;border:1px solid rgba(255,255,255,0.16);' +
-    'border-radius:4px;padding:3px 8px;font-size:11px;font-weight:600;cursor:pointer;'
-  var PLAY_BTN = 'background:#ff6600;color:#fff;border:1px solid #ff7a1f;' +
-    'border-radius:4px;padding:3px 11px;font-size:11px;font-weight:700;cursor:pointer;'
+  var CARD = 'background:rgba(var(--bng-off-black-rgb,26,26,26),0.78);color:var(--bng-off-white,#f0f0f0);' +
+    'border-radius:var(--bng-corners-2,0.5rem);padding:8px 11px;font-family:"Overpass",var(--fnt-defs,sans-serif);' +
+    'font-size:12.5px;line-height:1.35;'
+  var RIBBON = 'display:inline-block;width:0.35em;height:0.95em;margin-right:6px;vertical-align:-1px;' +
+    'transform:matrix(0.94,0,-0.38,1,0,0);background:var(--bng-orange-b400,#ff6600);'
+  var BTN = 'background:rgba(var(--bng-ter-blue-gray-800-rgb,45,52,64),0.82);color:var(--bng-off-white,#f0f0f0);' +
+    'border:1px solid rgba(var(--bng-cool-gray-500-rgb,130,136,148),0.45);border-radius:var(--bng-corners-1,0.25rem);' +
+    'padding:3px 8px;font-family:"Overpass",var(--fnt-defs,sans-serif);font-size:11px;font-weight:700;cursor:pointer;'
+  var PLAY_BTN = 'background:var(--bng-orange-b400,#ff6600);color:var(--bng-off-white,#fff);' +
+    'border:1px solid var(--bng-orange-400,#ff6600);border-radius:var(--bng-corners-1,0.25rem);' +
+    'padding:3px 11px;font-family:"Overpass",var(--fnt-defs,sans-serif);font-size:11px;font-weight:700;cursor:pointer;'
+  var PILL = 'padding:1px 6px;border-radius:var(--bng-corners-1,0.25rem);font-weight:700;font-size:9.5px;' +
+    'letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;'
   var NUM = 'font-variant-numeric:tabular-nums;'
 
   return {
     template:
       '<div class="bngApp" style="width:100%;height:100%;background:transparent;box-shadow:none;overflow:visible;">' +
-        '<div ng-if="radio && radio.enabled && radio.visible !== false && !hidden" style="' + CARD + '">' +
+        '<div ng-if="radio && radio.enabled && !hidden" style="' + CARD + '">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px;">' +
             '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
-              '<span style="font-weight:700;font-size:12px;color:#38bdf8;white-space:nowrap;' + NUM + '">{{ freqText }}</span>' +
-              '<span ng-if="scopeLabel" ng-style="scopeStyle" style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-weight:700;font-size:9.5px;letter-spacing:0.05em;text-transform:uppercase;white-space:nowrap;">{{ scopeLabel }}</span>' +
+              '<span style="font-weight:800;font-style:italic;font-size:12.5px;color:var(--bng-off-white,#f0f0f0);white-space:nowrap;' + NUM + '"><span style="' + RIBBON + '"></span>{{ freqText }}</span>' +
+              '<span ng-if="scopeLabel" ng-style="scopeStyle" style="' + PILL + '">{{ scopeLabel }}</span>' +
             '</div>' +
-            '<span ng-style="statusStyle" style="padding:1px 6px;border-radius:3px;font-weight:700;font-size:9.5px;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;">{{ statusLabel }}</span>' +
+            '<span ng-style="statusStyle" style="' + PILL + '">{{ statusLabel }}</span>' +
           '</div>' +
 
-          '<div style="font-weight:600;font-size:13.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stationName }}</div>' +
-          '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:2px;font-size:11px;color:#93a0ad;">' +
+          '<div style="font-weight:700;font-size:13.5px;color:var(--bng-off-white,#f0f0f0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ stationName }}</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:2px;font-size:11px;color:var(--bng-cool-gray-300,#b4b8c2);">' +
             '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ subLine }}</span>' +
           '</div>' +
-          '<div ng-if="radio.roamNotice" style="margin-top:3px;font-size:10.5px;color:#7dd3fc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ radio.roamNotice }}</div>' +
+          '<div ng-if="radio.roamNotice" style="margin-top:3px;font-size:10.5px;color:var(--bng-add-blue-200,#9cc8f0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ radio.roamNotice }}</div>' +
 
           '<div style="display:flex;align-items:center;gap:5px;margin-top:7px;">' +
             '<button ng-click="prev()" title="Previous station" style="' + BTN + '">&#9664;</button>' +
@@ -35,14 +42,14 @@ angular.module('beamng.apps')
             '<button ng-click="next()" title="Next station" style="' + BTN + '">&#9654;</button>' +
             '<button ng-click="toggleRoam()" ng-style="roamBtnStyle" title="Auto-tune when leaving local station area" style="' + BTN + 'margin-left:2px;">Roam</button>' +
             '<input type="range" min="0" max="1" step="0.02" ng-model="volUi" ng-change="onVolInput()" ' +
-              'style="flex:1;min-width:44px;accent-color:#ff6600;cursor:pointer;height:4px;margin-left:4px;" title="Volume" />' +
+              'style="flex:1;min-width:44px;accent-color:var(--bng-orange-b400,#ff6600);cursor:pointer;height:4px;margin-left:4px;" title="Volume" />' +
           '</div>' +
 
           '<div ng-if="presets.length" style="display:flex;gap:4px;margin-top:6px;overflow-x:auto;padding-bottom:1px;">' +
             '<button ng-repeat="st in presets track by st.id" ng-click="select(st.id)" ' +
               'ng-style="presetStyle(st)" ' +
-              'style="padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,0.14);font-size:10.5px;white-space:nowrap;cursor:pointer;flex-shrink:0;">' +
-              '<span ng-if="st.scope === \'local\'" style="display:inline-block;width:5px;height:5px;border-radius:50%;background:#3ddc84;margin-right:4px;vertical-align:middle;"></span>' +
+              'style="padding:2px 7px;border-radius:var(--bng-corners-1,0.25rem);border:1px solid transparent;font-family:\'Overpass\',var(--fnt-defs,sans-serif);font-size:10.5px;white-space:nowrap;cursor:pointer;flex-shrink:0;">' +
+              '<span ng-if="st.scope === \'local\'" style="display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--bng-add-green-400,#44c078);margin-right:4px;vertical-align:middle;"></span>' +
               '{{ st.name }}' +
             '</button>' +
           '</div>' +
@@ -60,7 +67,7 @@ angular.module('beamng.apps')
       scope.scopeLabel = ''
       scope.scopeStyle = {}
       scope.statusLabel = 'STOPPED'
-      scope.statusStyle = { background: 'rgba(255,255,255,0.08)', color: '#9aa6b2' }
+      scope.statusStyle = { background: 'var(--bng-ter-blue-gray-800,#303846)', color: 'var(--bng-cool-gray-200,#c8ccd4)' }
       scope.roamBtnStyle = {}
       scope.presets = []
 
@@ -245,8 +252,8 @@ angular.module('beamng.apps')
       scope.presetStyle = function (st) {
         var on = scope.radio && scope.radio.currentStationId === st.id
         return on
-          ? { background: 'rgba(255,102,0,0.22)', borderColor: '#ff6600', color: '#ffd6b5', fontWeight: '700' }
-          : { background: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.14)', color: '#cdd6df', fontWeight: '500' }
+          ? { background: 'rgba(var(--bng-orange-600-rgb,179,71,0),0.45)', borderColor: 'var(--bng-orange-b400,#ff6600)', color: 'var(--bng-off-white,#f0f0f0)', fontWeight: '700' }
+          : { background: 'rgba(var(--bng-ter-blue-gray-800-rgb,45,52,64),0.7)', borderColor: 'rgba(var(--bng-cool-gray-600-rgb,105,112,124),0.4)', color: 'var(--bng-cool-gray-200,#c8ccd4)', fontWeight: '600' }
       }
 
       scope.$on('BeamNGEarthHud', function (event, data) {
@@ -270,13 +277,13 @@ angular.module('beamng.apps')
             var sc = (st && st.scope) || ''
             if (sc === 'local') {
               scope.scopeLabel = 'LOCAL'
-              scope.scopeStyle = { background: 'rgba(61,220,132,0.16)', borderColor: 'rgba(61,220,132,0.40)', color: '#6ae696' }
+              scope.scopeStyle = { background: 'var(--bng-add-green-700,#1f6640)', color: 'var(--bng-off-white,#f0f0f0)' }
             } else if (sc === 'regional') {
               scope.scopeLabel = 'REGIONAL'
-              scope.scopeStyle = { background: 'rgba(56,189,248,0.16)', borderColor: 'rgba(56,189,248,0.40)', color: '#7dd3fc' }
+              scope.scopeStyle = { background: 'var(--bng-add-blue-700,#204f7a)', color: 'var(--bng-off-white,#f0f0f0)' }
             } else if (sc) {
               scope.scopeLabel = sc.toUpperCase()
-              scope.scopeStyle = { background: 'rgba(255,255,255,0.08)', borderColor: 'rgba(255,255,255,0.16)', color: '#b8c4d0' }
+              scope.scopeStyle = { background: 'var(--bng-ter-blue-gray-800,#303846)', color: 'var(--bng-cool-gray-200,#c8ccd4)' }
             } else {
               scope.scopeLabel = ''
             }
@@ -284,18 +291,18 @@ angular.module('beamng.apps')
             var ss = r.playing ? (r.streamStatus || 'BUFFERING') : 'PAUSED'
             scope.statusLabel = ss
             if (ss === 'LIVE') {
-              scope.statusStyle = { background: 'rgba(61,220,132,0.18)', color: '#6ae696' }
+              scope.statusStyle = { background: 'var(--bng-add-green-700,#1f6640)', color: 'var(--bng-off-white,#f0f0f0)' }
             } else if (ss === 'BUFFERING') {
-              scope.statusStyle = { background: 'rgba(245,158,11,0.18)', color: '#fbbf24' }
+              scope.statusStyle = { background: 'var(--bng-ter-yellow-700,#6b5816)', color: 'var(--bng-off-white,#f0f0f0)' }
             } else if (ss === 'UNAVAILABLE') {
-              scope.statusStyle = { background: 'rgba(248,113,113,0.20)', color: '#fca5a5' }
+              scope.statusStyle = { background: 'var(--bng-add-red-700,#7a2620)', color: 'var(--bng-off-white,#f0f0f0)' }
             } else {
-              scope.statusStyle = { background: 'rgba(255,255,255,0.08)', color: '#9aa6b2' }
+              scope.statusStyle = { background: 'var(--bng-ter-blue-gray-800,#303846)', color: 'var(--bng-cool-gray-200,#c8ccd4)' }
             }
 
             scope.roamBtnStyle = r.autoRoam
-              ? { background: 'rgba(56,189,248,0.18)', borderColor: 'rgba(56,189,248,0.45)', color: '#7dd3fc' }
-              : { background: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.14)', color: '#9aa6b2' }
+              ? { background: 'rgba(var(--bng-orange-600-rgb,179,71,0),0.45)', borderColor: 'var(--bng-orange-b400,#ff6600)', color: 'var(--bng-off-white,#f0f0f0)' }
+              : { background: 'rgba(var(--bng-ter-blue-gray-800-rgb,45,52,64),0.75)', borderColor: 'rgba(var(--bng-cool-gray-600-rgb,105,112,124),0.4)', color: 'var(--bng-cool-gray-300,#b4b8c2)' }
 
             scope.presets = toArr(r.stations)
             syncAudio(r)
