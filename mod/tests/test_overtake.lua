@@ -62,6 +62,14 @@ T.check(O.shouldSuppressLaneChange(18.0, 27.7, { highway = false }),
   'shouldSuppressLaneChange: suppressed when road limit >= 27.7 m/s (100 km/h)')
 T.check(not O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, unlimited = false }),
   'shouldSuppressLaneChange: active on non-highway rural/urban roads < 90 km/h')
+T.check(O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, lanes = 2, lanesOut = 1 }),
+  'shouldSuppressLaneChange: suppressed on 2-lane rural roads (lanes==2, lanesOut==1)')
+T.check(O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, lanes = '-+', lanesOut = 1 }),
+  'shouldSuppressLaneChange: suppressed on 2-lane opposing carriageway (lanes=="-+", lanesOut==1)')
+T.check(not O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, lanes = 4, lanesOut = 2 }),
+  'shouldSuppressLaneChange: allowed on 4-lane non-highway urban/suburban road < 90 km/h')
+T.check(not O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, lanesOut = 2 }),
+  'shouldSuppressLaneChange: allowed on 2-lane same-direction urban carriageway < 90 km/h')
 
 -- End-to-end overtake.update: highway & >= 90 km/h suppress ai.laneChange and enforce ai.driveInLane("on"),
 -- while rural/urban < 90 km/h passing remains intact.
@@ -85,7 +93,9 @@ do
   local function runScenario(edgeOpts, passerV, leadV)
     O.reset()
     local edge = {
-      inNode = 'a', outNode = 'b', oneWay = true, lanes = '++',
+      inNode = 'a', outNode = 'b', oneWay = edgeOpts.oneWay ~= false,
+      lanes = edgeOpts.lanes or '++',
+      lanesOut = edgeOpts.lanesOut, lanesIn = edgeOpts.lanesIn,
       speedLimit = edgeOpts.limit, inRadius = 3.6, outRadius = 3.6,
       highway = edgeOpts.highway, unlimited = edgeOpts.unlimited,
     }
@@ -138,9 +148,17 @@ do
   T.check(highLimLC == 0 and highLimHold == 1,
     'overtake.update (limit >= 100 km/h): suppresses ai.laneChange and enforces ai.driveInLane("on")')
 
-  local urbanLC, urbanHold = runScenario({ highway = false, unlimited = false, limit = 22.2 }, 16, 10)
+  local urbanLC, urbanHold = runScenario({ highway = false, unlimited = false, limit = 22.2, lanes = '++', lanesOut = 2 }, 16, 10)
   T.check(urbanLC == 1 and urbanHold == 0,
-    'overtake.update (rural/urban < 90 km/h, non-highway): keeps controlled passing intact')
+    'overtake.update (multi-lane non-highway < 90 km/h): keeps controlled passing intact')
+
+  local rural2LC = runScenario({ highway = false, unlimited = false, oneWay = false, limit = 22.2, lanes = '-+', lanesOut = 1, lanesIn = 1 }, 16, 10)
+  T.check(rural2LC == 0,
+    'overtake.update (2-lane rural road, lanes==2, lanesOut==1): never triggers ai.laneChange into oncoming traffic')
+
+  local singleOutLC, singleOutHold = runScenario({ highway = false, unlimited = false, oneWay = true, limit = 22.2, lanes = '++', lanesOut = 1, lanesIn = 1 }, 16, 10)
+  T.check(singleOutLC == 0 and singleOutHold == 1,
+    'overtake.update (lanesOut==1, totalLanes==2): suppresses ai.laneChange and enforces ai.driveInLane("on")')
 
   O.reset()
   for k, val in pairs(sg) do _G[k] = val end

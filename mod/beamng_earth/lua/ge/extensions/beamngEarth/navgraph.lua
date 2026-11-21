@@ -1037,12 +1037,13 @@ end
 M.DIRECTOR_TICK_S = 0.25
 M.HORIZON_SPAWN_MIN_M = 160
 M.HORIZON_SPAWN_MAX_M = 340
-M.HORIZON_HWY_SPAWN_MIN_M = 260
-M.HORIZON_HWY_SPAWN_MAX_M = 420
+M.HORIZON_HWY_SPAWN_MIN_M = 340
+M.HORIZON_HWY_SPAWN_MAX_M = 480
 M.HORIZON_SAFE_MIN_M = 95
 M.HORIZON_BEHIND_DESPAWN_M = 420
 M.HORIZON_SPAWN_SPACING_M = 140
 M.HORIZON_SPACING_TTL_S = 10.0
+M.HORIZON_JUNCTION_CLEAR_M = 45.0
 M.HWY_STALL_MIN_MS = 12.0
 M.HWY_BOOST_COOLDOWN_S = 3.0
 
@@ -1876,9 +1877,9 @@ function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetyp
     laneBias = 'right_or_middle'
     overtakeOk = true
   elseif arch == 'speeder' then
-    risk = 0.72 + u1 * 0.16
-    aggr = 0.75 + u1 * 0.15
-    hwyKph = autobahn and (165 + u2 * 40) or nil
+    risk = 0.48 + u1 * 0.07
+    aggr = 0.50 + u1 * 0.08
+    hwyKph = autobahn and (165 + u2 * 20) or nil
     hwyDelta = 15 + u2 * 13
     urbDelta = 4 + u2 * 6
     laneBias = 'overtake_left'
@@ -1893,6 +1894,9 @@ function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetyp
     laneBias = 'right'
     overtakeOk = true
   end
+
+  risk = math.min(0.55, risk)
+  aggr = math.min(0.58, aggr)
 
   return {
     vehId = vehId,
@@ -1952,11 +1956,12 @@ end
 -- Vehicle Lua command applying a persona's baseline AI parameters (called once per spawn/respawn).
 function M.personaAiCommand(p, lightsOn)
   if type(p) ~= 'table' then return nil end
-  local waitTime = (p.persona == 'speeder') and 0.6 or ((p.persona == 'truck' or p.persona == 'bus') and 1.8 or 1.2)
-  local turnCoef = (p.persona == 'truck' or p.persona == 'bus') and 0.85 or ((p.persona == 'speeder') and 1.15 or 1.0)
+  local aggr = math.min(0.58, tonumber(p.aggression) or 0.45)
+  local waitTime = (p.persona == 'truck' or p.persona == 'bus') and 1.8 or 1.2
+  local turnCoef = 0.85
   local cmd = string.format(
     'ai.setAggression(%.2f) ai.driveInLane("%s") ai.setAvoidCars("%s") ai.setParameters({ trafficWaitTime = %.2f, turnForceCoef = %.2f })',
-    tonumber(p.aggression) or 0.45,
+    aggr,
     tostring(p.driveInLane or 'on'),
     tostring(p.avoidCars or 'on'),
     waitTime,
@@ -2262,12 +2267,12 @@ function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY, isHighway)
   return px, py, hx, hy, lo, hi
 end
 
--- Pure: snap a spawn heading (hx, hy) strictly to the forward tangent of a highway edge
+-- Pure: snap a spawn heading (hx, hy) strictly to the forward tangent of any road edge
 -- aligned with player travel (never reversed or angled across lanes).
-function M.snapHighwayTangent(hx, hy, roadProfile)
+function M.snapRoadTangent(hx, hy, roadProfile)
   local hl = math.sqrt((hx or 0) * (hx or 0) + (hy or 0) * (hy or 0))
   local ux, uy = hl > 1e-6 and (hx / hl) or 1, hl > 1e-6 and (hy / hl) or 0
-  if type(roadProfile) ~= 'table' or roadProfile.highway ~= true then return ux, uy end
+  if type(roadProfile) ~= 'table' then return ux, uy end
   local rdx, rdy = tonumber(roadProfile.dx), tonumber(roadProfile.dy)
   if not rdx or not rdy then return ux, uy end
   local rl = math.sqrt(rdx * rdx + rdy * rdy)
@@ -2278,12 +2283,13 @@ function M.snapHighwayTangent(hx, hy, roadProfile)
   end
   return rdx, rdy
 end
+M.snapHighwayTangent = M.snapRoadTangent
 
--- Apply an immediate rolling-start velocity along the exact snapped highway tangent so Autobahn/highway
--- traffic never spawns at 0 km/h (85-90 km/h for trucks/buses; 115-135 km/h for commuters/couriers/speeders).
+-- Initialize smooth AI highway cruise along the exact snapped road tangent without sudden thruster impulses
+-- (85-90 km/h for trucks/buses; 115-135 km/h for commuters/couriers/speeders).
 function M.applyHighwayRollingStart(vehId, obj, hx, hy, persona, roadProfile)
   if type(roadProfile) ~= 'table' or roadProfile.highway ~= true then return nil end
-  local sx, sy = M.snapHighwayTangent(hx, hy, roadProfile)
+  local sx, sy = M.snapRoadTangent(hx, hy, roadProfile)
   local pkind = type(persona) == 'table' and persona.persona or persona
   local idNum = math.abs(math.floor(tonumber(vehId) or 0))
   local u = ((idNum * 2654435761 + 31) % 1000) / 1000
@@ -2298,15 +2304,9 @@ function M.applyHighwayRollingStart(vehId, obj, hx, hy, persona, roadProfile)
     targetKph = 115.0 + u * 20.0
   end
   local targetMs = targetKph / 3.6
-  local threshold = math.max(0, targetMs - 1.0)
   local cmd = string.format(
-    'local _dir=vec3(%.6f,%.6f,0); local _v=obj:getVelocity(); local _f=_v:dot(_dir); '
-    .. 'if _f<%.3f and thrusters and type(thrusters.applyVelocity)=="function" then '
-    .. 'local _ok=pcall(thrusters.applyVelocity,_dir*%.3f); if _ok then pcall(function() '
-    .. 'if not beamngEarth_spawnMotion then extensions.load("beamngEarth_spawnMotion") end; '
-    .. 'if beamngEarth_spawnMotion then beamngEarth_spawnMotion.applyRollingSpeed(%.3f) end end) end end '
-    .. 'ai.driveInLane("on") ai.setSpeedMode("legal") ai.setSpeed(%.3f)',
-    sx, sy, threshold, targetMs, targetMs, targetMs
+    'ai.driveInLane("on") ai.setSpeedMode("legal") ai.setSpeed(%.3f)',
+    targetMs
   )
   local targetObj = obj or (getObjectByID and getObjectByID(vehId)) or nil
   if targetObj and targetObj.queueLuaCommand then
@@ -2457,13 +2457,13 @@ function M.updateTrafficDirector(dtReal, player, box)
           M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o, roadLimitMs)
         end
 
-        -- 3. Behind-player horizon recycling into forward cone ([160, 340] m standard, [260, 420] m highway)
+        -- 3. Behind-player horizon recycling into forward cone ([160, 340] m standard, [340, 480] m highway)
         local recycled = false
         if hasHeading and not director.busDwell[id] and not director.courierDwell[id]
             and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
             and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
           local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, false)
-          if ax and gt.forceTeleport then
+          if ax and gt.forceTeleport and not nearJunction(ax, ay, M.HORIZON_JUNCTION_CLEAR_M) then
             local mid = (alo + ahi) * 0.5
             local sx, sy = ax + ahx * mid, ay + ahy * mid
             local targetRoad = nil
@@ -2487,10 +2487,13 @@ function M.updateTrafficDirector(dtReal, player, box)
                   targetRoad = rH
                 end
               end
-              ahx, ahy = M.snapHighwayTangent(ahx, ahy, targetRoad)
+            end
+            if targetRoad then
+              ahx, ahy = M.snapRoadTangent(ahx, ahy, targetRoad)
               sx, sy = ax + ahx * mid, ay + ahy * mid
             end
-            if M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
+            if not nearJunction(sx, sy, M.HORIZON_JUNCTION_CLEAR_M)
+                and M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
               lastTeleport[id] = now
               stillSince[id] = nil
               local slot = (director.recentSpawnIdx % #director.recentSpawns) + 1
@@ -2511,7 +2514,7 @@ function M.updateTrafficDirector(dtReal, player, box)
           end
         end
 
-        -- 4. Detect newly spawned / stalled highway traffic (< 12 m/s without valid stop reason) and boost into rolling flow
+        -- 4. Detect newly spawned / stalled highway traffic (< 12 m/s without valid stop reason) and initialize smooth AI cruise
         if not recycled and sp < M.HWY_STALL_MIN_MS
             and not director.busDwell[id] and not director.courierDwell[id]
             and t.respawnActive ~= true and t.state ~= 'disabled' and (tonumber(t.damage) or 0) <= 1000
@@ -2521,7 +2524,7 @@ function M.updateTrafficDirector(dtReal, player, box)
             local alignDot = dx * road.dx + dy * road.dy
             local aligned = (road.oneWay and alignDot >= 0.5) or (not road.oneWay and math.abs(alignDot) >= 0.5)
             if aligned then
-              local bx, by = M.snapHighwayTangent(dx, dy, road)
+              local bx, by = M.snapRoadTangent(dx, dy, road)
               M.applyHighwayRollingStart(id, o, bx, by, curP, road)
               director.highwayBoostAt[id] = now
             end
