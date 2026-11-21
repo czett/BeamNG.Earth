@@ -1050,7 +1050,8 @@ M.BUS_STOP_LATERAL_MAX_M = 12.0
 M.BUS_STOP_CURB_OFFSET_M = 0.85
 
 M.COURIER_STOP_RANGE_M = 16.0
-M.COURIER_STOP_MAX_SPEED_MS = 15.0
+M.COURIER_STOP_MAX_SPEED_MS = 12.5
+M.COURIER_STOP_MAX_LIMIT_MS = 15.3
 M.COURIER_STOP_COOLDOWN_S = 45.0
 M.COURIER_STOP_DWELL_MIN_S = 4.0
 M.COURIER_STOP_DWELL_MAX_S = 6.0
@@ -1058,16 +1059,59 @@ M.COURIER_STOP_LATERAL_MAX_M = 16.0
 M.COURIER_STOP_CURB_OFFSET_M = 0.85
 
 M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
-M.MOD_COURIER_MODELS = { scout = true, evvan = true, ecv = true }
+M.MINIBUS_MODELS = { van = true, h_series = true, gavril_h = true }
+M.MOD_COURIER_MODELS = { scout = true, euvan = true, evvan = true, ecv = true }
 M.COURIER_MODELS = {
-  scout = true, evvan = true, ecv = true,
+  scout = true, euvan = true, evvan = true, ecv = true,
   van = true, boxtruck = true, h_series = true, gavril_h = true,
+}
+M.CARGO_COURIER_MODELS = {
+  scout = true, euvan = true, evvan = true, ecv = true,
+  van = true, boxtruck = true, h_series = true, gavril_h = true,
+  pickup = true, d_series = true, md_series = true,
 }
 M.HEAVY_SEMI_MODELS = { semi = true, us_semi = true, t_series = true }
 M.TRUCK_MODELS = { semi = true, us_semi = true, t_series = true, md_series = true }
 M.PICKUP_MODELS = { pickup = true, d_series = true }
 M.SPEEDER_MODELS = { etk800 = true, etkc = true, vivace = true, sbr = true, scintilla = true, bastion = true,
                      sunburst = true, bolide = true }
+
+-- Curated vanilla & mod delivery paint_design part names per model (scanned from vanilla & installed mods).
+M.DELIVERY_PAINT_DESIGNS = {
+  van = {
+    'van_skin_beamcom', 'van_skin_delivery', 'van_skin_bps', 'van_skin_bpsb',
+    'van_skin_hhl', 'van_skin_hhlb', 'van_skin_rrt', 'van_skin_rrtb',
+    'van_skin_nile', 'van_skin_nilefresh', 'van_skin_Post-ItDelivery',
+    'van_skin_Post-ItDeliveryBoxVan', 'van_skin_Post-ItDeliveryVanEV',
+    'van_cargobox_skin_truckitup',
+  },
+  pickup = {
+    'pickup_skin_bps', 'pickup_skin_hhl', 'pickup_skin_rrts', 'pickup_skin_rlspickupupull',
+  },
+  euvan = {
+    'euvan_main_skin_beamcom', 'euvan_main_skin_delivery', 'euvan_main_skin_niledelivery',
+    'euvan_skin_Post-ItDelivery', 'euvan_main_skin_hirochi', 'euvan_main_skin_roadassistance',
+  },
+  scout = {
+    'euvan_main_skin_beamcom', 'euvan_main_skin_delivery', 'euvan_main_skin_niledelivery',
+    'euvan_skin_Post-ItDelivery', 'euvan_main_skin_hirochi', 'euvan_main_skin_roadassistance',
+  },
+  evvan = {
+    'evvan_skin_nile', 'evvan_skin_Post-ItDelivery', 'evvan_skin_ams', 'evvan_skin_cad',
+    'evvan_skin_concour', 'evvan_skin_fallon', 'evvan_skin_presto', 'evvan_skin_sus',
+  },
+  ecv = {
+    'evvan_skin_nile', 'evvan_skin_Post-ItDelivery', 'evvan_skin_ams', 'evvan_skin_cad',
+    'evvan_skin_concour', 'evvan_skin_fallon', 'evvan_skin_presto', 'evvan_skin_sus',
+  },
+  md_series = {
+    'md_series_skin_bps', 'md_series_skin_hhl', 'md_series_skin_rrt',
+    'md_series_skin_nilemd', 'md_series_skin_shuffleboard', 'md_series_skin_spearleaf',
+  },
+}
+M.VANILLA_DELIVERY_PAINT_DESIGNS = {
+  van = { 'van_skin_beamcom', 'van_skin_delivery' },
+}
 
 M.COURIER_PAINTS = {
   europe = {
@@ -1093,6 +1137,8 @@ local director = {
   accum = 0,
   clock = 0,
   rosterArchetype = {},
+  rosterEntry = {},
+  liveryApplied = {},
   personas = {},
   busStops = {},
   busStopCount = 0,
@@ -1150,20 +1196,308 @@ local REGION_TIER1_SUBSTR = {
   asiaPacific = { 'nile', 'fedex', 'postit', 'post-it', 'post_it' },
 }
 local REGION_MOD_COURIER_BONUS = {
-  europe = { scout = 45, evvan = 40, ecv = 40 },
-  northAmerica = { evvan = 45, ecv = 45, scout = 25 },
-  asiaPacific = { evvan = 35, ecv = 35, scout = 30 },
+  europe = { scout = 45, euvan = 45, evvan = 40, ecv = 40 },
+  northAmerica = { evvan = 45, ecv = 45, scout = 25, euvan = 25 },
+  asiaPacific = { evvan = 35, ecv = 35, scout = 30, euvan = 30 },
 }
 
 -- Tier 2: Built-in vanilla delivery/commercial livery configs (preserved untouched with paint = nil)
 local TIER2_LIVERY_KEYWORDS = {
   'delivery', 'courier', 'parcel', 'postal', 'commercial', 'fleet', 'service',
-  'livery', 'cargobox', 'beamcom',
+  'livery', 'cargobox', 'beamcom', 'truckitup', 'fallon', 'concour', 'hirochi',
+  'roadassistance', 'courriel', 'mail canada',
 }
 -- Tier 3 / plain cargo keywords (qualifies van/md_series as courier; receives regional COURIER_PAINTS if unskinned)
 local COURIER_PLAIN_KEYWORDS = {
   'cargo', 'box', 'upfit', 'panel', 'freight', 'worker', 'post', 'mail', 'van',
 }
+-- Windowed passenger/minibus keywords (excluded from cargo-only courier; H-Series passenger/minibus routes to 'bus')
+local MINIBUS_KEYWORDS = { 'passenger', 'minibus', 'shuttle', 'vantastic' }
+local PASSENGER_VAN_KEYWORDS = {
+  'passenger', 'minibus', 'shuttle', 'vantastic', 'windowed', 'camper',
+  'multiway', 'tracer', 'combi', 'family', 'tourer',
+}
+local NON_DELIVERY_SKIN_KEYWORDS = {
+  'police', 'polizei', 'polizia', 'bcpd', 'gendarmerie', 'ambulance', 'fire', 'swat',
+  'camo', 'military', 'army', 'old', 'twotone', 'stripes', 'flames', 'splatter',
+  'vandal', 'curiosity', 'dirttest', 'dynamictextures', 'parkranger', 'hero',
+  'zebra', 'safari', 'sport', 'race', 'safetycar', 'interior', 'glass',
+}
+local DELIVERY_SKIN_TOKENS = {
+  'hhl', 'hhlb', 'bps', 'bpsb', 'rrt', 'rrtb', 'rrts', 'fdc', 'dhl', 'ups', 'dpd',
+  'ams', 'cad', 'sus', 'presto', 'concour', 'fallon', 'hirochi', 'beamcom',
+}
+local DELIVERY_SKIN_SUBSTR = {
+  'delivery', 'postal', 'parcel', 'courier', 'nile', 'postit', 'post-it', 'post_it',
+  'beamcom', 'truckitup', 'mail', 'courriel', 'fallon', 'concour', 'hirochi',
+  'roadassistance', 'road assistance', 'shuffleboard', 'spearleaf', 'upull', 'fedex', 'hermes',
+}
+local BOX_SKIN_SUBSTR = { 'bpsb', 'hhlb', 'rrtb', 'boxvan', 'truckitup' }
+
+local function canonCourierModel(model)
+  local m = tostring(model or ''):lower()
+  if m == 'h_series' or m == 'gavril_h' then return 'van' end
+  if m == 'd_series' then return 'pickup' end
+  return m
+end
+
+local function isDeliveryPaintDesignPart(partName, displayName)
+  local pn = tostring(partName or ''):lower()
+  if pn == '' or pn == 'none' then return false end
+  local dn = tostring(displayName or ''):lower()
+  local combined = pn .. ' ' .. dn
+  if hasAnyKeyword(combined, NON_DELIVERY_SKIN_KEYWORDS) then return false end
+  local tok = normalizeTokens(combined)
+  if hasAnyToken(tok, DELIVERY_SKIN_TOKENS) or hasAnyKeyword(combined, DELIVERY_SKIN_SUBSTR) then
+    return true
+  end
+  for _, list in pairs(M.DELIVERY_PAINT_DESIGNS) do
+    for i = 1, #list do
+      if list[i]:lower() == pn then return true end
+    end
+  end
+  return false
+end
+
+-- Pure: true when (model, config, entry) is an H-Series passenger/minibus/shuttle config.
+function M.isMinibusConfig(model, config, entry)
+  local m = tostring(model or ''):lower()
+  if not M.MINIBUS_MODELS[m] then return false end
+  local c = tostring(config or ''):lower()
+  local nm = type(entry) == 'table' and tostring(entry.name or ''):lower() or ''
+  local body = type(entry) == 'table' and tostring(entry.body or ''):lower() or ''
+  local combined = m .. ' ' .. c .. ' ' .. nm .. ' ' .. body
+  if type(entry) == 'table' and entry.isPolice == true then return false end
+  if hasAnyKeyword(combined, POLICE_KEYWORDS) or hasAnyKeyword(combined, EXCLUDED_KEYWORDS) then return false end
+  return hasAnyKeyword(combined, MINIBUS_KEYWORDS)
+end
+
+-- Pure: true when (model, config, entry) is a windowed passenger van/minibus/Scout/bus config (excluded from courier).
+function M.isPassengerVanConfig(model, config, entry)
+  local m = tostring(model or ''):lower()
+  local c = tostring(config or ''):lower()
+  local nm = type(entry) == 'table' and tostring(entry.name or ''):lower() or ''
+  local body = type(entry) == 'table' and tostring(entry.body or ''):lower() or ''
+  local combined = m .. ' ' .. c .. ' ' .. nm .. ' ' .. body
+  if hasAnyKeyword(combined, PASSENGER_VAN_KEYWORDS) then return true end
+  if m == 'md_series' and (combined:find('schoolbus', 1, true) or combined:find('prisonbus', 1, true)
+      or combined:find('derbybus', 1, true) or combined:find('crewcab', 1, true)
+      or combined:find('pickup_crew', 1, true)) then
+    return true
+  end
+  if (m == 'van' or m == 'h_series' or m == 'gavril_h' or m == 'scout' or m == 'euvan')
+      and (body:find('passenger', 1, true) or body:find('tailgateglass', 1, true)) then
+    return true
+  end
+  return false
+end
+
+-- Pure: true ONLY for windowless cargo/panel/box configs of van, pickup, scout/euvan, evvan/ecv, md_series, boxtruck.
+function M.isCargoCourierConfig(model, config, entry)
+  local m = tostring(model or ''):lower()
+  if not M.CARGO_COURIER_MODELS[m] then return false end
+  local c = tostring(config or ''):lower()
+  local nm = type(entry) == 'table' and tostring(entry.name or ''):lower() or ''
+  local body = type(entry) == 'table' and tostring(entry.body or ''):lower() or ''
+  local combined = m .. ' ' .. c .. ' ' .. nm .. ' ' .. body
+  if type(entry) == 'table' and entry.isPolice == true then return false end
+  if hasAnyKeyword(combined, POLICE_KEYWORDS) or hasAnyKeyword(combined, EXCLUDED_KEYWORDS) then return false end
+  if M.isPassengerVanConfig(m, c, entry) then return false end
+  local tok = normalizeTokens(combined)
+  if M.PICKUP_MODELS[m] then
+    return (type(entry) == 'table' and (entry.hasDeliveryLivery == true or entry.paintDesign ~= nil))
+      or hasAnyToken(tok, TIER1_COMPANY_TOKENS) or hasAnyKeyword(combined, TIER1_COMPANY_SUBSTR)
+      or hasAnyKeyword(combined, TIER2_LIVERY_KEYWORDS)
+      or combined:find('cargobox', 1, true) ~= nil or combined:find('flatbed', 1, true) ~= nil
+  end
+  if m == 'md_series' then
+    return (type(entry) == 'table' and (entry.hasDeliveryLivery == true or entry.paintDesign ~= nil))
+      or hasAnyToken(tok, TIER1_COMPANY_TOKENS) or hasAnyKeyword(combined, TIER1_COMPANY_SUBSTR)
+      or hasAnyKeyword(combined, TIER2_LIVERY_KEYWORDS)
+      or hasAnyKeyword(combined, COURIER_PLAIN_KEYWORDS)
+  end
+  return true
+end
+
+-- Pure: deterministically pick a delivery paint_design part for `model` from `installedParts` (array or map).
+-- Returns nil if installedParts is provided and contains no delivery paint_design parts for that model.
+function M.pickDeliveryPaintDesign(model, installedParts, seedOrOpts)
+  local m = canonCourierModel(model)
+  local seed, region, isBox = 1, 'europe', false
+  if type(seedOrOpts) == 'number' then
+    seed = seedOrOpts
+  elseif type(seedOrOpts) == 'table' then
+    seed = tonumber(seedOrOpts.seed) or 1
+    region = M.REGIONS[seedOrOpts.region] and seedOrOpts.region or 'europe'
+    isBox = seedOrOpts.isBox == true
+  end
+
+  local candidates = {}
+  local seen = {}
+  local function pushPart(pname, dname)
+    if type(pname) ~= 'string' or pname == '' or seen[pname] then return end
+    if isDeliveryPaintDesignPart(pname, dname) then
+      seen[pname] = true
+      local pl = pname:lower()
+      local tok = normalizeTokens(pl .. ' ' .. tostring(dname or ''):lower())
+      local score = 10
+      local rt = REGION_TIER1_TOKENS[region]
+      local rs = REGION_TIER1_SUBSTR[region]
+      if (rt and hasAnyToken(tok, rt)) or (rs and hasAnyKeyword(pl, rs)) then
+        score = score + 40
+      end
+      if hasAnyToken(tok, TIER1_COMPANY_TOKENS) or hasAnyKeyword(pl, TIER1_COMPANY_SUBSTR) then
+        score = score + 30
+      end
+      local isBoxSkin = hasAnyKeyword(pl, BOX_SKIN_SUBSTR)
+      if isBox then
+        if isBoxSkin then score = score + 25 end
+      else
+        if isBoxSkin then score = score - 25 end
+      end
+      candidates[#candidates + 1] = { name = pname, score = score }
+    end
+  end
+
+  if type(installedParts) == 'table' then
+    if #installedParts > 0 then
+      for i = 1, #installedParts do
+        local v = installedParts[i]
+        if type(v) == 'string' then
+          pushPart(v, nil)
+        elseif type(v) == 'table' and type(v.name) == 'string' then
+          if not v.slotType or v.slotType == 'paint_design' then
+            pushPart(v.name, v.description or (type(v.information) == 'table' and v.information.name) or nil)
+          end
+        end
+      end
+    else
+      for k, v in pairs(installedParts) do
+        if type(k) == 'string' and v ~= false then
+          if type(v) == 'table' then
+            if not v.slotType or v.slotType == 'paint_design' then
+              local dn = v.description or v.name or (type(v.information) == 'table' and v.information.name) or nil
+              if type(dn) == 'table' then dn = tostring(dn.brand1 or dn.txt or '') end
+              pushPart(k, dn)
+            end
+          else
+            pushPart(k, type(v) == 'string' and v or nil)
+          end
+        end
+      end
+    end
+  else
+    -- No installedParts passed: use vanilla-guaranteed delivery paint_design parts only.
+    local vanilla = M.VANILLA_DELIVERY_PAINT_DESIGNS[m]
+    if vanilla then
+      for i = 1, #vanilla do pushPart(vanilla[i], nil) end
+    end
+  end
+
+  if #candidates == 0 then return nil end
+  table.sort(candidates, function(a, b)
+    if a.score ~= b.score then return a.score > b.score end
+    return a.name < b.name
+  end)
+  local idx = (math.abs(math.floor(seed)) % #candidates) + 1
+  return candidates[idx].name
+end
+
+-- Apply a delivery paint_design part (or preserve an active paint_design) on a spawned courier vehicle via
+-- core_vehicle_partmgmt, falling back to M.COURIER_PAINTS only if no delivery paint_design exists on that model.
+function M.applyVehicleLivery(vehId, entry)
+  if type(entry) ~= 'table' then return { applied = 'none' } end
+  local pm = rawget(_G, 'core_vehicle_partmgmt')
+  local vm = rawget(_G, 'core_vehicle_manager')
+  local obj = getObjectByID and getObjectByID(vehId) or nil
+  local model = entry.model or (obj and obj.getJBeamFilename and obj:getJBeamFilename()) or ''
+  local cfgStr = tostring(entry.config or ''):lower()
+  local isBox = cfgStr:find('box', 1, true) ~= nil or cfgStr:find('deliverytruck', 1, true) ~= nil
+    or cfgStr:find('upfit', 1, true) ~= nil
+
+  -- 1. Check for an already-active paint_design on the vehicle; never override an active paint_design with solid paint.
+  local existingPd = nil
+  if pm and type(pm.getConfigOfVehicle) == 'function' then
+    local ok, curCfg = pcall(pm.getConfigOfVehicle, vehId)
+    if ok and type(curCfg) == 'table' and type(curCfg.parts) == 'table' then
+      local pd = curCfg.parts.paint_design
+      if type(pd) == 'string' and pd ~= '' and pd ~= 'none' then existingPd = pd end
+    end
+  end
+  local vdata = nil
+  if vm and type(vm.getVehicleData) == 'function' then
+    local ok, vd = pcall(vm.getVehicleData, vehId)
+    if ok and type(vd) == 'table' then
+      vdata = vd
+      if not existingPd and type(vd.config) == 'table' and type(vd.config.parts) == 'table' then
+        local pd = vd.config.parts.paint_design
+        if type(pd) == 'string' and pd ~= '' and pd ~= 'none' then existingPd = pd end
+      end
+    end
+  end
+  if existingPd and (entry.hasDeliveryLivery == true or isDeliveryPaintDesignPart(existingPd)) then
+    entry.paintDesign = existingPd
+    entry.hasDeliveryLivery = true
+    entry.paint = nil
+    entry.paintName = nil
+    return { applied = 'existing_paint_design', paintDesign = existingPd, preserved = true }
+  end
+  if entry.hasDeliveryLivery == true and not entry.paintDesign then
+    entry.paint = nil
+    entry.paintName = nil
+    return { applied = 'preserved_livery', preserved = true }
+  end
+
+  -- 2. Resolve a delivery paint_design part from entry.paintDesign, entry.installedParts, or vehicle's available parts.
+  local chosenPd = entry.paintDesign
+  if not chosenPd then
+    local avail = entry.installedParts
+    if not avail and vdata then
+      if type(vdata.availableParts) == 'table' then
+        avail = vdata.availableParts
+      elseif vdata.ioCtx and rawget(_G, 'jbeamIO') and type(jbeamIO.getAvailableParts) == 'function' then
+        local okP, parts = pcall(jbeamIO.getAvailableParts, vdata.ioCtx)
+        if okP and type(parts) == 'table' then avail = parts end
+      end
+    end
+    chosenPd = M.pickDeliveryPaintDesign(model, avail, { seed = vehId, region = entry.region, isBox = isBox })
+  end
+
+  if chosenPd and chosenPd ~= '' then
+    local appliedOk = false
+    if pm then
+      if obj and type(pm.setConfigOfVehicle) == 'function' then
+        appliedOk = pcall(pm.setConfigOfVehicle, obj, { parts = { paint_design = chosenPd } }, true)
+      elseif type(pm.setConfig) == 'function' then
+        appliedOk = pcall(pm.setConfig, { parts = { paint_design = chosenPd } }, true, vehId)
+      elseif type(pm.setPartsConfig) == 'function' then
+        appliedOk = pcall(pm.setPartsConfig, { paint_design = chosenPd }, true)
+      end
+    end
+    entry.paintDesign = chosenPd
+    entry.hasDeliveryLivery = true
+    entry.paint = nil
+    entry.paintName = nil
+    return { applied = 'paint_design', paintDesign = chosenPd, ok = appliedOk }
+  end
+
+  -- 3. Fallback to regional M.COURIER_PAINTS only when no delivery paint_design part exists on this model.
+  if not existingPd and type(entry.paint) == 'table' then
+    local paintOk = false
+    if pm then
+      if type(pm.setConfigPaints) == 'function' then
+        paintOk = pcall(pm.setConfigPaints, { { baseColor = entry.paint } }, false, vehId)
+      elseif obj and type(pm.setConfigOfVehicle) == 'function' then
+        paintOk = pcall(pm.setConfigOfVehicle, obj, { paints = { { baseColor = entry.paint } } }, false)
+      elseif type(pm.setConfig) == 'function' then
+        paintOk = pcall(pm.setConfig, { paints = { { baseColor = entry.paint } } }, false, vehId)
+      end
+    end
+    return { applied = 'fallback_paint', paint = entry.paint, ok = paintOk }
+  end
+
+  return { applied = 'none' }
+end
 
 local SPEEDER_KEYWORDS = {
   'ttsport', 'sport', 'gt4', 'gt3', 'gt2', 'gt', 'rs', 'redtail', 'battlehawk',
@@ -1209,8 +1543,14 @@ function M.classifyVehicle(model, config, entry)
   if type(entry) == 'table' and entry.isPolice == true then return 'police' end
   if hasAnyKeyword(combined, POLICE_KEYWORDS) then return 'police' end
   if hasAnyKeyword(combined, EXCLUDED_KEYWORDS) then return 'excluded' end
-  if M.BUS_MODELS[m] or combined:find('citybus', 1, true) or combined:find('wentward', 1, true) then
+  if M.BUS_MODELS[m] or combined:find('citybus', 1, true) or combined:find('wentward', 1, true)
+      or M.isMinibusConfig(m, c, entry) then
     return 'bus'
+  end
+  -- Windowed passenger vans/Scouts/buses must never be assigned 'courier'
+  if M.isPassengerVanConfig(m, c, entry) then
+    if m == 'md_series' then return 'truck' end
+    return 'commuter'
   end
   if M.COURIER_MODELS[m] then
     return 'courier'
@@ -1236,26 +1576,28 @@ function M.classifyVehicle(model, config, entry)
     end
     return 'commuter'
   end
-  if hasTier1CompanySkin(combined, tok) then
-    return 'courier'
-  end
   if M.SPEEDER_MODELS[m] and (m == 'scintilla' or m == 'bolide' or hasAnyKeyword(combined, SPEEDER_KEYWORDS)) then
     return 'speeder'
   end
   return 'commuter'
 end
 
-local function cloneEntry(src, archetype, liveryTag, paint, paintName, hasDeliveryLivery, deliveryTier)
+local function cloneEntry(src, archetype, liveryTag, paint, paintName, hasDeliveryLivery, deliveryTier, paintDesign)
   local out = {
     model = src.model,
     config = src.config,
     archetype = archetype,
   }
   if src.name then out.name = src.name end
+  if src.region then out.region = src.region end
+  if src.body then out.body = src.body end
+  if src.installedParts then out.installedParts = src.installedParts end
   if liveryTag then out.liveryTag = liveryTag end
+  local pd = paintDesign or src.paintDesign
+  if pd then out.paintDesign = pd end
   if hasDeliveryLivery ~= nil then out.hasDeliveryLivery = hasDeliveryLivery end
   if deliveryTier ~= nil then out.deliveryTier = deliveryTier end
-  if hasDeliveryLivery == true then
+  if hasDeliveryLivery == true or pd ~= nil then
     out.paint = nil
     out.paintName = nil
   else
@@ -1294,12 +1636,19 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
           local clTok = normalizeTokens(ml .. ' ' .. cl)
           if item.region == reg then score = score + 25 end
           if arch == 'bus' then
+            local isHeavyBus = M.BUS_MODELS[ml] == true or cl:find('citybus', 1, true) or cl:find('wentward', 1, true)
+            local isMinibus = M.isMinibusConfig(ml, cfg, item)
+            if urban then
+              if isHeavyBus then score = score + 200 elseif isMinibus then score = score + 80 end
+            else
+              if isMinibus then score = score + 200 elseif isHeavyBus then score = score + 80 end
+            end
             if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then score = score + 100 end
           elseif arch == 'courier' then
             local isModModel = M.MOD_COURIER_MODELS[ml] == true
             local isTier1Skin = hasTier1CompanySkin(cl, clTok)
             local isTier2Livery = hasTier2VanillaLivery(cl)
-            -- Tier 1: Installed delivery mod vehicles (scout, evvan/ecv) & delivery company skin packs
+            -- Tier 1: Installed delivery mod vehicles (scout/euvan, evvan/ecv) & delivery company skin packs
             if isTier1Skin then
               score = score + 300
               local rt = REGION_TIER1_TOKENS[reg]
@@ -1364,17 +1713,20 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
     for i = 1, n do
       if #roster >= targetSize then break end
       local e = src[i].item
-      local tag, paint, paintName, hasDeliveryLivery, deliveryTier = nil, nil, nil, nil, nil
-      if decorateFn then tag, paint, paintName, hasDeliveryLivery, deliveryTier = decorateFn(e, i) end
-      roster[#roster + 1] = cloneEntry(e, arch, tag, paint, paintName, hasDeliveryLivery, deliveryTier)
+      local tag, paint, paintName, hasDeliveryLivery, deliveryTier, paintDesign = nil, nil, nil, nil, nil, nil
+      if decorateFn then
+        tag, paint, paintName, hasDeliveryLivery, deliveryTier, paintDesign = decorateFn(e, i)
+      end
+      roster[#roster + 1] = cloneEntry(e, arch, tag, paint, paintName, hasDeliveryLivery, deliveryTier, paintDesign)
       counts[arch] = counts[arch] + 1
     end
   end
 
   -- Natural traffic proportions: everyday commuter cars make up ~75-85% of the pool.
-  -- City Bus: 1 in urban/town pools (and 1 on larger >= 10-car pools), never flooding with multiple buses.
+  -- Bus: 1 heavy transit bus in urban pools (or minibus fallback); 1 H-Series minibus in rural pools (size >= 6,
+  -- falling back to citybus/wentward if unavailable).
   -- Courier: 1 per standard 6-10 vehicle pool; at most 2 only if pool size >= 14.
-  local busQuota = (urban or targetSize >= 10) and 1 or 0
+  local busQuota = (urban or targetSize >= 6) and 1 or 0
   local courierQuota = targetSize >= 14 and 2 or 1
   local truckQuota = urban and (targetSize >= 24 and 2 or (targetSize >= 12 and 1 or 0))
     or (targetSize >= 14 and 2 or (targetSize >= 8 and 1 or 0))
@@ -1383,28 +1735,43 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
 
   local courierPal = M.COURIER_PAINTS[reg] or M.COURIER_PAINTS.europe
   local plainCourierPaintIdx = 0
+  local installedByModel = type(opts.installedParts) == 'table' and opts.installedParts or nil
   take('bus', busQuota, function(e)
+    local ml = tostring(e.model or ''):lower()
     local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
+    if M.isMinibusConfig(ml, e.config, e) then return 'minibus', nil, nil end
     if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then return 'transit_bus', nil, nil end
     return 'city_bus', nil, nil
   end)
-  take('courier', courierQuota, function(e)
+  take('courier', courierQuota, function(e, idx)
     local ml = tostring(e.model or ''):lower()
     local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
     local clTok = normalizeTokens(ml .. ' ' .. cl)
     local isModModel = M.MOD_COURIER_MODELS[ml] == true
     -- Tier 1: custom delivery company skin -> preserve livery (paint = nil)
     if hasTier1CompanySkin(cl, clTok) then
-      return tier1LiveryTag(cl, clTok), nil, nil, true, 1
+      return tier1LiveryTag(cl, clTok), nil, nil, true, 1, e.paintDesign
     end
     -- Tier 2: vanilla in-game delivery/commercial livery -> preserve livery (paint = nil)
     if e.hasDeliveryLivery == true or hasTier2VanillaLivery(cl) then
-      return 'vanilla_delivery', nil, nil, true, isModModel and 1 or 2
+      return 'vanilla_delivery', nil, nil, true, isModModel and 1 or 2, e.paintDesign
+    end
+    -- Dynamic paint_design part injection when installedParts are known for this model
+    local modelParts = e.installedParts or (installedByModel and (installedByModel[ml] or installedByModel[canonCourierModel(ml)]))
+    if e.paintDesign or type(modelParts) == 'table' then
+      local isBox = cl:find('box', 1, true) ~= nil or cl:find('upfit', 1, true) ~= nil
+      local pd = e.paintDesign or M.pickDeliveryPaintDesign(ml, modelParts, { seed = idx, region = reg, isBox = isBox })
+      if pd then
+        local pdl = pd:lower()
+        local pdTok = normalizeTokens(pdl)
+        local tag = hasTier1CompanySkin(pdl, pdTok) and tier1LiveryTag(pdl, pdTok) or 'paint_design_delivery'
+        return tag, nil, nil, true, isModModel and 1 or 2, pd
+      end
     end
     -- Tier 3: plain unpainted/solid-color cargo/van -> apply regional M.COURIER_PAINTS
     plainCourierPaintIdx = plainCourierPaintIdx + 1
     local swatch = courierPal[((plainCourierPaintIdx - 1) % #courierPal) + 1]
-    return swatch.tag, swatch.paint, swatch.paintName, false, isModModel and 1 or 3
+    return swatch.tag, swatch.paint, swatch.paintName, false, isModModel and 1 or 3, nil
   end)
   take('truck', truckQuota)
   take('speeder', speederQuota)
@@ -1450,15 +1817,27 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
 end
 
 -- Pure deterministic AI driving persona assignment.
-function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetype)
+function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetype, entry)
   local ml = tostring(model or ''):lower()
   local arch = rosterArchetype
   if arch ~= 'bus' and arch ~= 'truck' and arch ~= 'courier' and arch ~= 'speeder' and arch ~= 'commuter' then
-    local cls = M.classifyVehicle(model, config)
+    local cls = M.classifyVehicle(model, config, entry)
     arch = (cls == 'bus' or cls == 'truck' or cls == 'courier' or cls == 'speeder') and cls or 'commuter'
   end
-  if M.HEAVY_SEMI_MODELS[ml] and arch == 'courier' then
-    arch = 'truck'
+  -- Cargo-only constraint: only windowless cargo/panel/box configs of van, pickup, scout/euvan, evvan/ecv, md_series,
+  -- boxtruck can be assigned 'courier'. Windowed passenger vans/minibuses and heavy semis never get 'courier'.
+  if arch == 'courier' and not M.isCargoCourierConfig(model, config, entry) then
+    if M.HEAVY_SEMI_MODELS[ml] or ml == 'md_series' then
+      arch = 'truck'
+    elseif M.isMinibusConfig(model, config, entry) then
+      arch = 'bus'
+    else
+      arch = 'commuter'
+    end
+  end
+  -- Plain unbranded vehicles (neither a delivery livery config nor a delivery paint_design part) drive as 'commuter'.
+  if arch == 'courier' and type(entry) == 'table' and entry.hasDeliveryLivery == false and not entry.paintDesign then
+    arch = 'commuter'
   end
   local idNum = math.abs(math.floor(tonumber(vehId) or 0))
   local u1 = ((idNum * 2654435761 + 17) % 1000) / 1000
@@ -1747,7 +2126,9 @@ function M.isCourierDwelling(vehId)
 end
 
 -- Step the AI courier curbside delivery stop state machine for one courier vehicle (zero table allocations on idle ticks).
-function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj)
+-- Restricted to built-up villages/towns: requires vehicle speed < 12.5 m/s (45 km/h) and local road speed limit
+-- <= 15.3 m/s (55 km/h), never pulling over on rural highways.
+function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj, roadLimitMs)
   local dwell = director.courierDwell[vehId]
   if dwell then
     if now >= dwell.releaseAt then
@@ -1765,6 +2146,15 @@ function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj)
     return 'dwelling', dwell.pointId
   end
   if not speed or speed >= M.COURIER_STOP_MAX_SPEED_MS then return 'none' end
+  local limitMs = tonumber(roadLimitMs)
+  if limitMs == nil and map and map.getMap then
+    local road = closestRoad(px, py, 0)
+    if road then
+      if road.highway == true or road.unlimited == true then return 'none' end
+      limitMs = tonumber(road.speedLimit)
+    end
+  end
+  if limitMs ~= nil and (limitMs <= 0 or limitMs > M.COURIER_STOP_MAX_LIMIT_MS) then return 'none' end
   if director.deliveryPointCount <= 0 then return 'none' end
 
   local range2 = M.COURIER_STOP_RANGE_M * M.COURIER_STOP_RANGE_M
@@ -1918,9 +2308,12 @@ function M.updateTrafficDirector(dtReal, player, box)
   local activeBox = box or (applied and applied.box) or nil
   local lightsOn = M.needsHeadlights()
 
-  -- Clean stale personas / dwells for despawned vehicles
+  -- Clean stale personas / dwells / livery flags for despawned vehicles
   for id in pairs(director.personas) do
     if data[id] == nil then director.personas[id] = nil end
+  end
+  for id in pairs(director.liveryApplied) do
+    if data[id] == nil then director.liveryApplied[id] = nil end
   end
   for id in pairs(director.busDwell) do
     if data[id] == nil then director.busDwell[id] = nil end
@@ -1946,16 +2339,37 @@ function M.updateTrafficDirector(dtReal, player, box)
           if fl > 1e-6 then dx, dy = f.x / fl, f.y / fl end
         end
 
-        -- 1. Assign or refresh persona on first sight / after respawn
+        -- 1. Assign or refresh persona (and inject dynamic delivery paint_design on couriers) on first sight / respawn
         local rc = tonumber(t.respawnCount) or 0
         local curP = director.personas[id]
+        local road = nil
         if not curP or curP._respawnCount ~= rc then
           local model = t.model or (o.getJBeamFilename and o:getJBeamFilename()) or ''
           local config = t.config or t.partConfig or ''
           local rkey = tostring(model):lower() .. ':' .. tostring(config):lower()
-          local road = map and map.getMap and closestRoad(p.x, p.y, p.z) or nil
+          road = map and map.getMap and closestRoad(p.x, p.y, p.z) or nil
           local isAutobahn = road ~= nil and road.unlimited == true
-          local assigned = M.assignVehiclePersona(id, model, config, isAutobahn, director.rosterArchetype[rkey])
+          local rArch = director.rosterArchetype[rkey]
+          local rEntry = director.rosterEntry[rkey]
+          local liveryEntry = nil
+          if rArch == 'courier' or (rArch == nil and M.classifyVehicle(model, config, rEntry) == 'courier') then
+            if M.isCargoCourierConfig(model, config, rEntry) then
+              liveryEntry = {
+                model = model,
+                config = config,
+                region = M.trafficRegion or 'europe',
+                hasDeliveryLivery = rEntry and rEntry.hasDeliveryLivery or nil,
+                paintDesign = rEntry and rEntry.paintDesign or nil,
+                paint = rEntry and rEntry.paint or nil,
+                paintName = rEntry and rEntry.paintName or nil,
+              }
+              if director.liveryApplied[id] ~= rc then
+                director.liveryApplied[id] = rc
+                M.applyVehicleLivery(id, liveryEntry)
+              end
+            end
+          end
+          local assigned = M.assignVehiclePersona(id, model, config, isAutobahn, rArch, liveryEntry or rEntry)
           assigned._respawnCount = rc
           director.personas[id] = assigned
           curP = assigned
@@ -1964,11 +2378,16 @@ function M.updateTrafficDirector(dtReal, player, box)
           if cmd and o.queueLuaCommand then o:queueLuaCommand(cmd) end
         end
 
-        -- 2. City bus OSM bus stop & AI courier curbside delivery dwell state machines
+        -- 2. City bus / H-Series minibus OSM bus stop & AI courier village-only curbside delivery dwell state machines
         if curP.persona == 'bus' and (dx ~= 0 or dy ~= 0) then
           M.stepBusStop(id, p.x, p.y, dx, dy, sp, now, o)
         elseif curP.persona == 'courier' and (dx ~= 0 or dy ~= 0) then
-          M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o)
+          if road == nil and map and map.getMap then road = closestRoad(p.x, p.y, p.z) end
+          local roadLimitMs = nil
+          if road then
+            roadLimitMs = (road.highway == true or road.unlimited == true) and math.huge or road.speedLimit
+          end
+          M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o, roadLimitMs)
         end
 
         -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m, >= 140 m spacing)
@@ -2049,10 +2468,13 @@ local function regionalGroup()
     if type(roster) == 'table' and roster[1] then
       g = roster
       director.rosterArchetype = {}
+      director.rosterEntry = {}
       for i = 1, #roster do
         local e = roster[i]
         if e.model and e.archetype then
-          director.rosterArchetype[tostring(e.model):lower() .. ':' .. tostring(e.config or ''):lower()] = e.archetype
+          local rk = tostring(e.model):lower() .. ':' .. tostring(e.config or ''):lower()
+          director.rosterArchetype[rk] = e.archetype
+          director.rosterEntry[rk] = e
         end
       end
     end
@@ -2567,6 +2989,8 @@ function M.reset()
   cuts = {}
   director.accum, director.clock = 0, 0
   director.rosterArchetype = {}
+  director.rosterEntry = {}
+  director.liveryApplied = {}
   director.personas = {}
   director.busStops = {}
   director.busStopCount = 0

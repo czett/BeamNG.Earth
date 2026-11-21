@@ -979,11 +979,12 @@ do
     and r40.counts.commuter >= 30 and r40.counts.commuter <= 35,
     'natural mix (size 40): 1 bus, 2 couriers, ~75-85% commuters, 0 police')
 
-  -- Rural >= 10 pool still gets 1 bus; small rural < 10 gets 0 buses
+  -- Rural >= 6 pool gets 1 bus (falls back to citybus/wentward when no H-Series minibus is in pool); tiny rural < 6 gets 0
+  local rRural4 = N.buildTrafficRoster('DE', bigPool, false, { size = 4, urban = false })
   local rRural8 = N.buildTrafficRoster('DE', bigPool, false, { size = 8, urban = false })
   local rRural10 = N.buildTrafficRoster('DE', bigPool, false, { size = 10, urban = false })
-  T.check(rRural8.counts.bus == 0 and rRural10.counts.bus == 1,
-    'natural mix (rural): 0 buses on <10 rural pool, 1 bus on >=10 pool')
+  T.check(rRural4.counts.bus == 0 and rRural8.counts.bus == 1 and rRural10.counts.bus == 1,
+    'natural mix (rural): 0 buses on <6 rural pool, 1 bus on >=6 pool')
 
   -- Simple-traffic bypass prevention: regionalGroup() runs buildTrafficRoster even when trafficSimpleVehicles == true
   -- and falls back to simple createGroup only if core_vehicles.getConfigList() returns empty.
@@ -1151,6 +1152,271 @@ do
   for k, val in pairs(sg2) do _G[k] = val end
   N.dropDeliveryPoints('tile_deliv')
   T.check(N.status().deliveryPointsLoaded == 0, 'dropDeliveryPoints clears tile drop points')
+  N.reset()
+end
+
+-- 8. Cargo-Only Delivery Filtering, Dynamic paint_design Skin Injection, Rural H-Series Minibus & Village-Only Courier Stops
+do
+  -- 8a. Cargo-only filtering: windowed passenger vans/Scouts excluded from 'courier'; cargo/box configs included
+  T.check(not N.isCargoCourierConfig('van', 'h15_passenger') and N.classifyVehicle('van', 'h15_passenger') == 'bus',
+    'cargo-only: windowed H15 Passenger excluded from courier and classified as bus')
+  T.check(not N.isCargoCourierConfig('van', 'h25_ext_passenger_4wd_xt') and N.classifyVehicle('van', 'h25_ext_passenger_4wd_xt') == 'bus',
+    'cargo-only: windowed H25 Ext Passenger excluded from courier and classified as bus')
+  T.check(not N.isCargoCourierConfig('van', 'vantastic') and N.classifyVehicle('van', 'vantastic') == 'bus',
+    'cargo-only: windowed Vantastic excluded from courier and classified as bus')
+  T.check(not N.isCargoCourierConfig('euvan', 'multiway_140i_s15_A') and N.classifyVehicle('euvan', 'multiway_140i_s15_A') == 'commuter',
+    'cargo-only: windowed Gavril Scout Multiway excluded from courier')
+  T.check(not N.isCargoCourierConfig('euvan', 'tracer_330dX_s25_AWD_A') and N.classifyVehicle('euvan', 'tracer_330dX_s25_AWD_A') == 'commuter',
+    'cargo-only: windowed Gavril Scout Tracer excluded from courier')
+  T.check(not N.isCargoCourierConfig('scout', 'scout_passenger') and N.classifyVehicle('scout', 'scout_passenger') == 'commuter',
+    'cargo-only: windowed Scout passenger excluded from courier')
+
+  T.check(N.isCargoCourierConfig('van', 'h15_vanster') and N.classifyVehicle('van', 'h15_vanster') == 'courier',
+    'cargo-only: windowless H15 Vanster panel van included as courier')
+  T.check(N.isCargoCourierConfig('van', 'deliverytruck') and N.classifyVehicle('van', 'deliverytruck') == 'courier',
+    'cargo-only: H45 Delivery Truck box van included as courier')
+  T.check(N.isCargoCourierConfig('pickup', 'd45_cargobox_A') and N.classifyVehicle('pickup', 'd45_cargobox_A') == 'courier',
+    'cargo-only: D45 CargoBox included as courier')
+  T.check(N.isCargoCourierConfig('euvan', 'cargo_250d_delivery_M') and N.classifyVehicle('euvan', 'cargo_250d_delivery_M') == 'courier',
+    'cargo-only: Gavril Scout cargo panel van included as courier')
+  T.check(N.isCargoCourierConfig('evvan', 'nile') and N.classifyVehicle('evvan', 'nile') == 'courier',
+    'cargo-only: Bruckell ECV cargo van included as courier')
+  T.check(N.isCargoCourierConfig('md_series', 'md_60_cargobox') and N.classifyVehicle('md_series', 'md_60_cargobox') == 'courier',
+    'cargo-only: MD60 CargoBox included as courier')
+
+  -- Persona guard: windowed passenger van forced with rosterArchetype='courier' must never get 'courier' persona
+  local pPassVan = N.assignVehiclePersona(70, 'van', 'h25_passenger', false, 'courier')
+  T.check(pPassVan.persona == 'bus', 'persona guard: windowed H-Series passenger demoted to bus, never courier')
+  local pMultiway = N.assignVehiclePersona(71, 'euvan', 'multiway_250d_s15_M', false, 'courier')
+  T.check(pMultiway.persona == 'commuter', 'persona guard: windowed Scout Multiway demoted to commuter, never courier')
+  local pUnbrandedVan = N.assignVehiclePersona(72, 'van', 'h15_vanster', false, 'courier',
+    { hasDeliveryLivery = false, paintDesign = nil })
+  T.check(pUnbrandedVan.persona == 'commuter',
+    'persona guard: plain unbranded van without delivery livery or paint_design drives as commuter')
+
+  -- 8b. Dynamic paint_design part picker & core_vehicle_partmgmt application
+  local vanParts = {
+    van_skin_police = { slotType = 'paint_design', description = 'Police Livery' },
+    van_skin_ambulance = { slotType = 'paint_design', description = 'Ambulance Livery' },
+    van_skin_twotone = { slotType = 'paint_design', description = 'Two-Tone' },
+    van_skin_beamcom = { slotType = 'paint_design', description = 'Beamcom Livery' },
+    van_skin_bps = { slotType = 'paint_design', description = 'Beam Postal Service' },
+    van_skin_hhl = { slotType = 'paint_design', description = 'HHL Livery' },
+    van_skin_nile = { slotType = 'paint_design', description = 'Nile Delivery' },
+    ['van_skin_Post-ItDelivery'] = { slotType = 'paint_design', description = 'Post-It Delivery' },
+    van_skin_rrt = { slotType = 'paint_design', description = 'RRT Livery' },
+  }
+  local vanPick = N.pickDeliveryPaintDesign('van', vanParts, { seed = 1, region = 'europe' })
+  T.check(vanPick ~= nil and vanPick ~= 'van_skin_police' and vanPick ~= 'van_skin_ambulance' and vanPick ~= 'van_skin_twotone',
+    'pickDeliveryPaintDesign (van): selects delivery paint_design and rejects police/ambulance/twotone')
+
+  local pickupParts = {
+    pickup_skin_old = { slotType = 'paint_design', description = 'Old Paint' },
+    pickup_skin_bps = { slotType = 'paint_design', description = 'Beam Postal Service' },
+    pickup_skin_hhl = { slotType = 'paint_design', description = 'HHL Livery' },
+    pickup_skin_rrts = { slotType = 'paint_design', description = 'RRT Livery' },
+  }
+  local pickupPick = N.pickDeliveryPaintDesign('pickup', pickupParts, { seed = 1, region = 'northAmerica' })
+  T.check(pickupPick == 'pickup_skin_bps' or pickupPick == 'pickup_skin_hhl' or pickupPick == 'pickup_skin_rrts',
+    'pickDeliveryPaintDesign (pickup): selects BPS/HHL/RRT delivery paint_design')
+
+  local scoutParts = {
+    euvan_main_skin_polizia = { slotType = 'paint_design', description = 'Polizia Livery' },
+    euvan_main_skin_beamcom = { slotType = 'paint_design', description = 'Beamcom Livery' },
+    euvan_main_skin_delivery = { slotType = 'paint_design', description = 'Delivery Livery' },
+    euvan_main_skin_niledelivery = { slotType = 'paint_design', description = 'Nile Delivery' },
+    ['euvan_skin_Post-ItDelivery'] = { slotType = 'paint_design', description = 'Post-It Delivery' },
+    euvan_main_skin_hirochi = { slotType = 'paint_design', description = 'Hirochi Auto Parts' },
+    euvan_main_skin_roadassistance = { slotType = 'paint_design', description = 'Road Assistance Livery' },
+  }
+  local scoutPick = N.pickDeliveryPaintDesign('scout', scoutParts, { seed = 1, region = 'europe' })
+  T.check(scoutPick ~= nil and scoutPick ~= 'euvan_main_skin_polizia',
+    'pickDeliveryPaintDesign (scout/euvan): selects delivery paint_design and rejects polizia')
+
+  local evvanParts = {
+    evvan_skin_nile = { slotType = 'paint_design', description = 'Nile Gold' },
+    ['evvan_skin_Post-ItDelivery'] = { slotType = 'paint_design', description = 'Post-It Delivery' },
+    evvan_skin_cad = { slotType = 'paint_design', description = 'Mail Canada / Canada Courriel' },
+    evvan_skin_fallon = { slotType = 'paint_design', description = 'Fallon Home Services' },
+    evvan_skin_concour = { slotType = 'paint_design', description = 'ConCour' },
+  }
+  local evvanPick = N.pickDeliveryPaintDesign('evvan', evvanParts, { seed = 1, region = 'northAmerica' })
+  local ecvPick = N.pickDeliveryPaintDesign('ecv', evvanParts, { seed = 2, region = 'europe' })
+  T.check(evvanPick ~= nil and ecvPick ~= nil,
+    'pickDeliveryPaintDesign (evvan/ecv): selects Nile/Post-It/Mail Canada/Fallon/ConCour paint_design')
+  T.check(N.pickDeliveryPaintDesign('pickup', {}) == nil,
+    'pickDeliveryPaintDesign: returns nil when installedParts has no delivery paint_design')
+
+  -- applyVehicleLivery: injects paint_design via core_vehicle_partmgmt, preserves paint == nil, never overrides active skin
+  local sgPm = {
+    core_vehicle_partmgmt = rawget(_G, 'core_vehicle_partmgmt'),
+    core_vehicle_manager = rawget(_G, 'core_vehicle_manager'),
+    getObjectByID = rawget(_G, 'getObjectByID'),
+  }
+  local pmCalls = {}
+  local curConfigByVeh = {
+    [801] = { parts = { paint_design = '' } },
+    [802] = { parts = { paint_design = 'van_skin_nile' } },
+    [803] = { parts = { paint_design = '' } },
+  }
+  core_vehicle_partmgmt = {
+    getConfigOfVehicle = function(id) return curConfigByVeh[id] end,
+    setConfigOfVehicle = function(veh, inData, respawn)
+      pmCalls[#pmCalls + 1] = { kind = 'setConfigOfVehicle', veh = veh, inData = inData, respawn = respawn }
+    end,
+    setConfigPaints = function(paints, respawn, id)
+      pmCalls[#pmCalls + 1] = { kind = 'setConfigPaints', paints = paints, respawn = respawn, id = id }
+    end,
+  }
+  core_vehicle_manager = {
+    getVehicleData = function(id)
+      if id == 801 then return { config = curConfigByVeh[801], availableParts = vanParts } end
+      if id == 802 then return { config = curConfigByVeh[802], availableParts = vanParts } end
+      if id == 803 then return { config = curConfigByVeh[803], availableParts = {} } end
+      return nil
+    end,
+  }
+  getObjectByID = function(id) return { id = id, getJBeamFilename = function() return 'van' end } end
+
+  -- 801: unskinned cargo van -> injects delivery paint_design via core_vehicle_partmgmt and clears paint
+  local e801 = { model = 'van', config = 'h15_vanster', region = 'europe', paint = { 0.98, 0.78, 0.04, 1.0 } }
+  local res801 = N.applyVehicleLivery(801, e801)
+  T.check(res801.applied == 'paint_design' and type(res801.paintDesign) == 'string'
+    and e801.paint == nil and e801.hasDeliveryLivery == true
+    and #pmCalls == 1 and pmCalls[1].kind == 'setConfigOfVehicle'
+    and pmCalls[1].inData.parts.paint_design == res801.paintDesign,
+    'applyVehicleLivery: injects delivery paint_design via core_vehicle_partmgmt with paint == nil preservation')
+
+  -- 802: vehicle already has active van_skin_nile -> preserved untouched, never overridden with solid paint
+  local e802 = { model = 'van', config = 'nile', region = 'europe', paint = { 0.98, 0.78, 0.04, 1.0 } }
+  local res802 = N.applyVehicleLivery(802, e802)
+  T.check(res802.applied == 'existing_paint_design' and res802.paintDesign == 'van_skin_nile'
+    and res802.preserved == true and e802.paint == nil and #pmCalls == 1,
+    'applyVehicleLivery: preserves active paint_design and never overrides with solid paint')
+
+  -- 803: model has zero delivery paint_design parts -> clean fallback to M.COURIER_PAINTS
+  local e803 = { model = 'pickup', config = 'd45_cargobox_A', region = 'europe', paint = { 0.98, 0.78, 0.04, 1.0 } }
+  local res803 = N.applyVehicleLivery(803, e803)
+  T.check(res803.applied == 'fallback_paint' and #pmCalls == 2 and pmCalls[2].kind == 'setConfigPaints',
+    'applyVehicleLivery: falls back to M.COURIER_PAINTS only when no delivery paint_design part exists')
+
+  for k, val in pairs(sgPm) do _G[k] = val end
+
+  -- buildTrafficRoster with installedParts injects paintDesign and preserves paint == nil
+  local rDyn = N.buildTrafficRoster('DE', {
+    { model = 'van', config = 'h15_vanster', name = 'H15 Vanster' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+  }, false, { size = 6, urban = true, installedParts = { van = vanParts } })
+  local dynCourier = nil
+  for _, e in ipairs(rDyn) do if e.archetype == 'courier' then dynCourier = e; break end end
+  T.check(dynCourier ~= nil and dynCourier.paintDesign ~= nil and dynCourier.hasDeliveryLivery == true
+    and dynCourier.paint == nil and rDyn.counts.police == 0,
+    'buildTrafficRoster: dynamic paint_design injection sets paintDesign, paint == nil, and Police == 0')
+
+  -- 8c. Coexistence of rural H-Series minibus & urban heavy transit bus under 'bus' persona
+  local busMixPool = {
+    { model = 'citybus', config = 'city', name = 'City Transit Bus' },
+    { model = 'wentward', config = 'metro_shuttle', name = 'Metro Shuttle' },
+    { model = 'van', config = 'h25_passenger', name = 'H25 Passenger Minibus' },
+    { model = 'van', config = 'h15_vanster', name = 'H15 Vanster Cargo' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+  }
+  for i = 1, 10 do
+    busMixPool[#busMixPool + 1] = { model = 'vivace', config = 'comm_' .. tostring(i), name = 'Vivace ' .. tostring(i) }
+  end
+  local rUrbanBus = N.buildTrafficRoster('DE', busMixPool, false, { size = 8, urban = true })
+  local rRuralMinibus = N.buildTrafficRoster('DE', busMixPool, false, { size = 8, urban = false })
+  local urbanBusEntry, ruralBusEntry = nil, nil
+  for _, e in ipairs(rUrbanBus) do if e.archetype == 'bus' then urbanBusEntry = e; break end end
+  for _, e in ipairs(rRuralMinibus) do if e.archetype == 'bus' then ruralBusEntry = e; break end end
+  T.check(urbanBusEntry ~= nil and (urbanBusEntry.model == 'citybus' or urbanBusEntry.model == 'wentward')
+    and rUrbanBus.counts.bus == 1 and rUrbanBus.counts.police == 0,
+    'bus coexistence (urban): selects heavy citybus/wentward with strict Police == 0')
+  T.check(ruralBusEntry ~= nil and ruralBusEntry.model == 'van' and ruralBusEntry.config == 'h25_passenger'
+    and ruralBusEntry.liveryTag == 'minibus' and rRuralMinibus.counts.bus == 1 and rRuralMinibus.counts.police == 0,
+    'bus coexistence (rural size >= 6): selects H-Series passenger minibus with strict Police == 0')
+
+  -- Urban fallback to H-Series minibus when no citybus/wentward exists
+  local minibusOnlyPool = {
+    { model = 'van', config = 'h25_passenger', name = 'H25 Passenger Minibus' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+  }
+  local rUrbanFallback = N.buildTrafficRoster('DE', minibusOnlyPool, false, { size = 6, urban = true })
+  local fbBus = nil
+  for _, e in ipairs(rUrbanFallback) do if e.archetype == 'bus' then fbBus = e; break end end
+  T.check(fbBus ~= nil and fbBus.model == 'van' and fbBus.config == 'h25_passenger',
+    'bus coexistence (urban fallback): falls back to H-Series minibus when citybus/wentward unavailable')
+
+  -- H-Series minibus gets 'bus' persona and executes identical stepBusStop() lifecycle
+  local pMini = N.assignVehiclePersona(88, 'van', 'h25_passenger', false)
+  T.check(pMini.persona == 'bus' and pMini.laneBias == 'right' and pMini.overtakeAllowed == false,
+    'minibus persona: H-Series passenger receives bus persona')
+  N.reset()
+  N.onBusStops('rural_tile', { { id = 'village_stop', x = 50, y = 3, z = 0, yaw = 0 } })
+  local mCmds = {}
+  local mObj = { queueLuaCommand = function(_, c) mCmds[#mCmds + 1] = c end }
+  local ms1 = N.stepBusStop(88, 42, 0, 1, 0, 7.0, 200, mObj)
+  local ms2 = N.stepBusStop(88, 46, 0, 1, 0, 0.0, 205.0, mObj)
+  T.check(ms1 == 'stopped' and ms2 == 'released' and #mCmds == 2
+    and mCmds[1]:find('electrics.set_warn_signal(1)', 1, true) ~= nil
+    and mCmds[2]:find('electrics.set_warn_signal(0)', 1, true) ~= nil,
+    'minibus bus-stop: executes identical stepBusStop pull-over, hazards, dwell, and release')
+  N.reset()
+
+  -- 8d. Village-only delivery point extraction & courier stop speed/limit gating
+  local R = require('beamngEarth/roads')
+  -- Isolated rural farmstead (only 2 buildings within 120 m) -> 0 delivery points
+  local ruralPts = R.extractDeliveryPoints('rural_isolated', {
+    buildings = {
+      { x = 0, y = 0, z = 0 },
+      { x = 40, y = 0, z = 0 },
+    },
+  }, nil)
+  T.check(#ruralPts == 0, 'extractDeliveryPoints: rejects isolated rural buildings (< 3 buildings within 120 m)')
+
+  -- Built-up village cluster (>= 3 buildings within 120 m) on residential street -> accepted;
+  -- motorway/trunk/primary stretches -> excluded
+  local villagePts = R.extractDeliveryPoints('village_cluster', {
+    buildings = {
+      { x = 0, y = 0, z = 0, highway = 'residential' },
+      { x = 45, y = 0, z = 0, highway = 'residential' },
+      { x = 90, y = 0, z = 0, highway = 'primary' },
+      { x = 45, y = 45, z = 0, highway = 'motorway' },
+    },
+  }, nil)
+  T.check(#villagePts == 2,
+    'extractDeliveryPoints: accepts >= 3 building village cluster and excludes motorway/trunk/primary stretches')
+
+  local trunkTilePts = R.extractDeliveryPoints('trunk_tile', {
+    buildings = {
+      { x = 0, y = 0, z = 0 },
+      { x = 40, y = 0, z = 0 },
+      { x = 80, y = 0, z = 0 },
+    },
+    roads = {
+      { highway = 'trunk', pts = { { 0, 0 }, { 40, 0 }, { 80, 0 } } },
+    },
+  }, nil)
+  T.check(#trunkTilePts == 0, 'extractDeliveryPoints: excludes delivery points along trunk/motorway/primary road geometry')
+
+  -- stepCourierStop: requires vehicle speed < 12.5 m/s (45 km/h) AND local road speed limit <= 15.3 m/s (55 km/h)
+  N.reset()
+  N.onDeliveryPoints('village_tile', { { id = 'v_drop', x = 100, y = 4, z = 0, yaw = 0 } })
+  local vCmds = {}
+  local vObj = { queueLuaCommand = function(_, c) vCmds[#vCmds + 1] = c end }
+  -- Vehicle speed >= 12.5 m/s (45 km/h): blocked
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 12.5, 300, vObj, 13.9) == 'none' and #vCmds == 0,
+    'stepCourierStop: blocked at vehicle speed >= 12.5 m/s (45 km/h)')
+  -- Rural highway speed limit 100 km/h (27.8 m/s > 15.3 m/s): blocked even at slow vehicle speed
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 27.8) == 'none' and #vCmds == 0,
+    'stepCourierStop: blocked on rural highway (limit 100 km/h > 55 km/h)')
+  -- 60 km/h arterial (16.7 m/s > 15.3 m/s): blocked
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 16.7) == 'none' and #vCmds == 0,
+    'stepCourierStop: blocked when road speed limit > 15.3 m/s (55 km/h)')
+  -- Village 50 km/h street (13.9 m/s <= 15.3 m/s) at 8.0 m/s (< 12.5 m/s): triggers stop!
+  local stVill = N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 13.9)
+  T.check(stVill == 'stopped' and N.isCourierDwelling(90) and #vCmds == 1,
+    'stepCourierStop: triggers curbside stop in 50 km/h village street at < 12.5 m/s')
   N.reset()
 end
 

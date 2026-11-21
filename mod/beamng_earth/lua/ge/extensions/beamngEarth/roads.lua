@@ -982,17 +982,110 @@ function M.extractBusStops(key, data, pl)
 end
 
 -- Extract roadside building/delivery drop points from tile building footprints, addresses, and curbside rows.
--- Capped to ~20 well-spaced points per tile (>= 35 m apart) so couriers stop occasionally along realistic fronts.
+-- Restricted strictly to built-up villages/towns (>= 3 building footprints within 120 m) and excludes
+-- motorway/trunk/primary rural stretches. Capped to ~20 well-spaced points per tile (>= 35 m apart).
 function M.extractDeliveryPoints(key, data, pl)
   local out = {}
   if type(data) ~= 'table' then return out end
   local dyaw = pl and geotile.yawOf(pl) or 0
   local maxPts = 20
   local minSep2 = 35.0 * 35.0
-  local function addPt(x, y, z, yaw, id)
+  local clusterR2 = 120.0 * 120.0
+  local minBuildings = 3
+  local excludedHw = {
+    motorway = true, motorway_link = true,
+    trunk = true, trunk_link = true,
+    primary = true, primary_link = true,
+  }
+  local function isExcludedHw(hw)
+    if type(hw) ~= 'string' or hw == '' then return false end
+    return excludedHw[hw:lower()] == true
+  end
+  if isExcludedHw(data.highway) or isExcludedHw(data.roadClass) then return out end
+
+  -- Gather all building footprint centroids in world coordinates for >= 3 buildings within 120 m check.
+  local bldX, bldY, bldN = {}, {}, 0
+  local function pushBld(x, y, z)
+    if type(x) ~= 'number' or type(y) ~= 'number' then return end
+    if pl then x, y = geotile.apply(pl, x, y, tonumber(z) or 0) end
+    bldN = bldN + 1
+    bldX[bldN], bldY[bldN] = x, y
+  end
+  if type(data.buildings) == 'table' then
+    for _, b in ipairs(data.buildings) do
+      if type(b) == 'table' then
+        if type(b[1]) == 'number' and type(b[2]) == 'number' and type(b[4]) == 'number' and type(b[5]) == 'number' then
+          pushBld((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3])
+        else
+          local x, y = tonumber(b.x or b.cx or b[1]), tonumber(b.y or b.cy or b[2])
+          if x and y then pushBld(x, y, b.z or b[3]) end
+        end
+      end
+    end
+  end
+  if type(data.colliders) == 'table' then
+    local boxes = type(data.colliders.bld) == 'table' and data.colliders.bld
+      or (type(data.colliders.bldcol) == 'table' and data.colliders.bldcol or nil)
+    if boxes then
+      for _, b in ipairs(boxes) do
+        if type(b) == 'table' and type(b[1]) == 'number' and type(b[2]) == 'number'
+            and type(b[4]) == 'number' and type(b[5]) == 'number' then
+          pushBld((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3])
+        end
+      end
+    end
+  end
+  if bldN < minBuildings then return out end
+
+  -- Optional road-class proximity check if tile carries road/way geometry with highway class tags.
+  local roadSrc = type(data.roads) == 'table' and data.roads or (type(data.ways) == 'table' and data.ways or nil)
+  local function onExcludedRoad(x, y)
+    if not roadSrc then return false end
+    local bestD2, bestExcl = 40.0 * 40.0, false
+    for _, r in ipairs(roadSrc) do
+      if type(r) == 'table' then
+        local hw = r.highway or r.roadClass or r.class
+        local pts = type(r.pts) == 'table' and r.pts or (type(r.nodes) == 'table' and r.nodes or nil)
+        if type(hw) == 'string' and pts then
+          local excl = isExcludedHw(hw)
+          for _, pt in ipairs(pts) do
+            if type(pt) == 'table' then
+              local rx, ry = tonumber(pt.x or pt[1]), tonumber(pt.y or pt[2])
+              if rx and ry then
+                if pl then rx, ry = geotile.apply(pl, rx, ry, tonumber(pt.z or pt[3]) or 0) end
+                local dx, dy = x - rx, y - ry
+                local d2 = dx * dx + dy * dy
+                if d2 < bestD2 then
+                  bestD2, bestExcl = d2, excl
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    return bestExcl
+  end
+
+  local function hasBuiltUpCluster(x, y)
+    local count = 0
+    for i = 1, bldN do
+      local dx, dy = x - bldX[i], y - bldY[i]
+      if dx * dx + dy * dy <= clusterR2 then
+        count = count + 1
+        if count >= minBuildings then return true end
+      end
+    end
+    return false
+  end
+
+  local function addPt(x, y, z, yaw, id, hw)
     if #out >= maxPts or type(x) ~= 'number' or type(y) ~= 'number' then return end
+    if isExcludedHw(hw) then return end
     z = tonumber(z) or 0
     if pl then x, y, z = geotile.apply(pl, x, y, z) end
+    if not hasBuiltUpCluster(x, y) then return end
+    if onExcludedRoad(x, y) then return end
     for j = 1, #out do
       local dx, dy = x - out[j].x, y - out[j].y
       if dx * dx + dy * dy < minSep2 then return end
@@ -1011,7 +1104,8 @@ function M.extractDeliveryPoints(key, data, pl)
         if type(s) == 'table' then
           local x, y = tonumber(s.x or s[1]), tonumber(s.y or s[2])
           if x and y then
-            addPt(x, y, s.z or s[3], s.yaw or s[4], s.id or (tostring(key) .. ':a' .. tostring(i)))
+            addPt(x, y, s.z or s[3], s.yaw or s[4], s.id or (tostring(key) .. ':a' .. tostring(i)),
+              s.highway or s.roadClass or s.class)
           end
         end
       end
@@ -1021,12 +1115,13 @@ function M.extractDeliveryPoints(key, data, pl)
     for i, b in ipairs(data.buildings) do
       if #out >= maxPts then break end
       if type(b) == 'table' then
+        local hw = b.highway or b.roadClass or b.class
         if type(b[1]) == 'number' and type(b[2]) == 'number' and type(b[4]) == 'number' and type(b[5]) == 'number' then
-          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bf' .. tostring(i))
+          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bf' .. tostring(i), hw)
         else
           local x, y = tonumber(b.x or b.cx or b[1]), tonumber(b.y or b.cy or b[2])
           if x and y then
-            addPt(x, y, b.z or b[3], b.yaw or b[4], b.id or (tostring(key) .. ':b' .. tostring(i)))
+            addPt(x, y, b.z or b[3], b.yaw or b[4], b.id or (tostring(key) .. ':b' .. tostring(i)), hw)
           end
         end
       end
@@ -1040,7 +1135,7 @@ function M.extractDeliveryPoints(key, data, pl)
         if #out >= maxPts then break end
         if type(b) == 'table' and type(b[1]) == 'number' and type(b[2]) == 'number'
             and type(b[4]) == 'number' and type(b[5]) == 'number' then
-          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bc' .. tostring(i))
+          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bc' .. tostring(i), b.highway)
         end
       end
     end
@@ -1049,7 +1144,7 @@ function M.extractDeliveryPoints(key, data, pl)
     for i, r in ipairs(data.park) do
       if #out >= maxPts then break end
       if type(r) == 'table' and type(r[1]) == 'number' and type(r[2]) == 'number' then
-        addPt(r[1], r[2], r[3], r[4], tostring(key) .. ':pk' .. tostring(i))
+        addPt(r[1], r[2], r[3], r[4], tostring(key) .. ':pk' .. tostring(i), r.highway or r.roadClass)
       end
     end
   end
