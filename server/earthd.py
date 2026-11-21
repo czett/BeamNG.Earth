@@ -3581,6 +3581,11 @@ class Server:
             )
             if de_rw_props:
                 props = (props or []) + de_rw_props
+            de_rest_props = de_enhancer.build_rest_areas(
+                self.mapdata, anchor.frame, tx, ty, box, near_roads, de_rings, _de_ground, de_detail=de_detail
+            )
+            if de_rest_props:
+                props = (props or []) + de_rest_props
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
                                    rail_mesh=rmesh, guardrail_rows=guardrail_rows, garage_sound=garage_sound,
