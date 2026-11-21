@@ -25,8 +25,12 @@
       </div>
 
       <div class="rd-toggles">
+        <label class="rd-roam-label" title="Show the Car Radio HUD widget and scan local stations while driving (opt-in)">
+          <input type="checkbox" :checked="!!st.enabled" @change="e => setEnabled(e.target.checked)" />
+          <span>Show Radio HUD</span>
+        </label>
         <label class="rd-roam-label" title="Automatically switch to a matching-genre station when leaving a local station's area">
-          <input type="checkbox" :checked="st.autoRoam !== false" @change="e => setAutoRoam(e.target.checked)" />
+          <input type="checkbox" :checked="st.autoRoam !== false" :disabled="!st.enabled" @change="e => setAutoRoam(e.target.checked)" />
           <span>Auto-Roam</span>
         </label>
         <div class="rd-vol-wrap">
@@ -37,13 +41,15 @@
             max="1"
             step="0.02"
             :value="st.volume ?? 0.55"
+            :disabled="!st.enabled"
             @input="e => setVolume(e.target.value)"
             class="rd-vol"
           />
         </div>
       </div>
 
-      <div v-if="stations.length" class="rd-list">
+      <div v-if="!st.enabled" class="rd-empty">Car Radio HUD is hidden by default. Enable "Show Radio HUD" above to scan stations and stream audio.</div>
+      <div v-else-if="stations.length" class="rd-list">
         <button
           v-for="s in stations"
           :key="s.id"
@@ -71,7 +77,7 @@
 import { computed, onMounted, onUnmounted } from "vue"
 import {
   radioState, radioError, toArray, start, stop,
-  togglePlay, nextStation, prevStation, selectStation, setVolume, setAutoRoam, refreshStations,
+  togglePlay, nextStation, prevStation, selectStation, setVolume, setAutoRoam, setEnabled, refreshStations,
 } from "./earthRadioStore.js"
 
 const props = defineProps({

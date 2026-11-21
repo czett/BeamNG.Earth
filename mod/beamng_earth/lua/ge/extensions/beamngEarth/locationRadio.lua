@@ -11,7 +11,7 @@ M.PREFS_FILE = '/settings/beamngEarth_radio.json'
 M.VERSION = 1
 
 local state = {
-  enabled = true,
+  enabled = false,
   playing = false,
   volume = 0.55,
   autoRoam = true,
@@ -220,6 +220,7 @@ end
 
 function M.refresh()
   ensurePrefs()
+  if not state.enabled then return false end
   local core = rawget(_G, 'beamngEarth_core')
   local st = core and core._state and core._state() or nil
   local pl = st and st.player
@@ -287,6 +288,7 @@ end
 
 function M.selectStation(id)
   ensurePrefs()
+  if not state.enabled then return false end
   local idx = findStationIndex(state.stations, tostring(id or ''))
   if idx <= 0 then return false end
   state.currentIndex = idx
@@ -322,6 +324,7 @@ end
 
 function M.togglePlay()
   ensurePrefs()
+  if not state.enabled then return false end
   if not state.currentStation and #state.stations > 0 then
     state.currentIndex = 1
     state.currentStation = state.stations[1]
@@ -396,6 +399,7 @@ function M.hudPayload()
   end
   return {
     enabled = state.enabled,
+    visible = state.enabled,
     playing = state.playing,
     volume = state.volume,
     autoRoam = state.autoRoam,
@@ -415,6 +419,7 @@ function M.uiState()
   ensurePrefs()
   local p = M.hudPayload() or {
     enabled = state.enabled,
+    visible = state.enabled,
     playing = false,
     volume = state.volume,
     autoRoam = state.autoRoam,
@@ -451,7 +456,7 @@ function M.reset()
 end
 
 function M._resetForTest()
-  state.enabled = true
+  state.enabled = false
   state.playing = false
   state.volume = 0.55
   state.autoRoam = true

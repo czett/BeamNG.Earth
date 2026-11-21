@@ -14,7 +14,7 @@ angular.module('beamng.apps')
   return {
     template:
       '<div class="bngApp" style="width:100%;height:100%;background:transparent;box-shadow:none;overflow:visible;">' +
-        '<div ng-if="radio && radio.enabled && !hidden" style="' + CARD + '">' +
+        '<div ng-if="radio && radio.enabled && radio.visible !== false && !hidden" style="' + CARD + '">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px;">' +
             '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
               '<span style="font-weight:700;font-size:12px;color:#38bdf8;white-space:nowrap;' + NUM + '">{{ freqText }}</span>' +
@@ -252,9 +252,10 @@ angular.module('beamng.apps')
       scope.$on('BeamNGEarthHud', function (event, data) {
         scope.$evalAsync(function () {
           var r = (data && data.radio) || null
-          scope.radio = r
+          var active = !!(r && r.enabled && r.visible !== false)
+          scope.radio = active ? r : null
           scope.hidden = !!(data && data.hidden)
-          if (r) {
+          if (active) {
             if (r.volume != null && Math.abs(Number(scope.volUi) - Number(r.volume)) > 0.02) {
               ignoreNextVol = true
               scope.volUi = Number(r.volume)

@@ -28,6 +28,32 @@ beamngEarth_core = {
 
 LR._resetForTest()
 
+-- 0. Opt-in only: defaults to hidden (visible == false / enabled == false) and does not poll or render
+do
+  local st0 = LR.uiState()
+  T.check(st0.enabled == false and st0.visible == false, 'radio defaults to hidden / opt-in (enabled == false, visible == false)')
+  T.check(LR.hudPayload() == nil, 'hudPayload returns nil while radio is hidden/disabled')
+  T.check(not LR.update(0.1, { lat = 51.5136, lon = 7.4653 }, 5.0) and #sentReqs == 0, 'does not poll while hidden/disabled')
+  T.check(not LR.refresh() and #sentReqs == 0, 'refresh does not poll while hidden/disabled')
+  T.check(LR.togglePlay() == false and LR.uiState().playing == false, 'togglePlay does not start playback while hidden/disabled')
+
+  local sentHiddenHud = {}
+  guihooks = { trigger = function(name, p) sentHiddenHud[#sentHiddenHud + 1] = { name = name, p = p } end }
+  H._reset()
+  H.setMounted('radio', true)
+  local hiddenGet = function()
+    return { status = '', credits = '', banner = { text = '', level = 'info', visible = false }, radio = LR.hudPayload() }
+  end
+  T.check(H.update(0.5, hiddenGet) and #sentHiddenHud == 1 and sentHiddenHud[1].p.radio == nil, 'hudapps omits radio payload while disabled')
+  H._reset()
+  guihooks = nil
+end
+
+-- Explicitly enable radio before testing polling, switching, and HUD forwarding
+T.check(LR.setEnabled(true) == true, 'setEnabled(true) opts in')
+T.check(LR.uiState().enabled == true and LR.uiState().visible == true, 'enabled and visible after opt-in')
+T.check(LR.hudPayload() ~= nil and LR.hudPayload().visible == true, 'hudPayload populated with visible=true once enabled')
+
 -- 1. Polling cadence: initial fix triggers request, within 4 s throttled, < 2.5 km skipped, > 2.5 km triggers
 T.check(LR.update(0.1, { lat = 51.5136, lon = 7.4653 }, 10.0) and #sentReqs == 1, 'initial position sends radio_stations_request')
 T.check(not LR.update(0.1, { lat = 51.6000, lon = 7.6000 }, 11.0) and #sentReqs == 1, 'throttled within POLL_S (4 s)')
@@ -110,5 +136,12 @@ T.check(H.update(1.0, hudGet) and #sentHud == 1 and sentHud[1].p.radio.currentSt
 T.check(not H.update(1.5, hudGet) and #sentHud == 1, 'hudapps skips unchanged radio state')
 LR.nextStation()
 T.check(H.update(2.0, hudGet) and #sentHud == 2 and sentHud[2].p.radio.currentStationId == 'do-wdr4', 'hudapps re-emits when radio station changes')
+
+-- 7. Disabling hides HUD, stops playback, and halts polling
+T.check(LR.setEnabled(false) == false, 'setEnabled(false) disables radio')
+T.check(LR.uiState().visible == false and LR.uiState().playing == false and LR.uiState().streamStatus == 'STOPPED', 'disabling stops playback and hides HUD')
+T.check(LR.hudPayload() == nil, 'hudPayload returns nil after disabling')
+local reqsBefore = #sentReqs
+T.check(not LR.update(0.1, { lat = 52.5200, lon = 13.4050 }, 30.0) and #sentReqs == reqsBefore, 'polling stops after disabling')
 
 T.done('test_location_radio')
