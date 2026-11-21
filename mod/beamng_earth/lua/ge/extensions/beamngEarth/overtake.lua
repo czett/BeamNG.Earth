@@ -37,14 +37,31 @@ M.GIVE_UP_S = 25
 M.MERGE_RIGHT_S = 2.0
 M.SPEEDER_HELD_S = 0.8
 M.SPEEDER_LOOK_M = 80
+M.MAX_LANE_CHANGE_SPEED_MS = 25.0   -- 90 km/h: suppress forced ai.laneChange impulses at or above this speed
+M.MAX_LANE_CHANGE_LIMIT_MS = 27.7   -- 100 km/h: suppress forced ai.laneChange impulses on high-speed roads
 
 local held = {}         -- car id -> os.clock() it started being held
 local passing = {}      -- car id -> { lead, at }: passing it
 local lastPass = {}     -- car id -> os.clock() of its last pass
 local lastLaneChange = {} -- car id -> os.clock() of its last lane change (pass or merge-right)
 local campSince = {}    -- car id -> os.clock() it has been camping in a passing lane with no lead car
+local laneHoldSent = {} -- car id -> true once ai.driveInLane("on") has been enforced on highway/high-speed road
 local lastScan = -math.huge
 local stats = { passes = 0, mergesRight = 0 }
+
+-- Pure: true when forced ai.laneChange impulses must be suppressed (highways/Autobahns, >= 90 km/h, or >= 100 km/h limit).
+function M.shouldSuppressLaneChange(v, limit, roadProfile)
+  if type(roadProfile) == 'table' and (roadProfile.highway == true or roadProfile.unlimited == true) then
+    return true
+  end
+  if (tonumber(v) or 0) >= M.MAX_LANE_CHANGE_SPEED_MS then
+    return true
+  end
+  if (tonumber(limit) or 0) >= M.MAX_LANE_CHANGE_LIMIT_MS then
+    return true
+  end
+  return false
+end
 
 -- Pure: dynamic speed-scaled overtake lookahead distance (m): math.max(80, v * 2.2).
 function M.lookaheadFor(v)
@@ -144,7 +161,8 @@ local function onRoad(m, o, p, f)
   if radius <= 0 then radius = e.inRadius or 0 end
   local k, w = M.laneOf(lat, radius, n)
   if not k then return nil end
-  return { n = n, k = k, w = w, lat = lat, limit = e.speedLimit or 0, dir = d, right = r }
+  return { n = n, k = k, w = w, lat = lat, limit = e.speedLimit or 0, dir = d, right = r,
+           highway = e.highway == true, unlimited = e.unlimited == true }
 end
 
 -- Is a scan due (navgraph's overtakeScan asks first: the traffic list and the snapshots it builds for a scan are
@@ -182,6 +200,15 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       if not c.passer then return end
       local road = onRoad(m, c.o, c.p, c.f)
       if not road then held[c.id], passing[c.id], campSince[c.id] = nil, nil, nil return end
+      if M.shouldSuppressLaneChange(c.v, road.limit, road) then
+        held[c.id], passing[c.id], campSince[c.id] = nil, nil, nil
+        if not laneHoldSent[c.id] then
+          laneHoldSent[c.id] = true
+          c.o:queueLuaCommand('ai.driveInLane("on")')
+        end
+        return
+      end
+      laneHoldSent[c.id] = nil
       local pinfo = personaFn and personaFn(c.id) or nil
       local pkind = pinfo and pinfo.persona or nil
       local isSpeeder = pkind == 'speeder'
@@ -268,12 +295,17 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       lastPass[id], lastLaneChange[id], held[id], passing[id], campSince[id] = nil, nil, nil, nil, nil
     end
   end
+  for id in pairs(laneHoldSent) do
+    if not carIds[id] and id ~= playerAuto then
+      laneHoldSent[id] = nil
+    end
+  end
 end
 
 function M.status() return { passes = stats.passes, mergesRight = stats.mergesRight or 0 } end
 
 function M.reset()
-  held, passing, lastPass, lastLaneChange, campSince, lastScan = {}, {}, {}, {}, {}, -math.huge
+  held, passing, lastPass, lastLaneChange, campSince, laneHoldSent, lastScan = {}, {}, {}, {}, {}, {}, -math.huge
 end
 
 return M

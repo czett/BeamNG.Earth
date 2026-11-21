@@ -51,4 +51,99 @@ T.check(O.laneChangeReady(nil, 100), 'laneChangeReady: true with no prior change
 T.check(not O.laneChangeReady(100, 101.5), 'laneChangeReady: blocked within 2.0 s cooldown')
 T.check(O.laneChangeReady(100, 102.0), 'laneChangeReady: ready at >= 2.0 s cooldown')
 
+-- Autobahn stability: suppress forced ai.laneChange impulses on highways and >= 90 km/h (25 m/s) / >= 100 km/h limit
+T.check(O.shouldSuppressLaneChange(15, 22, { highway = true }),
+  'shouldSuppressLaneChange: suppressed on highway regardless of speed')
+T.check(O.shouldSuppressLaneChange(15, 22, { unlimited = true }),
+  'shouldSuppressLaneChange: suppressed on unlimited Autobahn')
+T.check(O.shouldSuppressLaneChange(25.0, 22, { highway = false }),
+  'shouldSuppressLaneChange: suppressed at >= 25 m/s (90 km/h)')
+T.check(O.shouldSuppressLaneChange(18.0, 27.7, { highway = false }),
+  'shouldSuppressLaneChange: suppressed when road limit >= 27.7 m/s (100 km/h)')
+T.check(not O.shouldSuppressLaneChange(16.0, 22.2, { highway = false, unlimited = false }),
+  'shouldSuppressLaneChange: active on non-highway rural/urban roads < 90 km/h')
+
+-- End-to-end overtake.update: highway & >= 90 km/h suppress ai.laneChange and enforce ai.driveInLane("on"),
+-- while rural/urban < 90 km/h passing remains intact.
+do
+  local sg = { map = rawget(_G, 'map'), getObjectByID = rawget(_G, 'getObjectByID'), vec3 = rawget(_G, 'vec3') }
+  local vecMt
+  vecMt = {
+    __sub = function(a, b) return setmetatable({ x = a.x - b.x, y = a.y - b.y, z = (a.z or 0) - (b.z or 0) }, vecMt) end,
+    __index = {
+      length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + (s.z or 0) * (s.z or 0)) end,
+      dot = function(a, b) return a.x * b.x + a.y * b.y + (a.z or 0) * (b.z or 0) end,
+      normalized = function(s)
+        local l = s:length()
+        if l < 1e-9 then return setmetatable({ x = 0, y = 0, z = 0 }, vecMt) end
+        return setmetatable({ x = s.x / l, y = s.y / l, z = (s.z or 0) / l }, vecMt)
+      end,
+    },
+  }
+  vec3 = function(x, y, z) return setmetatable({ x = x, y = y, z = z or 0 }, vecMt) end
+
+  local function runScenario(edgeOpts, passerV, leadV)
+    O.reset()
+    local edge = {
+      inNode = 'a', outNode = 'b', oneWay = true, lanes = '++',
+      speedLimit = edgeOpts.limit, inRadius = 3.6, outRadius = 3.6,
+      highway = edgeOpts.highway, unlimited = edgeOpts.unlimited,
+    }
+    local nodes = {
+      a = { pos = vec3(0, 0, 0), radius = 3.6, links = { b = edge } },
+      b = { pos = vec3(500, 0, 0), radius = 3.6, links = { a = edge } },
+    }
+    map = {
+      getMap = function() return { nodes = nodes } end,
+      findClosestRoad = function() return 'a', 'b' end,
+    }
+    local cmds = {}
+    -- Eastbound road (dir = +x, right = -y): right lane centre at y = -1.8 (lat = +1.8)
+    local objs = {
+      [1] = {
+        getActive = function() return true end,
+        getPosition = function() return vec3(100, -1.8, 0) end,
+        getDirectionVector = function() return vec3(1, 0, 0) end,
+        getVelocity = function() return vec3(passerV, 0, 0) end,
+        queueLuaCommand = function(_, c) cmds[#cmds + 1] = c end,
+      },
+      [2] = {
+        getActive = function() return true end,
+        getPosition = function() return vec3(125, -1.8, 0) end,
+        getDirectionVector = function() return vec3(1, 0, 0) end,
+        getVelocity = function() return vec3(leadV, 0, 0) end,
+        queueLuaCommand = function() end,
+      },
+    }
+    getObjectByID = function(id) return objs[id] end
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil)
+    local laneChangeCount, driveInLaneCount = 0, 0
+    for _, c in ipairs(cmds) do
+      if c:find('ai.laneChange', 1, true) then laneChangeCount = laneChangeCount + 1 end
+      if c:find('ai.driveInLane("on")', 1, true) then driveInLaneCount = driveInLaneCount + 1 end
+    end
+    return laneChangeCount, driveInLaneCount
+  end
+
+  local hwyLC, hwyHold = runScenario({ highway = true, unlimited = true, limit = 36.11 }, 20, 15)
+  T.check(hwyLC == 0 and hwyHold == 1,
+    'overtake.update (highway): suppresses ai.laneChange and enforces ai.driveInLane("on")')
+
+  local fastLC, fastHold = runScenario({ highway = false, unlimited = false, limit = 22.2 }, 26, 16)
+  T.check(fastLC == 0 and fastHold == 1,
+    'overtake.update (>= 90 km/h): suppresses ai.laneChange and enforces ai.driveInLane("on")')
+
+  local highLimLC, highLimHold = runScenario({ highway = false, unlimited = false, limit = 27.8 }, 20, 15)
+  T.check(highLimLC == 0 and highLimHold == 1,
+    'overtake.update (limit >= 100 km/h): suppresses ai.laneChange and enforces ai.driveInLane("on")')
+
+  local urbanLC, urbanHold = runScenario({ highway = false, unlimited = false, limit = 22.2 }, 16, 10)
+  T.check(urbanLC == 1 and urbanHold == 0,
+    'overtake.update (rural/urban < 90 km/h, non-highway): keeps controlled passing intact')
+
+  O.reset()
+  for k, val in pairs(sg) do _G[k] = val end
+end
+
 T.done('test_overtake')

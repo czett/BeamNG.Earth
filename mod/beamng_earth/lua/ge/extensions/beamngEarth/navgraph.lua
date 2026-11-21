@@ -695,7 +695,8 @@ function M.speedProfileAt(x, y, z)
   if not r or r.dist > 35 then return nil end
   return { target = r.speedLimit, posted = r.posted, rough = r.rough, distance = r.dist,
     highway = r.highway == true, unlimited = r.unlimited == true,
-    lanes = r.lanes, lanesOut = r.lanesOut, lanesIn = r.lanesIn }
+    lanes = r.lanes, lanesOut = r.lanesOut, lanesIn = r.lanesIn,
+    dx = r.dx, dy = r.dy, oneWay = r.oneWay }
 end
 
 -- Lane-departure strip metadata for the rumble audio. The server only marks selected country/road classes; only the
@@ -1036,10 +1037,14 @@ end
 M.DIRECTOR_TICK_S = 0.25
 M.HORIZON_SPAWN_MIN_M = 160
 M.HORIZON_SPAWN_MAX_M = 340
+M.HORIZON_HWY_SPAWN_MIN_M = 260
+M.HORIZON_HWY_SPAWN_MAX_M = 420
 M.HORIZON_SAFE_MIN_M = 95
 M.HORIZON_BEHIND_DESPAWN_M = 420
 M.HORIZON_SPAWN_SPACING_M = 140
 M.HORIZON_SPACING_TTL_S = 10.0
+M.HWY_STALL_MIN_MS = 12.0
+M.HWY_BOOST_COOLDOWN_S = 3.0
 
 M.BUS_STOP_RANGE_M = 18.0
 M.BUS_STOP_MAX_SPEED_MS = 14.0
@@ -1148,6 +1153,7 @@ local director = {
   deliveryPointCount = 0,
   courierDwell = {},
   deliveryCooldowns = {},
+  highwayBoostAt = {},
   recentSpawns = {
     { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
     { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
@@ -2224,7 +2230,7 @@ end
 
 -- Pure zero-alloc: forward-biased horizon respawn interval [lo, hi] along unit (hx, hy) from (px, py),
 -- clamped to box b's guard margin and never popping in within < HORIZON_SAFE_MIN_M of player or camera.
-function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY)
+function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY, isHighway)
   local hl = math.sqrt(hx * hx + hy * hy)
   if hl < 1e-6 then return nil end
   hx, hy = hx / hl, hy / hl
@@ -2235,7 +2241,9 @@ function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY)
     if hy > 1e-6 then reach = math.min(reach, (b[4] - py) / hy)
     elseif hy < -1e-6 then reach = math.min(reach, (b[2] - py) / hy) end
   end
-  local hi = math.min(M.HORIZON_SPAWN_MAX_M, reach - M.GUARD_M - 20)
+  local minSpawn = isHighway and M.HORIZON_HWY_SPAWN_MIN_M or M.HORIZON_SPAWN_MIN_M
+  local maxSpawn = isHighway and M.HORIZON_HWY_SPAWN_MAX_M or M.HORIZON_SPAWN_MAX_M
+  local hi = math.min(maxSpawn, reach - M.GUARD_M - 20)
   local safeMin = M.HORIZON_SAFE_MIN_M
   if camX and camY then
     local camAlong = (camX - px) * hx + (camY - py) * hy
@@ -2246,13 +2254,69 @@ function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY)
       if needed > safeMin then safeMin = needed end
     end
   end
-  local lo = math.max(M.HORIZON_SPAWN_MIN_M, safeMin)
+  local lo = math.max(minSpawn, safeMin)
   if hi < lo then
     lo = safeMin
     if hi < lo then return nil end
   end
   return px, py, hx, hy, lo, hi
 end
+
+-- Pure: snap a spawn heading (hx, hy) strictly to the forward tangent of a highway edge
+-- aligned with player travel (never reversed or angled across lanes).
+function M.snapHighwayTangent(hx, hy, roadProfile)
+  local hl = math.sqrt((hx or 0) * (hx or 0) + (hy or 0) * (hy or 0))
+  local ux, uy = hl > 1e-6 and (hx / hl) or 1, hl > 1e-6 and (hy / hl) or 0
+  if type(roadProfile) ~= 'table' or roadProfile.highway ~= true then return ux, uy end
+  local rdx, rdy = tonumber(roadProfile.dx), tonumber(roadProfile.dy)
+  if not rdx or not rdy then return ux, uy end
+  local rl = math.sqrt(rdx * rdx + rdy * rdy)
+  if rl < 1e-6 then return ux, uy end
+  rdx, rdy = rdx / rl, rdy / rl
+  if (rdx * ux + rdy * uy) < 0 then
+    rdx, rdy = -rdx, -rdy
+  end
+  return rdx, rdy
+end
+
+-- Apply an immediate rolling-start velocity along the exact snapped highway tangent so Autobahn/highway
+-- traffic never spawns at 0 km/h (85-90 km/h for trucks/buses; 115-135 km/h for commuters/couriers/speeders).
+function M.applyHighwayRollingStart(vehId, obj, hx, hy, persona, roadProfile)
+  if type(roadProfile) ~= 'table' or roadProfile.highway ~= true then return nil end
+  local sx, sy = M.snapHighwayTangent(hx, hy, roadProfile)
+  local pkind = type(persona) == 'table' and persona.persona or persona
+  local idNum = math.abs(math.floor(tonumber(vehId) or 0))
+  local u = ((idNum * 2654435761 + 31) % 1000) / 1000
+  local targetKph
+  if pkind == 'truck' or pkind == 'bus' then
+    targetKph = 85.0 + u * 5.0
+  elseif pkind == 'courier' then
+    targetKph = 115.0 + u * 8.0
+  elseif pkind == 'speeder' then
+    targetKph = 125.0 + u * 10.0
+  else
+    targetKph = 115.0 + u * 20.0
+  end
+  local targetMs = targetKph / 3.6
+  local threshold = math.max(0, targetMs - 1.0)
+  local cmd = string.format(
+    'local _dir=vec3(%.6f,%.6f,0); local _v=obj:getVelocity(); local _f=_v:dot(_dir); '
+    .. 'if _f<%.3f and thrusters and type(thrusters.applyVelocity)=="function" then '
+    .. 'local _ok=pcall(thrusters.applyVelocity,_dir*%.3f); if _ok then pcall(function() '
+    .. 'if not beamngEarth_spawnMotion then extensions.load("beamngEarth_spawnMotion") end; '
+    .. 'if beamngEarth_spawnMotion then beamngEarth_spawnMotion.applyRollingSpeed(%.3f) end end) end end '
+    .. 'ai.driveInLane("on") ai.setSpeedMode("legal") ai.setSpeed(%.3f)',
+    sx, sy, threshold, targetMs, targetMs, targetMs
+  )
+  local targetObj = obj or (getObjectByID and getObjectByID(vehId)) or nil
+  if targetObj and targetObj.queueLuaCommand then
+    targetObj:queueLuaCommand(cmd)
+    stats.highwayRollingStarts = (stats.highwayRollingStarts or 0) + 1
+  end
+  return targetMs, cmd, sx, sy
+end
+
+local nearJunction
 
 -- Throttled (~4 Hz) zero-GC traffic director: persona sync, bus stop dwell, and behind-player horizon recycling.
 function M.updateTrafficDirector(dtReal, player, box)
@@ -2320,6 +2384,9 @@ function M.updateTrafficDirector(dtReal, player, box)
   end
   for id in pairs(director.courierDwell) do
     if data[id] == nil then director.courierDwell[id] = nil end
+  end
+  for id in pairs(director.highwayBoostAt) do
+    if data[id] == nil then director.highwayBoostAt[id] = nil end
   end
 
   localplayers.snapshot(controlled)
@@ -2390,14 +2457,39 @@ function M.updateTrafficDirector(dtReal, player, box)
           M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o, roadLimitMs)
         end
 
-        -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m, >= 140 m spacing)
+        -- 3. Behind-player horizon recycling into forward cone ([160, 340] m standard, [260, 420] m highway)
+        local recycled = false
         if hasHeading and not director.busDwell[id] and not director.courierDwell[id]
             and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
             and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
-          local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY)
+          local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, false)
           if ax and gt.forceTeleport then
             local mid = (alo + ahi) * 0.5
             local sx, sy = ax + ahx * mid, ay + ahy * mid
+            local targetRoad = nil
+            if map and map.getMap then
+              local rT = closestRoad(sx, sy, pz)
+              if rT and rT.dist <= 35 then
+                targetRoad = rT
+              else
+                local rP = closestRoad(px, py, pz)
+                if rP and rP.dist <= 35 then targetRoad = rP end
+              end
+            end
+            if targetRoad and targetRoad.highway == true then
+              local hax, hay, hahx, hahy, halo, hahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, true)
+              if hax then
+                ax, ay, ahx, ahy, alo, ahi = hax, hay, hahx, hahy, halo, hahi
+                mid = (alo + ahi) * 0.5
+                sx, sy = ax + ahx * mid, ay + ahy * mid
+                local rH = closestRoad(sx, sy, pz)
+                if rH and rH.dist <= 35 and rH.highway == true then
+                  targetRoad = rH
+                end
+              end
+              ahx, ahy = M.snapHighwayTangent(ahx, ahy, targetRoad)
+              sx, sy = ax + ahx * mid, ay + ahy * mid
+            end
             if M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
               lastTeleport[id] = now
               stillSince[id] = nil
@@ -2407,9 +2499,31 @@ function M.updateTrafficDirector(dtReal, player, box)
               rec.x, rec.y, rec.at = sx, sy, now
               stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
               pcall(gt.forceTeleport, id, vec3(ax, ay, pz), vec3(ahx, ahy, 0), alo, ahi)
+              recycled = true
+              if targetRoad and targetRoad.highway == true then
+                M.applyHighwayRollingStart(id, o, ahx, ahy, curP, targetRoad)
+                director.highwayBoostAt[id] = now
+              end
               if lightsOn and o.queueLuaCommand then
                 o:queueLuaCommand('electrics.setLightsState(1)')
               end
+            end
+          end
+        end
+
+        -- 4. Detect newly spawned / stalled highway traffic (< 12 m/s without valid stop reason) and boost into rolling flow
+        if not recycled and sp < M.HWY_STALL_MIN_MS
+            and not director.busDwell[id] and not director.courierDwell[id]
+            and t.respawnActive ~= true and t.state ~= 'disabled' and (tonumber(t.damage) or 0) <= 1000
+            and (now - (director.highwayBoostAt[id] or -math.huge)) >= M.HWY_BOOST_COOLDOWN_S then
+          if road == nil and map and map.getMap then road = closestRoad(p.x, p.y, p.z) end
+          if road and road.dist <= 35 and road.highway == true and not nearJunction(p.x, p.y, M.LAUNCH_JUNCTION_M) then
+            local alignDot = dx * road.dx + dy * road.dy
+            local aligned = (road.oneWay and alignDot >= 0.5) or (not road.oneWay and math.abs(alignDot) >= 0.5)
+            if aligned then
+              local bx, by = M.snapHighwayTangent(dx, dy, road)
+              M.applyHighwayRollingStart(id, o, bx, by, curP, road)
+              director.highwayBoostAt[id] = now
             end
           end
         end
@@ -2749,7 +2863,7 @@ end
 local launchCount, launchWait, lastLaunchScan = {}, {}, -math.huge
 local junctionNodes, junctionOf = nil, nil   -- (the graph's nodes where 3+ roads meet: positions, per graph table)
 
-local function nearJunction(x, y, radius)
+nearJunction = function(x, y, radius)
   if not graph then return false end
   if junctionOf ~= graph then
     local deg = {}
@@ -3000,6 +3114,7 @@ function M.reset()
   director.deliveryPointCount = 0
   director.courierDwell = {}
   director.deliveryCooldowns = {}
+  director.highwayBoostAt = {}
   director.recentSpawnIdx = 0
   for i = 1, #director.recentSpawns do director.recentSpawns[i].at = -1e9 end
   M.restoreChoice()
