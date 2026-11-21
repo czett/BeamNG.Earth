@@ -16,7 +16,7 @@ import germany
 
 log = logging.getLogger("earthd.de_enhancer")
 
-PACKAGE_VERSION = 4
+PACKAGE_VERSION = 5
 
 
 def enabled() -> bool:
@@ -247,6 +247,43 @@ def build_roadworks(
     except Exception as ex:
         log.warning("de_enhancer roadworks: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         return [], []
+
+
+def build_rest_areas(
+    md,
+    frame,
+    tx,
+    ty,
+    box,
+    near_roads,
+    rings,
+    ground,
+    de_detail=None,
+):
+    """Build German Autobahn rest-area & parking-area props (`Raststätten & Parkplätze`)."""
+    if not enabled() or md is None or not near_roads or not in_germany(frame, box):
+        return []
+    try:
+        from de_street_enhancer.hooks import build_rest_areas as _build_rest_areas
+        safe_ground = (
+            (lambda x, y: np.zeros(0, np.float64) if np.asarray(x).size == 0 else ground(x, y))
+            if ground is not None
+            else None
+        )
+        return _build_rest_areas(
+            md,
+            frame,
+            tx,
+            ty,
+            box,
+            near_roads,
+            rings,
+            safe_ground,
+            de_detail=de_detail,
+        )
+    except Exception as ex:
+        log.warning("de_enhancer rest_areas: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
+        return []
 
 
 def finish_streets_and_yards(

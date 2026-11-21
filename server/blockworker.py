@@ -1977,6 +1977,11 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
         )
         if de_rw_props:
             props = (props or []) + de_rw_props
+        de_rest_props = de_enhancer.build_rest_areas(
+            _s.md, frame, tx, ty, box, near_roads, de_rings, _de_ground, de_detail=de_detail
+        )
+        if de_rest_props:
+            props = (props or []) + de_rest_props
     P.de_streets, P.de_shops, P.de_faces = de_streets_blob, de_shops_blob, (de_faces_map or None)
     P.de_speed_cameras = de_speed_cameras
     P.de_roadworks = de_roadworks

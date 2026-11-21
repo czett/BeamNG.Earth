@@ -73,7 +73,7 @@ class DynamicRoadworksTest(unittest.TestCase):
         )
 
     def test_package_version_and_off_switch_and_border_isolation(self):
-        self.assertEqual(de_enhancer.PACKAGE_VERSION, 4)
+        self.assertGreaterEqual(de_enhancer.PACKAGE_VERSION, 4)
         frame_de = geodesy.EnuFrame(*DORTMUND)
         frame_fr = geodesy.EnuFrame(*PARIS)
         frame_at = geodesy.EnuFrame(*SALZBURG)

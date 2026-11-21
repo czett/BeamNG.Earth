@@ -7,6 +7,7 @@ import numpy as np
 from . import classifier
 from . import furniture_de
 from . import placement
+from . import rest_areas
 from . import roadworks
 from . import speed_cameras
 from . import texture_atlas
@@ -333,6 +334,38 @@ def build_roadworks(
     level, fast_pass = de_enhancer.normalize_detail(de_detail)
     rings_arr = [rr for r in (rings or ()) if (rr := placement._finite_2d(r, min_pts=3)) is not None]
     return roadworks.plan_de_roadworks(
+        md,
+        frame,
+        box,
+        near_roads,
+        rings_arr,
+        ground,
+        tx=tx,
+        ty=ty,
+        level=level,
+        fast_pass=fast_pass,
+    )
+
+
+def build_rest_areas(
+    md,
+    frame,
+    tx,
+    ty,
+    box: tuple[float, float, float, float],
+    near_roads: list,
+    rings: list[np.ndarray] | None,
+    ground,
+    de_detail=None,
+) -> list[list]:
+    """Build German Autobahn rest-area & parking-area props (`Raststätten & Parkplätze`)."""
+    import de_enhancer
+
+    if md is None or not near_roads:
+        return []
+    level, fast_pass = de_enhancer.normalize_detail(de_detail)
+    rings_arr = [rr for r in (rings or ()) if (rr := placement._finite_2d(r, min_pts=3)) is not None]
+    return rest_areas.plan_de_rest_areas(
         md,
         frame,
         box,
