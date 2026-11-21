@@ -746,14 +746,23 @@ do
     'persona commuter: balanced risk, posted +/-4 km/h, right lane bias')
 
   local pSpeed = N.assignVehiclePersona(14, 'etk800', '856_ttsport', true)
-  T.check(pSpeed.persona == 'speeder' and pSpeed.risk >= 0.72 and pSpeed.risk <= 0.88
-    and pSpeed.highwayCruiseKph >= 165 and pSpeed.highwayCruiseKph <= 205
+  T.check(pSpeed.persona == 'speeder' and pSpeed.risk >= 0.48 and pSpeed.risk <= 0.55
+    and pSpeed.aggression <= 0.58
+    and pSpeed.highwayCruiseKph >= 165 and pSpeed.highwayCruiseKph <= 185
     and pSpeed.highwayDeltaKph >= 15 and pSpeed.highwayDeltaKph <= 28
-    and pSpeed.laneBias == 'overtake_left', 'persona speeder: elevated risk, 165-205 km/h Autobahn, +15..28 posted')
+    and pSpeed.laneBias == 'overtake_left',
+    'persona speeder: capped risk <= 0.55, aggression <= 0.58, 165-185 km/h Autobahn')
+
+  for _, p in ipairs({ pTruck, pBus, pCourier, pComm, pSpeed }) do
+    T.check(p.risk <= 0.55 and p.aggression <= 0.58,
+      'persona traction cap: risk <= 0.55 and aggression <= 0.58 for ' .. tostring(p.persona))
+  end
 
   local cmd = N.personaAiCommand(pSpeed)
   T.check(cmd and cmd:find('ai.setAggression', 1, true) and cmd:find('ai.driveInLane("on")', 1, true)
-    and cmd:find('ai.setAvoidCars("on")', 1, true), 'personaAiCommand emits valid BeamNG AI setup')
+    and cmd:find('ai.setAvoidCars("on")', 1, true)
+    and cmd:find('trafficWaitTime = 1.20', 1, true) and cmd:find('turnForceCoef = 0.85', 1, true),
+    'personaAiCommand emits smooth capped AI setup (trafficWaitTime=1.20, turnForceCoef=0.85)')
 end
 
 -- 4. OSM Bus Stop pull-over, dwell, release & 45 s per-stop cooldown state machine
@@ -1420,28 +1429,31 @@ do
   N.reset()
 end
 
--- 9. Autobahn Highway Horizon Spawns (260-420 m), Road-Tangent Snapping, Rolling-Start Velocity & Stalled-Highway Boost
+-- 9. Autobahn Highway Horizon Spawns (340-480 m), Road-Tangent Snapping (Rural & Highway), Smooth Cruise Init & Junction Avoidance
 do
-  T.check(N.HORIZON_HWY_SPAWN_MIN_M == 260 and N.HORIZON_HWY_SPAWN_MAX_M == 420,
-    'highway horizon spawn constants: 260-420 m')
+  T.check(N.HORIZON_HWY_SPAWN_MIN_M == 340 and N.HORIZON_HWY_SPAWN_MAX_M == 480,
+    'highway horizon spawn constants: 340-480 m')
 
   local hwyBox = { -600, -600, 600, 600 }
   local hx0, hy0, hdx0, hdy0, hlo, hhi = N.horizonSpawnWindow(0, 0, 1, 0, hwyBox, 0, 0, true)
-  T.check(hx0 == 0 and hy0 == 0 and hdx0 == 1 and hdy0 == 0 and hlo == 260 and hhi == 420,
-    'horizonSpawnWindow (highway): uses [260, 420] m forward window')
+  T.check(hx0 == 0 and hy0 == 0 and hdx0 == 1 and hdy0 == 0 and hlo == 340 and hhi == 480,
+    'horizonSpawnWindow (highway): uses [340, 480] m forward window')
 
-  -- Tangent snapping: angled player heading snaps strictly to highway edge; reversed edge flips to player travel
-  local sx1, sy1 = N.snapHighwayTangent(0.94, 0.34, { highway = true, dx = 1, dy = 0, oneWay = true })
+  -- Tangent snapping: aligns BOTH highway and rural road edges to forward tangent (never reversed)
+  local sx1, sy1 = N.snapRoadTangent(0.94, 0.34, { highway = true, dx = 1, dy = 0, oneWay = true })
   T.check(math.abs(sx1 - 1) < 1e-6 and math.abs(sy1) < 1e-6,
-    'snapHighwayTangent: angled player heading snaps strictly to forward highway tangent')
-  local sx2, sy2 = N.snapHighwayTangent(0.98, 0.20, { highway = true, dx = -1, dy = 0, oneWay = true })
+    'snapRoadTangent (highway): angled player heading snaps strictly to forward highway tangent')
+  local sx2, sy2 = N.snapRoadTangent(0.98, 0.20, { highway = true, dx = -1, dy = 0, oneWay = true })
   T.check(math.abs(sx2 - 1) < 1e-6 and math.abs(sy2) < 1e-6,
-    'snapHighwayTangent: never reverses against player travel direction')
-  local sx3, sy3 = N.snapHighwayTangent(0, 1, { highway = false, dx = 1, dy = 0 })
-  T.check(math.abs(sx3) < 1e-6 and math.abs(sy3 - 1) < 1e-6,
-    'snapHighwayTangent: non-highway leaves player heading untouched')
+    'snapRoadTangent (highway): never reverses against player travel direction')
+  local sx3, sy3 = N.snapRoadTangent(0.85, 0.52, { highway = false, dx = 1, dy = 0, oneWay = false })
+  T.check(math.abs(sx3 - 1) < 1e-6 and math.abs(sy3) < 1e-6,
+    'snapRoadTangent (rural): snaps rural horizon spawn heading strictly to road edge tangent')
+  local sx4, sy4 = N.snapRoadTangent(0.90, -0.43, { highway = false, dx = -1, dy = 0, oneWay = false })
+  T.check(math.abs(sx4 - 1) < 1e-6 and math.abs(sy4) < 1e-6,
+    'snapRoadTangent (rural): flips reversed rural edge to match player travel direction')
 
-  -- Rolling-start velocity ranges & command generation
+  -- Smooth highway cruise initialization: NEVER fires thrusters.applyVelocity
   local rsCmds = {}
   local rsObj = { queueLuaCommand = function(_, c) rsCmds[#rsCmds + 1] = c end }
   local vTruck, cTruck, tx, ty = N.applyHighwayRollingStart(501, rsObj, 0.96, 0.28, { persona = 'truck' },
@@ -1449,12 +1461,12 @@ do
   T.check(vTruck and vTruck >= 85 / 3.6 - 1e-6 and vTruck <= 90 / 3.6 + 1e-6 and vTruck >= 22.0,
     'applyHighwayRollingStart (truck): 85-90 km/h (>= 22 m/s)')
   T.check(math.abs(tx - 1) < 1e-6 and math.abs(ty) < 1e-6,
-    'applyHighwayRollingStart (truck): velocity vector snapped strictly to highway tangent')
-  T.check(cTruck and cTruck:find('thrusters.applyVelocity', 1, true)
-    and cTruck:find('beamngEarth_spawnMotion', 1, true)
+    'applyHighwayRollingStart (truck): heading snapped strictly to highway tangent')
+  T.check(cTruck and not cTruck:find('thrusters.applyVelocity', 1, true)
     and cTruck:find('ai.driveInLane("on")', 1, true)
+    and cTruck:find('ai.setSpeedMode("legal")', 1, true)
     and cTruck:find('ai.setSpeed(', 1, true),
-    'applyHighwayRollingStart: emits rolling-start velocity, wheel spin, and AI lane/speed init')
+    'applyHighwayRollingStart: initializes smooth AI cruise without thrusters.applyVelocity impulse')
 
   local vBus = N.applyHighwayRollingStart(502, rsObj, 1, 0, { persona = 'bus' }, { highway = true, dx = 1, dy = 0 })
   T.check(vBus and vBus >= 85 / 3.6 - 1e-6 and vBus <= 90 / 3.6 + 1e-6 and vBus >= 22.0,
@@ -1473,13 +1485,14 @@ do
     'applyHighwayRollingStart: returns nil on non-highway roads')
 
   -- End-to-end updateTrafficDirector on an Autobahn highway:
-  -- 1) behind-player recycle uses [260, 420] m window, snaps heading to highway tangent (1,0), and applies rolling start
-  -- 2) newly spawned / stalled highway car (< 12 m/s, no stop reason) gets smooth rolling boost
+  -- 1) behind-player recycle uses [340, 480] m window, snaps heading to highway tangent (1,0), smooth AI cruise (no thrusters)
+  -- 2) newly spawned / stalled highway car (< 12 m/s, no stop reason) gets smooth AI cruise init (no thrusters)
   -- 3) cruising (>= 12 m/s) or disabled highway cars are not boosted
   N.reset()
   N.enabled = true
   local sg = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
-               be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
+               be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map'),
+               jsonDecode = rawget(_G, 'jsonDecode'), readFile = rawget(_G, 'readFile') }
   local clock0 = os.clock
   os.clock = function() return 4000 end
   local function v(ax, ay, az)
@@ -1510,7 +1523,7 @@ do
   end
   local objs = {
     [401] = makeCar(401, -500, 0, 28, 0, 1, 0), -- > 420 m behind -> recycled ahead on highway
-    [402] = makeCar(402, 120, 0, 2, 0, 1, 0),   -- newly spawned / stalled (< 12 m/s) on highway -> boosted
+    [402] = makeCar(402, 120, 0, 2, 0, 1, 0),   -- newly spawned / stalled (< 12 m/s) on highway -> smooth cruise init
     [403] = makeCar(403, 200, 0, 32, 0, 1, 0),  -- already cruising (>= 12 m/s) -> not boosted
     [404] = makeCar(404, 240, 0, 0, 0, 1, 0),   -- disabled on highway -> not boosted
   }
@@ -1533,24 +1546,81 @@ do
   }
   -- Player moving slightly angled across lane (vx=36, vy=6) on eastbound Autobahn
   N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 36, vy = 6 }, hwyBox)
-  T.check(#tports == 1 and tports[1].id == 401 and tports[1].dmin == 260 and tports[1].dmax == 420,
-    'director (highway): recycles behind-player vehicle into [260, 420] m forward window')
+  T.check(#tports == 1 and tports[1].id == 401 and tports[1].dmin == 340 and tports[1].dmax == 480,
+    'director (highway): recycles behind-player vehicle into [340, 480] m forward window')
   T.check(math.abs(tports[1].dir.x - 1) < 1e-6 and math.abs(tports[1].dir.y) < 1e-6,
     'director (highway): snaps forceTeleport heading strictly to forward highway tangent (1, 0)')
-  local function hasRollingCmd(list)
+  local function hasSmoothCruiseCmd(list)
     for _, c in ipairs(list or {}) do
-      if c:find('thrusters.applyVelocity', 1, true) and c:find('ai.driveInLane("on")', 1, true) then return true end
+      if c:find('ai.setSpeed(', 1, true) and c:find('ai.driveInLane("on")', 1, true)
+          and not c:find('thrusters.applyVelocity', 1, true) then
+        return true
+      end
     end
     return false
   end
-  T.check(hasRollingCmd(cmdsById[401]),
-    'director (highway): applies immediate rolling-start velocity after highway forceTeleport')
-  T.check(hasRollingCmd(cmdsById[402]),
-    'director (highway): boosts stalled/newly-spawned highway vehicle (< 12 m/s) into rolling flow')
-  T.check(not hasRollingCmd(cmdsById[403]),
-    'director (highway): does not boost vehicle already cruising >= 12 m/s')
-  T.check(not hasRollingCmd(cmdsById[404]),
+  local function hasThrusterCmd(list)
+    for _, c in ipairs(list or {}) do
+      if c:find('thrusters.applyVelocity', 1, true) then return true end
+    end
+    return false
+  end
+  T.check(hasSmoothCruiseCmd(cmdsById[401]) and not hasThrusterCmd(cmdsById[401]),
+    'director (highway): initializes smooth AI cruise without thrusters.applyVelocity after forceTeleport')
+  T.check(hasSmoothCruiseCmd(cmdsById[402]) and not hasThrusterCmd(cmdsById[402]),
+    'director (highway): initializes smooth AI cruise on stalled/newly-spawned highway vehicle (< 12 m/s)')
+  T.check(not hasSmoothCruiseCmd(cmdsById[403]),
+    'director (highway): does not re-init vehicle already cruising >= 12 m/s')
+  T.check(not hasSmoothCruiseCmd(cmdsById[404]),
     'director (highway): does not boost disabled vehicle with valid stop reason')
+
+  -- Rural road horizon spawn: snaps heading to rural road edge tangent AND skips when nearJunction(ax, ay, 45)
+  N.reset()
+  N.enabled = true
+  local ruralEdge = {
+    inNode = 'r0', outNode = 'r1', oneWay = false, highway = false, unlimited = false,
+    speedLimit = 22.2, lanes = '-+', lanesOut = 1, lanesIn = 1, inRadius = 3.5, outRadius = 3.5,
+  }
+  local ruralNodes = {
+    r0 = { pos = v(-600, 0, 0), radius = 3.5, links = { r1 = ruralEdge } },
+    r1 = { pos = v(600, 0, 0), radius = 3.5, links = { r0 = ruralEdge } },
+  }
+  map = {
+    getMap = function() return { nodes = ruralNodes } end,
+    findClosestRoad = function() return 'r0', 'r1' end,
+  }
+  local ruralTports = {}
+  local ruralObj = makeCar(410, -500, 0, 15, 0, 1, 0)
+  getObjectByID = function(id) return id == 410 and ruralObj or nil end
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      return { [410] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0 } }
+    end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      ruralTports[#ruralTports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  -- Load a graph with a 3-way junction at (20, 0) (within 45 m of player origin (0, 0))
+  readFile = function() return '{}' end
+  jsonDecode = function()
+    return {
+      nodes = { j = { 20, 0, 0, 4 }, w = { -200, 0, 0, 4 }, e = { 400, 0, 0, 4 }, n = { 20, 200, 0, 4 } },
+      edges = { { 'w', 'j', 0, 1, 1, 22.2, 1, 4 }, { 'j', 'e', 0, 1, 1, 22.2, 1, 4 }, { 'j', 'n', 0, 1, 1, 22.2, 1, 4 } },
+    }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 20, vy = 5 }, hwyBox)
+  T.check(#ruralTports == 0, 'director: skips horizon teleport when nearJunction(ax, ay, 45) is true')
+
+  -- Move player & camera away from junction to (-100, 0) (120 m from junction): rural horizon spawn succeeds & snaps to (1, 0)
+  ruralObj.getPosition = function() return v(-600, 0, 0) end
+  core_camera = { getPosition = function() return v(-100, 0, 0) end }
+  os.clock = function() return 4020 end
+  N.updateTrafficDirector(0.30, { x = -100, y = 0, z = 0, vx = 20, vy = 5 }, { -800, -600, 600, 600 })
+  T.check(#ruralTports == 1 and ruralTports[1].dmin == 160 and ruralTports[1].dmax == 340
+    and math.abs(ruralTports[1].dir.x - 1) < 1e-6 and math.abs(ruralTports[1].dir.y) < 1e-6,
+    'director (rural): snaps rural horizon forceTeleport heading strictly to road edge tangent (1, 0)')
 
   os.clock = clock0
   for k, val in pairs(sg) do _G[k] = val end

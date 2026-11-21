@@ -49,10 +49,26 @@ local laneHoldSent = {} -- car id -> true once ai.driveInLane("on") has been enf
 local lastScan = -math.huge
 local stats = { passes = 0, mergesRight = 0 }
 
--- Pure: true when forced ai.laneChange impulses must be suppressed (highways/Autobahns, >= 90 km/h, or >= 100 km/h limit).
+-- Pure: true when forced ai.laneChange impulses must be suppressed (highways/Autobahns, >= 90 km/h, >= 100 km/h limit,
+-- or non-multi-lane carriageways such as 2-lane rural roads with 1 lane per direction).
 function M.shouldSuppressLaneChange(v, limit, roadProfile)
-  if type(roadProfile) == 'table' and (roadProfile.highway == true or roadProfile.unlimited == true) then
-    return true
+  if type(roadProfile) == 'table' then
+    if roadProfile.highway == true or roadProfile.unlimited == true then
+      return true
+    end
+    if roadProfile.lanesOut ~= nil or roadProfile.lanes ~= nil then
+      local lanesOut = tonumber(roadProfile.lanesOut)
+      local totalLanes = tonumber(roadProfile.lanes)
+      if type(roadProfile.lanes) == 'string' then
+        totalLanes = #roadProfile.lanes
+        if lanesOut == nil then
+          lanesOut = M.lanesMyWay(roadProfile.lanes, true)
+        end
+      end
+      if not ((lanesOut or 0) >= 2 or (totalLanes or 0) >= 4) then
+        return true
+      end
+    end
   end
   if (tonumber(v) or 0) >= M.MAX_LANE_CHANGE_SPEED_MS then
     return true
@@ -161,8 +177,11 @@ local function onRoad(m, o, p, f)
   if radius <= 0 then radius = e.inRadius or 0 end
   local k, w = M.laneOf(lat, radius, n)
   if not k then return nil end
+  local totalLanes = type(e.lanes) == 'string' and #e.lanes or ((tonumber(e.lanesOut) or 0) + (tonumber(e.lanesIn) or 0))
+  local lanesOut = tonumber(e.lanesOut) or n
   return { n = n, k = k, w = w, lat = lat, limit = e.speedLimit or 0, dir = d, right = r,
-           highway = e.highway == true, unlimited = e.unlimited == true }
+           highway = e.highway == true, unlimited = e.unlimited == true,
+           lanesOut = lanesOut, lanes = totalLanes }
 end
 
 -- Is a scan due (navgraph's overtakeScan asks first: the traffic list and the snapshots it builds for a scan are
