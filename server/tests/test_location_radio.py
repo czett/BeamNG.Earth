@@ -1,7 +1,17 @@
 """Tests for server/location_radio.py and earthd radio_stations_request/result."""
+import asyncio
+import http.server
+import io
+import shutil
 import socket
+import struct
 import sys
+import threading
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,6 +21,20 @@ import location_radio as lr  # noqa: E402
 import modsim  # noqa: E402
 import test_protocol_agreement as proto  # noqa: E402
 import test_server  # noqa: E402
+
+
+def _make_wav_bytes(duration_s=0.4, sample_rate=22050):
+    """Generate a tiny valid PCM WAV buffer for ffmpeg transcoding tests."""
+    n_samples = int(duration_s * sample_rate)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        # Simple 440 Hz-ish square wave so Vorbis encoder emits non-trivial Ogg packets
+        samples = [8000 if (i // 25) % 2 == 0 else -8000 for i in range(n_samples)]
+        wf.writeframes(struct.pack(f"<{n_samples}h", *samples))
+    return buf.getvalue()
 
 
 class LocationRadioUnitTest(unittest.TestCase):
@@ -156,6 +180,157 @@ class LocationRadioProtocolTest(test_server.ServerHarness):
         err, _ = self.c.until(lambda msg: msg["type"] == "radio_stations_result" and msg["id"] == 78, 10)
         self.assertFalse(err["ok"])
         self.assertTrue(err.get("error"))
+
+        # When server.radio_port is active, streamUrl and fallbackUrls are rewritten to the local relay
+        self.server.radio_port = 49123
+        try:
+            self.c.send({"type": "radio_stations_request", "id": 79,
+                         "lat": 51.5136, "lon": 7.4653,
+                         "place": "Dortmund", "region": "DE-NW", "country": "DE", "online": False})
+            proxied, _ = self.c.until(lambda msg: msg["type"] == "radio_stations_result" and msg["id"] == 79, 10)
+            self.assertTrue(proxied["ok"])
+            r912 = next(s for s in proxied["stations"] if s["name"] == "Radio 91.2")
+            self.assertTrue(r912["streamUrl"].startswith("http://127.0.0.1:49123/radio/stream?url="), r912)
+            self.assertEqual(
+                urllib.parse.parse_qs(urllib.parse.urlsplit(r912["streamUrl"]).query)["url"][0],
+                "https://stream.lokalradio.nrw/444z27c",
+            )
+            self.assertTrue(r912["fallbackUrls"])
+            self.assertTrue(r912["fallbackUrls"][0].startswith("http://127.0.0.1:49123/radio/stream?url="))
+        finally:
+            self.server.radio_port = None
+
+
+class RadioStreamRelayTest(unittest.TestCase):
+    def setUp(self):
+        self.wav_bytes = _make_wav_bytes()
+        wav_bytes = self.wav_bytes
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/stream.mp3":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(wav_bytes)))
+                    self.end_headers()
+                    self.wfile.write(wav_bytes)
+                elif self.path == "/raw.ogg":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/ogg")
+                    self.send_header("Content-Length", "12")
+                    self.end_headers()
+                    self.wfile.write(b"OggS12345678")
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.upstream_port = self.upstream.server_address[1]
+        self.upstream_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
+        self.upstream_thread.start()
+
+    def tearDown(self):
+        self.upstream.shutdown()
+        self.upstream.server_close()
+
+    def test_url_allowlist_and_proxy_rewrite(self):
+        # Curated preset URLs are allowed; arbitrary external / file URLs are rejected
+        self.assertTrue(lr.is_allowed_stream_url("https://stream.lokalradio.nrw/444z27c"))
+        self.assertFalse(lr.is_allowed_stream_url("https://evil.example.com/secret"))
+        self.assertFalse(lr.is_allowed_stream_url("file:///etc/passwd"))
+        self.assertFalse(lr.is_allowed_stream_url("http://127.0.0.1:9999/internal"))
+
+        # Dynamically resolved Tier 2 station URLs are registered automatically
+        cache = lr.SpatialRadioCache()
+        dyn_url = "https://stream.test-local-fm.example/live.mp3"
+
+        def fake_fetch(url, timeout=1.5):
+            return [{"stationuuid": "dyn1", "name": "Test Local FM", "url_resolved": dyn_url,
+                     "codec": "MP3", "tags": "pop", "countrycode": "DE"}]
+
+        res = lr.resolve_stations(51.5136, 7.4653, place="Dortmund", country="DE",
+                                  online=True, offline=False, fetch=fake_fetch, cache=cache, proxy_port=48123)
+        self.assertTrue(lr.is_allowed_stream_url(dyn_url))
+        dyn = next(s for s in res["stations"] if s["name"] == "Test Local FM")
+        self.assertEqual(dyn["streamUrl"], lr.proxy_url(dyn_url, 48123))
+
+    def test_relay_validation_direct_proxy_and_ffmpeg_ogg(self):
+        mp3_url = f"http://127.0.0.1:{self.upstream_port}/stream.mp3"
+        ogg_url = f"http://127.0.0.1:{self.upstream_port}/raw.ogg"
+
+        async def run_checks():
+            # 1. Direct proxy mode (ffmpeg disabled)
+            relay_direct = lr.RadioStreamRelay(ffmpeg_path="", allowed_urls={mp3_url, ogg_url})
+            srv, port = await relay_direct.start(0)
+            try:
+                loop = asyncio.get_running_loop()
+
+                def fetch_raw(path):
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+                            return r.status, dict(r.headers), r.read()
+                    except urllib.error.HTTPError as e:
+                        try:
+                            return e.code, dict(e.headers), e.read()
+                        finally:
+                            e.close()
+
+                # Health check
+                st, hdrs, body = await loop.run_in_executor(None, fetch_raw, "/health")
+                self.assertEqual(st, 200)
+                self.assertEqual(body, b"ok")
+
+                # Invalid URL -> 400
+                st, _, _ = await loop.run_in_executor(None, fetch_raw, "/radio/stream?url=file:///etc/passwd")
+                self.assertEqual(st, 400)
+
+                # Disallowed external URL -> 403
+                st, _, _ = await loop.run_in_executor(
+                    None, fetch_raw, "/radio/stream?url=" + urllib.parse.quote("https://not-a-station.example/a.mp3", safe="")
+                )
+                self.assertEqual(st, 403)
+
+                # Allowed direct stream -> 200 with CORS header and exact bytes
+                st, hdrs, body = await loop.run_in_executor(
+                    None, fetch_raw, "/radio/stream?url=" + urllib.parse.quote(ogg_url, safe="")
+                )
+                self.assertEqual(st, 200)
+                self.assertEqual(hdrs.get("Access-Control-Allow-Origin"), "*")
+                self.assertEqual(hdrs.get("Content-Type"), "audio/ogg")
+                self.assertEqual(body, b"OggS12345678")
+            finally:
+                relay_direct.close()
+                await srv.wait_closed()
+
+            # 2. On-the-fly ffmpeg OGG/Vorbis transcoding mode (when ffmpeg is installed)
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin:
+                relay_ff = lr.RadioStreamRelay(ffmpeg_path=ffmpeg_bin, allowed_urls={mp3_url})
+                srv2, port2 = await relay_ff.start(0)
+                try:
+                    loop = asyncio.get_running_loop()
+
+                    def fetch_ogg():
+                        url = f"http://127.0.0.1:{port2}/radio/stream?url=" + urllib.parse.quote(mp3_url, safe="")
+                        with urllib.request.urlopen(url, timeout=10) as r:
+                            return r.status, dict(r.headers), r.read()
+
+                    st, hdrs, body = await loop.run_in_executor(None, fetch_ogg)
+                    self.assertEqual(st, 200)
+                    self.assertEqual(hdrs.get("Access-Control-Allow-Origin"), "*")
+                    self.assertEqual(hdrs.get("Content-Type"), "audio/ogg")
+                    self.assertTrue(body.startswith(b"OggS"), f"expected OggS magic, got {body[:16]!r}")
+                    # All ffmpeg subprocesses must be cleaned up after stream ends
+                    await asyncio.sleep(0.05)
+                    self.assertEqual(len(relay_ff._procs), 0)
+                finally:
+                    relay_ff.close()
+                    await srv2.wait_closed()
+
+        asyncio.run(run_checks())
 
 
 if __name__ == "__main__":

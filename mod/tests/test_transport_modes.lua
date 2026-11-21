@@ -621,10 +621,11 @@ do
 
   -- Prop discovery, cargo bay bounds & slot packing
   local disc = tm.discoverCargoPropModels(
-    function(m) return m == 'cardboard_box' or m == 'woodcrate' or m == 'EuroPallet' end,
-    function() return { models = { cardboard_box = { Type = 'Prop' }, woodcrate = { Type = 'Prop' }, EuroPallet = { Type = 'Prop' } } } end
+    function(m) return m == 'cardboard_box' or m == 'cargo_load_box_S' or m == 'cargo_load_box_M' or m == 'woodcrate' or m == 'EuroPallet' end,
+    function() return { models = { cardboard_box = { Type = 'Prop' }, cargo_load_box_S = { Type = 'Prop' }, cargo_load_box_M = { Type = 'Prop' }, woodcrate = { Type = 'Prop' }, EuroPallet = { Type = 'Prop' } } } end
   )
-  T.check(#disc.parcel >= 1 and disc.parcel[1] == 'cardboard_box', 'discoverCargoPropModels finds cardboard_box for parcel')
+  T.check(#disc.parcel == 3 and disc.parcel[1] == 'cardboard_box' and disc.parcel[2] == 'cargo_load_box_S' and disc.parcel[3] == 'cargo_load_box_M',
+    'discoverCargoPropModels prioritizes compact boxes and excludes woodcrate from parcel')
   T.check(#disc.crate >= 2 and disc.crate[1] == 'woodcrate', 'discoverCargoPropModels finds woodcrate/EuroPallet for crates')
 
   local bVan = tm.computeCargoBayBounds({ jbeam = 'van', lengthM = 5.4, widthM = 2.0 })
@@ -635,6 +636,10 @@ do
   local bDry = tm.computeCargoBayBounds({ jbeam = 'dryvan', isTrailer = true })
   local bMicro = tm.computeCargoBayBounds({ jbeam = 'pigeon', lengthM = 2.6, widthM = 1.2 })
   T.check(bVan and bVan.maxProps == 6 and bPickup and bPickup.maxProps == 6, 'van & pickup cargo bounds computed')
+  T.check(bVan.halfW <= 0.58 and bPickup.halfW <= 0.58, 'van & pickup halfW tightened <= 0.58 m')
+  T.check(bVan.yMin >= -(5.4 * 0.5) + 0.65 and bPickup.yMin >= -(5.5 * 0.5) + 0.65,
+    'van & pickup rear yMin inset >= 0.65 m inside rear bumper/doors')
+  T.check(bVan.zFloor >= 0.68 and bPickup.zFloor >= 0.82, 'van & pickup zFloor lifted above floor pan')
   T.check(bHatch and bHatch.maxProps == 3, 'hatchback compact trunk bounds computed')
   T.check(bFlat and bFlat.maxProps == 8 and bUtil and bUtil.maxProps == 4, 'open trailer bounds computed')
   T.check(bDry == nil and bMicro == nil, 'enclosed trailer & tiny microcar return nil bounds (node-mass fallback)')
@@ -642,7 +647,8 @@ do
   local slots = tm.cargoPropSlots(bVan, 6, 0.48)
   T.check(#slots == 6, 'cargoPropSlots packs 6 slots for van')
   for _, sl in ipairs(slots) do
-    T.check(math.abs(sl.lx) <= bVan.halfW and sl.ly >= bVan.yMin and sl.ly <= bVan.yMax, 'slot stays within cargo bay bounds')
+    T.check(math.abs(sl.lx) + 0.24 <= bVan.halfW + 1e-6 and sl.ly - 0.24 >= bVan.yMin - 1e-6 and sl.ly + 0.24 <= bVan.yMax + 1e-6,
+      'slot footprint stays cleanly within van cargo bay bounds')
   end
   T.check(tm.desiredCargoPropCount(14, 14, 6) == 6 and tm.desiredCargoPropCount(7, 14, 6) == 3 and tm.desiredCargoPropCount(0, 14, 6) == 0,
     'desiredCargoPropCount maps remaining parcels monotonically to 0')

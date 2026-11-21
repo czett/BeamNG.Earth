@@ -174,8 +174,8 @@ export function formatHeading(deg) {
 }
 
 export function sensitivityBadgeLabel(sens) {
-  if (sens === "hazmat") return "HAZMAT ADR"
-  if (sens === "fragile") return "FRAGILE"
+  if (sens === "hazmat") return "GEFAHRGUT · +50%"
+  if (sens === "fragile") return "FRAGILE · +35%"
   return ""
 }
 
