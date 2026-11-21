@@ -8,6 +8,10 @@ Covers:
 
 import hashlib
 import os
+os.environ.setdefault(
+    "BNE_REGIONAL_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "regional"),
+)
 import subprocess
 import sys
 import tempfile
@@ -18,10 +22,14 @@ from unittest import mock
 import numpy as np
 
 SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SERVER_DIR, ".."))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
 
+import borderfixtures  # noqa: E402
 import buildings  # noqa: E402
 import de_enhancer  # noqa: E402
 import geodesy  # noqa: E402
@@ -32,6 +40,10 @@ from de_street_enhancer import facade_style  # noqa: E402
 from de_street_enhancer import furniture_de  # noqa: E402
 from de_street_enhancer import placement  # noqa: E402
 from de_street_enhancer import texture_atlas  # noqa: E402
+
+
+def setUpModule():
+    borderfixtures.require()
 
 
 class _FakeFeats:
