@@ -61,6 +61,8 @@ TIERS = {
     "bus": {
         "partial": {"min_stops": 4, "max_stops": 6, "label": "Partial Route (4-6 stops)"},
         "full": {"min_stops": 6, "max_stops": 60, "label": "Full Line (complete OSM route=bus)"},
+        "regional": {"min_stops": 2, "max_stops": 4, "min_km": 25.0, "max_km": 60.0, "label": "Regional Coach (25-60 km)"},
+        "long": {"min_stops": 2, "max_stops": 4, "min_km": 65.0, "max_km": 150.0, "label": "Long-Distance Coach (65-150 km)"},
     },
     "logistics": {
         "local": {"target_km": 3.0, "min_stops": 2, "max_stops": 4, "label": "Local Van (3 km, 2-4 stops)"},
@@ -492,6 +494,8 @@ def compute_dwell_target_s(mode, tier, kind, stop_type="kerbside", name="", cats
     kind = str(kind or "").lower()
     lk = str(leg_kind or "").lower()
     nm = str(name or "").lower()
+    if kind == "rest_stop":
+        return REST_AREA_DWELL_S
     cat_set = {str(c or "").lower() for c in (cats or ())}
     if mode == "taxi":
         is_hub = bool(cat_set & TAXI_HUB_CATS) or any(k in nm for k in _TAXI_HUB_NAME_WORDS)
@@ -647,6 +651,8 @@ def _derive_sector_label_cached(cat, tax, bld_class, tag_vals, nm, kind, stop_ty
             if any(w in nm for w in words):
                 return label
 
+    if kind == "rest_stop":
+        return "Rest Area"
     if kind == "bus_stop":
         return "Bus Stop"
     if stop_type == "loading_bay" and kind in ("loading", "delivery"):
@@ -2117,6 +2123,65 @@ def _generate_bus(md, net, req, deadline):
     target_min = 4 if tier == "partial" else 6
     target_max = 6 if tier == "partial" else 10
 
+    if tier in ("regional", "long"):
+        is_long = tier == "long"
+        min_km, max_km = (65.0, 150.0) if is_long else (25.0, 60.0)
+        origin_snap = snap_to_road(md, lat, lon, radius_m=450.0, deadline=deadline)
+        if not origin_snap:
+            return {"ok": False, "error": "No drivable road found near origin for coach route"}
+        o_bld = _building_polys(md, origin_snap["lat"], origin_snap["lon"], radius_m=100.0, deadline=deadline)
+        origin_curb = _apply_curb_offset(origin_snap, None, None, origin_snap["lat"], origin_snap["lon"], o_bld)
+        o_name = f"{origin_curb['road']} Coach Stop" if origin_curb.get("road") else "Origin Coach Terminal"
+        stops = [_make_stop(
+            1, "bus_stop", o_name, origin_curb, zone_radius=14.0, stop_type="kerbside",
+            dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", o_name, seed=seed, idx=1),
+            sector_label="Bus Stop",
+        )]
+        dest_snap = None
+        dest_town = ""
+        towns = _towns_in_band(stops[0]["lat"], stops[0]["lon"], min_km, max_km, heading, seed, f"bus_dest:{tier}")
+        for _, tlat, tlon, tname in towns[:4]:
+            if time.monotonic() > deadline:
+                break
+            snapped = snap_to_road(md, tlat, tlon, radius_m=600.0, deadline=deadline)
+            if snapped and dist_m(stops[0]["lat"], stops[0]["lon"], snapped["lat"], snapped["lon"]) >= min_km * 900.0:
+                d_bld = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+                dest_snap = _apply_curb_offset(snapped, tlat, tlon, snapped["lat"], snapped["lon"], d_bld)
+                dest_town = tname
+                break
+        if not dest_snap:
+            base_brg = heading if heading is not None else float(_stable_index(seed, f"bus_hbrg:{tier}", 360))
+            target_m = (95.0 if is_long else 40.0) * 1000.0
+            for rot in (0.0, 45.0, -45.0, 90.0, -90.0, 180.0):
+                if time.monotonic() > deadline:
+                    break
+                alat, alon = offset_latlon(stops[0]["lat"], stops[0]["lon"], target_m, (base_brg + rot) % 360.0)
+                snapped = snap_to_road(md, alat, alon, radius_m=600.0, deadline=deadline)
+                if snapped:
+                    d_bld = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
+                    dest_snap = _apply_curb_offset(snapped, alat, alon, snapped["lat"], snapped["lon"], d_bld)
+                    break
+        if not dest_snap:
+            return {"ok": False, "error": "Could not find a coach destination in range"}
+        d_name = f"{dest_town} ZOB" if dest_town else (f"{dest_snap['road']} Terminal" if dest_snap.get("road") else "Destination Coach Terminal")
+        stops.append(_make_stop(
+            2, "bus_stop", d_name, dest_snap, address=dest_town, zone_radius=14.0, stop_type="kerbside",
+            dwell_target_s=compute_dwell_target_s("bus", tier, "bus_stop", "kerbside", d_name, seed=seed, idx=2),
+            locality=dest_town, sector_label="Bus Stop",
+        ))
+        bus_meta = _apply_bus_passengers_and_schedule(stops, lat, lon, tier, seed)
+        return {
+            "ok": True,
+            "mode": "bus",
+            "tier": tier,
+            "title": f"{stops[0]['name']} -> {stops[-1]['name']}",
+            "routeRef": "IC Bus" if is_long else "RegioBus",
+            "source": "overture",
+            "estimatedKm": _route_estimate_km(lat, lon, stops),
+            "bus": bus_meta,
+            "stops": stops,
+        }
+
     # 1. Try OSM route=bus via bounded Overpass
     routes = _fetch_bus_relations(net, lat, lon)
     if routes:
@@ -3007,6 +3072,270 @@ def _generate_parcel(md, req, deadline):
     }
 
 
+REST_AREA_DWELL_S = 8.0
+REST_AREA_DETOUR_MAX_RATIO = 0.25
+REST_AREA_RATE_REGIONAL = 40   # ~40% deterministic rate on regional routes
+REST_AREA_RATE_LONG = 65       # ~65% deterministic rate on long routes
+_REST_AREA_CLASSES = frozenset({"services", "rest_area", "motorway_services"})
+_REST_AREA_PLACE_CATS = frozenset({
+    "rest_area", "service_area", "motorway_services", "highway_services", "truck_stop", "rest_stop",
+})
+_REST_AREA_NAME_KEYWORDS = (
+    "rasthof", "raststätte", "raststaette", "autohof", "autobahnraststätte",
+    "service area", "rest area", "motorway services",
+)
+
+
+def _match_rest_area_name(name):
+    low = _clean(name).lower()
+    if not low:
+        return False
+    return any(kw in low for kw in _REST_AREA_NAME_KEYWORDS)
+
+
+def find_corridor_rest_area(md, start_lat, start_lon, end_lat, end_lon, deadline=None):
+    """Scan Overture/OSM `infrastructure`, `land_use`, and `places` along a route corridor for an Autobahn rest area.
+
+    Returns a road-snapped rest-stop dict (`lat`, `lon`, `name`, `locality`, `road`, `roadClass`,
+    `bearing`, `stopType`, `detourRatio`) within `<= 25%` detour overhead of the direct distance, or `None`.
+    """
+    if md is None:
+        return None
+    direct_m = dist_m(start_lat, start_lon, end_lat, end_lon)
+    if not math.isfinite(direct_m) or direct_m < 2000.0:
+        return None
+    dl = deadline if deadline is not None else (time.monotonic() + DEADLINE_S)
+
+    # Sample evenly along the middle 20%..80% of the corridor to keep cell lookups bounded and fast.
+    n_samples = 7 if direct_m >= 80000.0 else 5
+    sample_radius_m = min(3500.0, max(1200.0, direct_m * 0.12))
+    keys = []
+    seen_keys = set()
+    for k in range(n_samples):
+        frac = 0.20 + 0.60 * (k / max(1, n_samples - 1))
+        slat = start_lat + (end_lat - start_lat) * frac
+        slon = start_lon + (end_lon - start_lon) * frac
+        for ck in _cells_around(slat, slon, sample_radius_m, max_cells=6):
+            if ck not in seen_keys:
+                seen_keys.add(ck)
+                keys.append(ck)
+                if len(keys) >= 24:
+                    break
+        if len(keys) >= 24:
+            break
+
+    min_end_clear = min(1000.0, direct_m * 0.12)
+    candidates = []
+    seen_ids = set()
+
+    for ck in keys:
+        if time.monotonic() > dl:
+            break
+        for layer_name in ("infrastructure", "land_use", "places"):
+            if time.monotonic() > dl:
+                break
+            feats = _cell_layer(md, ck, layer_name, dl)
+            if feats is None or not len(feats.ids):
+                continue
+            n = len(feats.ids)
+            attrs = feats.attrs
+            cls_col = _col(attrs, "class", n)
+            cat_col = _col(attrs, "category", n)
+            bcat_col = _col(attrs, "basic_category", n)
+            tax_col = _col(attrs, "taxonomy", n)
+            name_col = _col(attrs, "name", n)
+            status_col = _col(attrs, "operating_status", n)
+            ids = feats.ids
+
+            for i in range(n):
+                if layer_name == "places":
+                    st_v = str(status_col[i] or "").strip().lower()
+                    if st_v in _CLOSED_STATUSES:
+                        continue
+                fid = str(ids[i])
+                if fid in seen_ids:
+                    continue
+
+                cls_v = str(cls_col[i] or "").strip().lower()
+                cat_v = str(cat_col[i] or bcat_col[i] or "").strip().lower()
+                tax_v = str(tax_col[i] or "").strip().lower()
+                raw_name = _clean(name_col[i])
+                tags = _tags_dict(attrs, i)
+                hwy = str(tags.get("highway") or "").strip().lower()
+                pk = str(tags.get("parking") or "").strip().lower()
+                tag_name = _clean(tags.get("name") or "")
+                disp_name = raw_name or tag_name
+
+                is_rest = False
+                is_named_match = _match_rest_area_name(disp_name)
+                if layer_name in ("infrastructure", "land_use"):
+                    if cls_v in _REST_AREA_CLASSES or hwy in ("services", "rest_area") or pk == "rest_area" or is_named_match:
+                        is_rest = True
+                else:
+                    if cat_v in _REST_AREA_PLACE_CATS or tax_v in _REST_AREA_PLACE_CATS or is_named_match:
+                        is_rest = True
+                if not is_rest:
+                    continue
+
+                center = _feature_center(feats, i)
+                if center is None:
+                    continue
+                clat, clon = center
+                d_start = dist_m(start_lat, start_lon, clat, clon)
+                d_end = dist_m(clat, clon, end_lat, end_lon)
+                if d_start < min_end_clear or d_end < min_end_clear:
+                    continue
+                detour_ratio = (d_start + d_end - direct_m) / max(direct_m, 1.0)
+                if detour_ratio > REST_AREA_DETOUR_MAX_RATIO:
+                    continue
+
+                seen_ids.add(fid)
+                progress = d_start / max(d_start + d_end, 1.0)
+                mid_pen = abs(progress - 0.5)
+                # Prefer explicitly named Rasthof/Raststätte/Autohof/Service Area, then lowest detour & closest to midpoint.
+                score = (0.0 if (disp_name and is_named_match) else (0.12 if disp_name else 0.25)) + detour_ratio * 2.0 + mid_pen * 0.35
+                candidates.append((score, detour_ratio, clat, clon, disp_name))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: c[0])
+    for _score, raw_detour, clat, clon, disp_name in candidates[:5]:
+        snapped = snap_to_road(md, clat, clon, radius_m=280.0, classes=LOGISTICS_FALLBACK_CLASSES, deadline=dl)
+        if snapped:
+            bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=dl)
+            snapped = _apply_curb_offset(snapped, clat, clon, snapped["lat"], snapped["lon"], bld_polys)
+        else:
+            snapped = {
+                "lat": clat,
+                "lon": clon,
+                "road": "",
+                "roadClass": "service",
+                "bearing": bearing_deg(start_lat, start_lon, end_lat, end_lon),
+                "stopType": "loading_bay",
+            }
+        slat, slon = float(snapped["lat"]), float(snapped["lon"])
+        snap_detour = (dist_m(start_lat, start_lon, slat, slon) + dist_m(slat, slon, end_lat, end_lon) - direct_m) / max(direct_m, 1.0)
+        if snap_detour > REST_AREA_DETOUR_MAX_RATIO:
+            continue
+        loc = _resolve_locality(md, slat, slon, dl)
+        return {
+            "lat": round(slat, 6),
+            "lon": round(slon, 6),
+            "name": disp_name or "Autobahn Rest Area",
+            "locality": loc,
+            "road": snapped.get("road") or "",
+            "roadClass": snapped.get("roadClass") or "service",
+            "bearing": round(float(snapped.get("bearing") or 0.0), 1),
+            "stopType": snapped.get("stopType") or "loading_bay",
+            "detourRatio": round(float(max(0.0, snap_detour)), 4),
+        }
+    return None
+
+
+def _maybe_insert_rest_stop(md, res, req, deadline):
+    """Deterministically insert an Autobahn rest-stop waypoint on regional (~40%) and long (~65%) bus/logistics jobs."""
+    if not res or not res.get("ok"):
+        return res
+    mode = req.get("mode")
+    tier = req.get("tier")
+    if mode not in ("bus", "logistics") or tier not in ("regional", "long"):
+        return res
+    stops = res.get("stops") or []
+    if len(stops) < 2:
+        return res
+
+    rate = REST_AREA_RATE_LONG if tier == "long" else REST_AREA_RATE_REGIONAL
+    if _stable_index(req.get("seed", 0), f"rest_stop:{mode}:{tier}", 100) >= rate:
+        return res
+
+    # Pick the longest inter-stop leg (for logistics, prefer a loaded leg between loading and delivery).
+    best_i = None
+    best_d = -1.0
+    for i in range(len(stops) - 1):
+        s0, s1 = stops[i], stops[i + 1]
+        if mode == "logistics" and not (s0.get("kind") == "loading" and s1.get("kind") == "delivery"):
+            continue
+        d = dist_m(s0["lat"], s0["lon"], s1["lat"], s1["lon"])
+        if d > best_d:
+            best_d = d
+            best_i = i
+    if best_i is None:
+        for i in range(len(stops) - 1):
+            d = dist_m(stops[i]["lat"], stops[i]["lon"], stops[i + 1]["lat"], stops[i + 1]["lon"])
+            if d > best_d:
+                best_d = d
+                best_i = i
+    if best_i is None or best_d < 2000.0:
+        return res
+
+    s0, s1 = stops[best_i], stops[best_i + 1]
+    ra = find_corridor_rest_area(md, s0["lat"], s0["lon"], s1["lat"], s1["lon"], deadline=deadline)
+    if not ra:
+        return res
+
+    insert_at = best_i + 1
+    st_type = "loading_bay" if mode == "logistics" else "kerbside"
+    rest_stop = _make_stop(
+        insert_at + 1,
+        "rest_stop",
+        ra["name"],
+        ra,
+        address=ra.get("locality") or ra.get("road") or "Autobahn",
+        zone_radius=15.0,
+        stop_type=st_type,
+        dwell_target_s=REST_AREA_DWELL_S,
+        locality=ra.get("locality") or "",
+        sector_label="Rest Area",
+    )
+    rest_stop["role"] = "Rest Stop"
+    rest_stop["dwellS"] = REST_AREA_DWELL_S
+    if mode == "logistics":
+        rest_stop["cargoDeltaKg"] = 0
+    elif mode == "bus":
+        rest_stop["paxBoard"] = 0
+        rest_stop["paxAlight"] = 0
+        t0 = s0.get("targetArrivalS")
+        t1 = s1.get("targetArrivalS")
+        if t0 is not None and t1 is not None:
+            rest_stop["targetArrivalS"] = int(round(0.5 * (float(t0) + float(t1))))
+
+    new_stops = list(stops[:insert_at]) + [rest_stop] + list(stops[insert_at:])
+    for idx_s, st in enumerate(new_stops, 1):
+        st["index"] = idx_s
+    res["stops"] = new_stops
+    res["estimatedKm"] = _route_estimate_km(req["lat"], req["lon"], new_stops)
+
+    # Split the corresponding logistics leg cleanly so cargo/trailer state stays continuous across the rest stop.
+    if mode == "logistics" and isinstance(res.get("legs"), list) and res["legs"]:
+        split_from = best_i + 1
+        split_to = best_i + 2
+        new_legs = []
+        for lg in res["legs"]:
+            fs = int(lg.get("fromStop", 0))
+            ts = int(lg.get("toStop", 0))
+            if fs == split_from and ts == split_to:
+                lg1 = dict(lg)
+                lg1["fromStop"] = split_from
+                lg1["toStop"] = split_from + 1
+                lg2 = dict(lg)
+                lg2["fromStop"] = split_from + 1
+                lg2["toStop"] = split_from + 2
+                new_legs.append(lg1)
+                new_legs.append(lg2)
+            else:
+                lg_c = dict(lg)
+                if fs >= insert_at + 1:
+                    lg_c["fromStop"] = fs + 1
+                if ts >= insert_at + 1:
+                    lg_c["toStop"] = ts + 1
+                new_legs.append(lg_c)
+        for idx_l, lg in enumerate(new_legs, 1):
+            lg["index"] = idx_l
+        res["legs"] = new_legs
+    return res
+
+
 def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, vehicle=None, deadline_s=DEADLINE_S):
     """Generate a global, deterministic Transport Mode job within deadline_s."""
     req, err = validate_request({
@@ -3034,6 +3363,7 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
                 res = _generate_logistics_haul(md, req, deadline)
             res = _apply_logistics_cargo_and_dwell(res, req)
         if res.get("ok") and res.get("stops"):
+            res = _maybe_insert_rest_stop(md, res, req, deadline)
             _enrich_stops_locality(md, res["stops"], deadline)
     except Exception as e:
         log.warning("transport job %s/%s failed: %s: %s", req["mode"], req["tier"], type(e).__name__, e)

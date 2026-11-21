@@ -1125,4 +1125,55 @@ do
   T.check(scClean == 100 and scDamaged < scClean, 'computeScore penalizes lost fragile/hazmat integrity')
 end
 
+-- 18. Autobahn Rest Stop Waypoints (kind = 'rest_stop', HUD label, smooth progression & cargo continuity)
+do
+  tm.reset()
+  T.check(tm.validateRequest('bus', 'regional') and tm.validateRequest('bus', 'long'), 'bus regional/long tiers validate')
+  T.check(tm.defaultDwellTargetS('logistics', 'regional', { kind = 'rest_stop', dwellS = 8.0 }) == 8.0,
+    'rest_stop default dwell target is 8.0 s')
+  T.check(tm.dwellStatusLabel('logistics', 'rest_stop', 'bay', 'loaded_solo', 'loaded_solo', 'none', { name = 'Rasthof Holzkirchen' })
+    == 'Rest Stop · Rasthof Holzkirchen', 'rest_stop dwellStatusLabel formats Rest Stop · <Name>')
+
+  local anchorR = { geodeticToEnu = function() return 0, 0 end }
+  local plR = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.1 }
+  tm.startJob('logistics', 'regional')
+  tm.onJobResult({
+    id = sentReqs[#sentReqs].id,
+    ok = true,
+    mode = 'logistics',
+    tier = 'regional',
+    title = 'Origin -> Dest',
+    cargo = { type = 'pallets', label = 'Palletized Freight', domain = 'retail', massKg = 3000, vehicleClass = 'box_truck', useTrailer = false },
+    legs = {
+      { index = 1, fromStop = 1, toStop = 2, legKind = 'loaded_solo', cargoType = 'pallets', cargoLabel = 'Palletized Freight', cargoDomain = 'retail', cargoMassKg = 3000 },
+      { index = 2, fromStop = 2, toStop = 3, legKind = 'loaded_solo', cargoType = 'pallets', cargoLabel = 'Palletized Freight', cargoDomain = 'retail', cargoMassKg = 3000 },
+    },
+    stops = {
+      { index = 1, kind = 'loading', stopType = 'loading_bay', name = 'Origin Depot', lat = 48.0, lon = 11.6, cargoDeltaKg = 3000, dwellTargetS = 2.0 },
+      { index = 2, kind = 'rest_stop', role = 'Rest Stop', stopType = 'loading_bay', name = 'Rasthof Holzkirchen', lat = 48.0, lon = 11.6, cargoDeltaKg = 0, dwellS = 8.0, dwellTargetS = 8.0 },
+      { index = 3, kind = 'delivery', stopType = 'loading_bay', name = 'Dest Warehouse', lat = 48.0, lon = 11.6, cargoDeltaKg = -3000, dwellTargetS = 2.0 },
+    },
+  })
+
+  -- Complete loading stop 1 -> advances to rest_stop 2 with 3000 kg on board
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorR, plR, false, false) end
+  local hRest = tm.hudPayload()
+  T.check(hRest and hRest.stopIndex == 2 and hRest.stopKind == 'rest_stop' and hRest.stopRole == 'Rest Stop'
+    and hRest.dwellLabel == 'Rest Stop · Rasthof Holzkirchen' and hRest.dwellTargetS == 8.0,
+    'active rest_stop exposes Rest Stop HUD label, role, and 8.0 s dwell target')
+
+  -- Complete 8.0 s rest stop -> advances smoothly to delivery stop 3 WITHOUT unloading cargo
+  for _ = 1, 17 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorR, plR, false, false) end
+  local hDel = tm.hudPayload()
+  T.check(hDel and hDel.stopIndex == 3 and hDel.stopKind == 'delivery' and hDel.cargoCurrentKg == 3000,
+    'completing rest_stop preserves cargo mass and advances to delivery stop')
+
+  -- Complete delivery stop 3 -> finishes job cleanly with normal payout
+  for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorR, plR, false, false) end
+  local hSum = tm.hudPayload()
+  T.check(hSum and hSum.state == 'summary' and hSum.stopsCompleted == 3 and hSum.totalEarned > 0,
+    'job with rest_stop completes cleanly with full payout')
+  tm.reset()
+end
+
 T.done('test_transport_modes')
