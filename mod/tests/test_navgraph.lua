@@ -1420,4 +1420,141 @@ do
   N.reset()
 end
 
+-- 9. Autobahn Highway Horizon Spawns (260-420 m), Road-Tangent Snapping, Rolling-Start Velocity & Stalled-Highway Boost
+do
+  T.check(N.HORIZON_HWY_SPAWN_MIN_M == 260 and N.HORIZON_HWY_SPAWN_MAX_M == 420,
+    'highway horizon spawn constants: 260-420 m')
+
+  local hwyBox = { -600, -600, 600, 600 }
+  local hx0, hy0, hdx0, hdy0, hlo, hhi = N.horizonSpawnWindow(0, 0, 1, 0, hwyBox, 0, 0, true)
+  T.check(hx0 == 0 and hy0 == 0 and hdx0 == 1 and hdy0 == 0 and hlo == 260 and hhi == 420,
+    'horizonSpawnWindow (highway): uses [260, 420] m forward window')
+
+  -- Tangent snapping: angled player heading snaps strictly to highway edge; reversed edge flips to player travel
+  local sx1, sy1 = N.snapHighwayTangent(0.94, 0.34, { highway = true, dx = 1, dy = 0, oneWay = true })
+  T.check(math.abs(sx1 - 1) < 1e-6 and math.abs(sy1) < 1e-6,
+    'snapHighwayTangent: angled player heading snaps strictly to forward highway tangent')
+  local sx2, sy2 = N.snapHighwayTangent(0.98, 0.20, { highway = true, dx = -1, dy = 0, oneWay = true })
+  T.check(math.abs(sx2 - 1) < 1e-6 and math.abs(sy2) < 1e-6,
+    'snapHighwayTangent: never reverses against player travel direction')
+  local sx3, sy3 = N.snapHighwayTangent(0, 1, { highway = false, dx = 1, dy = 0 })
+  T.check(math.abs(sx3) < 1e-6 and math.abs(sy3 - 1) < 1e-6,
+    'snapHighwayTangent: non-highway leaves player heading untouched')
+
+  -- Rolling-start velocity ranges & command generation
+  local rsCmds = {}
+  local rsObj = { queueLuaCommand = function(_, c) rsCmds[#rsCmds + 1] = c end }
+  local vTruck, cTruck, tx, ty = N.applyHighwayRollingStart(501, rsObj, 0.96, 0.28, { persona = 'truck' },
+    { highway = true, dx = 1, dy = 0, oneWay = true })
+  T.check(vTruck and vTruck >= 85 / 3.6 - 1e-6 and vTruck <= 90 / 3.6 + 1e-6 and vTruck >= 22.0,
+    'applyHighwayRollingStart (truck): 85-90 km/h (>= 22 m/s)')
+  T.check(math.abs(tx - 1) < 1e-6 and math.abs(ty) < 1e-6,
+    'applyHighwayRollingStart (truck): velocity vector snapped strictly to highway tangent')
+  T.check(cTruck and cTruck:find('thrusters.applyVelocity', 1, true)
+    and cTruck:find('beamngEarth_spawnMotion', 1, true)
+    and cTruck:find('ai.driveInLane("on")', 1, true)
+    and cTruck:find('ai.setSpeed(', 1, true),
+    'applyHighwayRollingStart: emits rolling-start velocity, wheel spin, and AI lane/speed init')
+
+  local vBus = N.applyHighwayRollingStart(502, rsObj, 1, 0, { persona = 'bus' }, { highway = true, dx = 1, dy = 0 })
+  T.check(vBus and vBus >= 85 / 3.6 - 1e-6 and vBus <= 90 / 3.6 + 1e-6 and vBus >= 22.0,
+    'applyHighwayRollingStart (bus): 85-90 km/h (>= 22 m/s)')
+
+  local vComm = N.applyHighwayRollingStart(503, rsObj, 1, 0, { persona = 'commuter' }, { highway = true, dx = 1, dy = 0 })
+  local vCour = N.applyHighwayRollingStart(504, rsObj, 1, 0, { persona = 'courier' }, { highway = true, dx = 1, dy = 0 })
+  local vSpd = N.applyHighwayRollingStart(505, rsObj, 1, 0, { persona = 'speeder' }, { highway = true, dx = 1, dy = 0 })
+  T.check(vComm and vComm >= 115 / 3.6 - 1e-6 and vComm <= 135 / 3.6 + 1e-6,
+    'applyHighwayRollingStart (commuter): 115-135 km/h')
+  T.check(vCour and vCour >= 115 / 3.6 - 1e-6 and vCour <= 135 / 3.6 + 1e-6,
+    'applyHighwayRollingStart (courier): 115-135 km/h')
+  T.check(vSpd and vSpd >= 115 / 3.6 - 1e-6 and vSpd <= 135 / 3.6 + 1e-6,
+    'applyHighwayRollingStart (speeder): 115-135 km/h')
+  T.check(N.applyHighwayRollingStart(506, rsObj, 1, 0, { persona = 'commuter' }, { highway = false, dx = 1, dy = 0 }) == nil,
+    'applyHighwayRollingStart: returns nil on non-highway roads')
+
+  -- End-to-end updateTrafficDirector on an Autobahn highway:
+  -- 1) behind-player recycle uses [260, 420] m window, snaps heading to highway tangent (1,0), and applies rolling start
+  -- 2) newly spawned / stalled highway car (< 12 m/s, no stop reason) gets smooth rolling boost
+  -- 3) cruising (>= 12 m/s) or disabled highway cars are not boosted
+  N.reset()
+  N.enabled = true
+  local sg = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+               be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
+  local clock0 = os.clock
+  os.clock = function() return 4000 end
+  local function v(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  local hwyEdge = {
+    inNode = 'h0', outNode = 'h1', oneWay = true, highway = true, unlimited = true,
+    speedLimit = 36.11, lanes = '+++', lanesOut = 3, lanesIn = 0, inRadius = 5.4, outRadius = 5.4,
+  }
+  local hwyNodes = {
+    h0 = { pos = v(-600, 0, 0), radius = 5.4, links = { h1 = hwyEdge } },
+    h1 = { pos = v(600, 0, 0), radius = 5.4, links = { h0 = hwyEdge } },
+  }
+  map = {
+    getMap = function() return { nodes = hwyNodes } end,
+    findClosestRoad = function() return 'h0', 'h1' end,
+  }
+  local cmdsById, tports = {}, {}
+  local function makeCar(id, px, py, vx, vy, dx, dy)
+    cmdsById[id] = {}
+    return {
+      getActive = function() return true end,
+      getPosition = function() return v(px, py, 0) end,
+      getVelocity = function() return v(vx, vy, 0) end,
+      getDirectionVector = function() return v(dx, dy, 0) end,
+      queueLuaCommand = function(_, c) cmdsById[id][#cmdsById[id] + 1] = c end,
+    }
+  end
+  local objs = {
+    [401] = makeCar(401, -500, 0, 28, 0, 1, 0), -- > 420 m behind -> recycled ahead on highway
+    [402] = makeCar(402, 120, 0, 2, 0, 1, 0),   -- newly spawned / stalled (< 12 m/s) on highway -> boosted
+    [403] = makeCar(403, 200, 0, 32, 0, 1, 0),  -- already cruising (>= 12 m/s) -> not boosted
+    [404] = makeCar(404, 240, 0, 0, 0, 1, 0),   -- disabled on highway -> not boosted
+  }
+  getObjectByID = function(id) return objs[id] end
+  be = { getPlayerVehicleID = function() return 1 end }
+  core_camera = { getPosition = function() return v(0, 0, 0) end }
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      return {
+        [401] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0 },
+        [402] = { isAi = true, model = 'semi', config = 't75_hauler', respawnCount = 0 },
+        [403] = { isAi = true, model = 'etk800', config = '854d_wagon', respawnCount = 0 },
+        [404] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0, state = 'disabled' },
+      }
+    end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  -- Player moving slightly angled across lane (vx=36, vy=6) on eastbound Autobahn
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 36, vy = 6 }, hwyBox)
+  T.check(#tports == 1 and tports[1].id == 401 and tports[1].dmin == 260 and tports[1].dmax == 420,
+    'director (highway): recycles behind-player vehicle into [260, 420] m forward window')
+  T.check(math.abs(tports[1].dir.x - 1) < 1e-6 and math.abs(tports[1].dir.y) < 1e-6,
+    'director (highway): snaps forceTeleport heading strictly to forward highway tangent (1, 0)')
+  local function hasRollingCmd(list)
+    for _, c in ipairs(list or {}) do
+      if c:find('thrusters.applyVelocity', 1, true) and c:find('ai.driveInLane("on")', 1, true) then return true end
+    end
+    return false
+  end
+  T.check(hasRollingCmd(cmdsById[401]),
+    'director (highway): applies immediate rolling-start velocity after highway forceTeleport')
+  T.check(hasRollingCmd(cmdsById[402]),
+    'director (highway): boosts stalled/newly-spawned highway vehicle (< 12 m/s) into rolling flow')
+  T.check(not hasRollingCmd(cmdsById[403]),
+    'director (highway): does not boost vehicle already cruising >= 12 m/s')
+  T.check(not hasRollingCmd(cmdsById[404]),
+    'director (highway): does not boost disabled vehicle with valid stop reason')
+
+  os.clock = clock0
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
 T.done('test_navgraph')
