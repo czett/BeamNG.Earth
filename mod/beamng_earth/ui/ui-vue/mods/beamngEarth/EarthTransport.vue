@@ -1,191 +1,238 @@
 <template>
   <div class="tm-root" :class="{ compact }">
-    <!-- Compact Career Strip -->
-    <div v-if="career" class="tm-career">
-      <div class="tm-career-top">
-        <div class="tm-rank-wrap">
-          <span class="tm-rank-badge">{{ career.driverRank || 'Rookie Driver' }}</span>
-          <span v-if="career.streak >= 2" class="tm-streak-pill tm-num">{{ career.streak }}x streak</span>
-          <span v-if="fuelPct != null" class="tm-fuel-pill tm-num" :class="{ low: lowFuel }">Fuel {{ fuelPct }}%</span>
+    <!-- Career Overview Card -->
+    <BngCard v-if="career" class="tm-card">
+      <div class="tm-body">
+        <div class="tm-career-head">
+          <div class="tm-pills">
+            <BngPill marked class="tm-pill-brand">{{ career.driverRank || 'Rookie Driver' }}</BngPill>
+            <BngPill v-if="career.streak >= 2" marked class="tm-pill-ok tm-num">{{ career.streak }}x Streak</BngPill>
+            <BngPill v-if="fuelPct != null" :marked="lowFuel" :class="lowFuel ? 'tm-pill-warn' : 'tm-pill-neutral'" class="tm-num">
+              Fuel {{ fuelPct }}%
+            </BngPill>
+          </div>
+          <div class="tm-career-reset">
+            <template v-if="resetConfirm">
+              <BngButton :accent="ACCENTS.destructive" @click="confirmResetCareer">Confirm</BngButton>
+              <BngButton :accent="ACCENTS.outlined" @click="resetConfirm = false">Cancel</BngButton>
+            </template>
+            <BngButton
+              v-else-if="career.completedJobs > 0 || career.totalEarnings !== 0"
+              :accent="ACCENTS.text"
+              title="Reset transport career stats"
+              @click="resetConfirm = true"
+            >Reset</BngButton>
+          </div>
         </div>
-        <div class="tm-career-reset">
-          <template v-if="resetConfirm">
-            <button class="tm-mini-btn danger" @click="confirmResetCareer">Confirm</button>
-            <button class="tm-mini-btn" @click="resetConfirm = false">Cancel</button>
-          </template>
-          <button
-            v-else-if="career.completedJobs > 0 || career.totalEarnings !== 0"
-            class="tm-mini-btn"
-            title="Reset transport career stats"
-            @click="resetConfirm = true"
-          >Reset</button>
+        <div class="tm-prop-grid" :class="{ 'cols-3': compact }">
+          <BngPropVal
+            :icon-type="icons.beamCurrency"
+            :icon-color="(career.totalEarnings || 0) < 0 ? 'var(--bng-add-red-400)' : 'var(--bng-orange-b400)'"
+            key-label="Earnings"
+            :value-label="formatMoney(career.totalEarnings || 0)"
+            class="tm-prop"
+          />
+          <BngPropVal
+            :icon-type="icons.flag"
+            icon-color="var(--bng-cool-gray-200)"
+            key-label="Jobs"
+            :value-label="String(career.completedJobs || 0)"
+            class="tm-prop"
+          />
+          <BngPropVal
+            :icon-type="icons.star"
+            icon-color="var(--bng-ter-yellow-300)"
+            key-label="Avg Score"
+            :value-label="career.completedJobs > 0 ? (career.avgScore + '/100') : '--'"
+            class="tm-prop"
+          />
+          <BngPropVal
+            v-if="!compact"
+            :icon-type="icons.odometer"
+            icon-color="var(--bng-cool-gray-200)"
+            key-label="Distance"
+            :value-label="formatCareerDist(career.totalDistanceKm || 0, metric)"
+            class="tm-prop"
+          />
         </div>
       </div>
-      <div class="tm-career-stats">
-        <div class="tm-cstat">
-          <span class="tm-cstat-k">Earnings</span>
-          <b class="tm-num" :class="(career.totalEarnings || 0) < 0 ? 'is-debt' : 'is-accent'">{{ formatMoney(career.totalEarnings || 0) }}</b>
-        </div>
-        <div class="tm-cstat">
-          <span class="tm-cstat-k">Jobs</span>
-          <b class="tm-num">{{ career.completedJobs || 0 }}</b>
-        </div>
-        <div class="tm-cstat">
-          <span class="tm-cstat-k">Avg Score</span>
-          <b class="tm-num">{{ career.completedJobs > 0 ? (career.avgScore + '/100') : '--' }}</b>
-        </div>
-        <div v-if="!compact" class="tm-cstat">
-          <span class="tm-cstat-k">Distance</span>
-          <b class="tm-num">{{ formatCareerDist(career.totalDistanceKm || 0, metric) }}</b>
-        </div>
-      </div>
-    </div>
+    </BngCard>
 
-    <!-- Live Refueling Progress & Receipt Banner -->
-    <div v-if="refueling && (refueling.active || refueling.done || refueling.holdS > 0)" class="tm-refuel-banner" :class="{ done: refueling.done && !refueling.active, warn: refueling.overdraftHit }">
-      <div class="tm-refuel-row">
-        <span class="tm-refuel-title">
-          <template v-if="refueling.active">Refueling at {{ refueling.stationName }}</template>
-          <template v-else-if="refueling.overdraftHit">Overdraft Limit · {{ refueling.stationName }}</template>
-          <template v-else-if="refueling.done">Refueled at {{ refueling.stationName }}</template>
-          <template v-else>Pump Ready · Hold stopped ({{ refueling.holdS.toFixed(1) }}/{{ refueling.holdTargetS.toFixed(1) }}s)</template>
-        </span>
-        <span v-if="refueling.active || refueling.done" class="tm-num tm-refuel-receipt">
-          +{{ Number(refueling.litersAdded || 0).toFixed(1) }} L · -{{ formatMoney(refueling.costTotal || 0) }}
-        </span>
+    <!-- Live Refueling Progress Card -->
+    <BngCard v-if="refueling && (refueling.active || refueling.done || refueling.holdS > 0)" class="tm-card">
+      <div class="tm-body">
+        <div class="tm-inline-head">
+          <BngIcon :type="icons.fuelPumpFilling" :color="refueling.overdraftHit ? 'var(--bng-ter-yellow-400)' : 'var(--bng-add-blue-300)'" />
+          <span class="tm-inline-title">{{ refuelHeading }}</span>
+          <span v-if="refueling.active || refueling.done" class="tm-num tm-refuel-cost">
+            +{{ Number(refueling.litersAdded || 0).toFixed(1) }} L · -{{ formatMoney(refueling.costTotal || 0) }}
+          </span>
+        </div>
+        <BngProgressBar
+          class="tm-progress"
+          :value="refuelProgressValue"
+          :min="0"
+          :max="100"
+          :show-value-label="false"
+          :value-color="refueling.overdraftHit ? 'var(--bng-ter-yellow-400)' : (refueling.done && !refueling.active ? 'var(--bng-add-green-400)' : 'var(--bng-add-blue-400)')"
+        />
       </div>
-      <div class="tm-bar">
-        <span
-          class="tm-bar-fill fuel"
-          :style="{ width: (refueling.active || refueling.done ? (fuelPct ?? 0) : Math.min(100, Math.round(((refueling.holdS || 0) / (refueling.holdTargetS || 1.2)) * 100))) + '%' }"
-        ></span>
-      </div>
-    </div>
+    </BngCard>
 
-    <!-- Low Fuel Helper -->
-    <div v-if="lowFuel && !(refueling && refueling.active)" class="tm-lowfuel-banner">
-      <div class="tm-lowfuel-info">
-        <b class="tm-lowfuel-title">Low Fuel ({{ fuelPct }}%)</b>
-        <span v-if="nearestFuelStation" class="tm-lowfuel-sub tm-num">
-          {{ nearestFuelStation.name }} · {{ formatDist(nearestFuelStation.distM, metric) }} {{ formatHeading(nearestFuelStation.bearingDeg) }} · {{ formatMoney(nearestFuelStation.pricePerLiter) }}/L
-        </span>
-        <span v-else class="tm-lowfuel-sub">Search nearby fuel stations</span>
+    <!-- Low Fuel Helper Card -->
+    <BngCard v-if="lowFuel && !(refueling && refueling.active)" class="tm-card">
+      <div class="tm-body tm-lowfuel-row">
+        <div class="tm-lowfuel-copy">
+          <div class="tm-inline-head">
+            <BngIcon :type="icons.fuelPump" color="var(--bng-ter-yellow-400)" />
+            <b class="tm-warn-text">Low Fuel ({{ fuelPct }}%)</b>
+          </div>
+          <span v-if="nearestFuelStation" class="tm-sub tm-num">
+            {{ nearestFuelStation.name }} · {{ formatDist(nearestFuelStation.distM, metric) }} {{ formatHeading(nearestFuelStation.bearingDeg) }} · {{ formatMoney(nearestFuelStation.pricePerLiter) }}/L
+          </span>
+          <span v-else class="tm-sub">Search nearby fuel stations</span>
+        </div>
+        <BngButton :accent="ACCENTS.main" :icon-left="icons.fuelPump" @click="findNearestFuel">Find Fuel</BngButton>
       </div>
-      <button class="tm-mini-btn fuel" @click="findNearestFuel">Find Nearest Fuel</button>
-    </div>
+    </BngCard>
 
     <div v-if="!ready" class="tm-note is-warn">
       Load into the BeamNG.Earth world to start a transport job.
     </div>
 
-    <!-- Active Job -->
-    <template v-if="active">
-      <div class="tm-card" :class="'mode-border-' + active.mode">
-        <div class="tm-head">
-          <div class="tm-head-badges">
-            <span class="tm-badge" :class="'mode-' + active.mode">{{ modeLabel(active.mode) }}</span>
-            <span v-if="currentStop" class="tm-type-pill" :class="'type-' + (currentStop.stopType || 'kerbside')">
-              {{ stopTypeLabel(currentStop.stopType) }}
-            </span>
-          </div>
-          <span v-if="active.mode === 'taxi'" class="tm-stop-count tm-num">{{ active.passengerOnBoard ? 'Drop-off' : 'Pickup' }} · {{ tierLabel('taxi', active.tier) }}</span>
-          <span v-else class="tm-stop-count tm-num">Stop {{ active.stopIndex }}/{{ active.stopCount }}</span>
-        </div>
-        <div v-if="active.title" class="tm-title">{{ active.title }}</div>
-        <div class="tm-current">
-          <div class="tm-stop-header">
+    <!-- Active Job Card -->
+    <BngCard v-if="active" class="tm-card">
+      <BngCardHeading type="line">
+        {{ modeLabel(active.mode) }}
+        <span class="tm-heading-sub tm-num">
+          {{ active.mode === 'taxi' ? (active.passengerOnBoard ? 'Drop-off' : 'Pickup') + ' · ' + tierLabel('taxi', active.tier) : ('Stop ' + active.stopIndex + '/' + active.stopCount) }}
+        </span>
+      </BngCardHeading>
+      <div class="tm-body">
+        <div v-if="active.title" class="tm-job-title">{{ active.title }}</div>
+
+        <div class="tm-stop-block">
+          <div class="tm-stop-head">
             <div class="tm-stop-name">{{ currentStop ? currentStop.name : "Next stop" }}</div>
-            <div class="tm-stop-tags">
-              <span v-if="currentStop && currentStop.sectorLabel" class="tm-sector-tag">{{ currentStop.sectorLabel }}</span>
-              <span v-if="currentStop && currentStop.kind" class="tm-kind-tag">{{ stopKindLabel(currentStop.kind) }}</span>
+            <div class="tm-pills">
+              <BngPill v-if="currentStop" marked class="tm-pill-neutral">{{ stopTypeLabel(currentStop.stopType) }}</BngPill>
+              <BngPill v-if="currentStop && currentStop.sectorLabel" class="tm-pill-neutral">{{ currentStop.sectorLabel }}</BngPill>
+              <BngPill v-if="currentStop && currentStop.kind" class="tm-pill-neutral">{{ stopKindLabel(currentStop.kind) }}</BngPill>
             </div>
           </div>
-          <div v-if="stopSubtitle" class="tm-stop-addr">{{ stopSubtitle }}</div>
+          <div v-if="stopSubtitle" class="tm-sub">{{ stopSubtitle }}</div>
+
           <div v-if="active.mode === 'taxi'" class="tm-subline">
-            <span class="tm-pill" :class="{ on: active.passengerOnBoard }">
+            <BngPill :marked="!!active.passengerOnBoard" :class="active.passengerOnBoard ? 'tm-pill-ok' : 'tm-pill-neutral'">
               {{ active.passengerOnBoard ? (active.paxCount || 1) + ' pax on board' : 'En route to pickup (' + (active.paxCount || 1) + ' pax)' }}
-            </span>
-            <span v-if="active.rideArchetype && active.rideArchetype !== 'standard'" class="tm-pill on">
+            </BngPill>
+            <BngPill v-if="active.rideArchetype && active.rideArchetype !== 'standard'" marked class="tm-pill-brand">
               {{ active.rideArchetype === 'express' ? 'Express +40%' : 'VIP +35% tip' }}
-            </span>
-            <span v-if="active.passengerOnBoard && active.fare != null" class="tm-num tm-fare">Meter {{ formatMoney(active.fare) }}</span>
+            </BngPill>
+            <span v-if="active.passengerOnBoard && active.fare != null" class="tm-num tm-accent-val">Meter {{ formatMoney(active.fare) }}</span>
           </div>
           <div v-else-if="active.mode === 'bus'" class="tm-subline">
             <span class="tm-num"><b>{{ active.paxCount ?? 0 }}/{{ active.paxCapacity || 40 }}</b> pax</span>
-            <span class="tm-pill" :class="{ on: !active.scheduleText || active.scheduleText === 'On Time' }">{{ active.scheduleText || 'On Time' }}</span>
+            <BngPill marked :class="!active.scheduleText || active.scheduleText === 'On Time' ? 'tm-pill-ok' : 'tm-pill-warn'">
+              {{ active.scheduleText || 'On Time' }}
+            </BngPill>
           </div>
           <div v-else-if="active.mode === 'logistics'" class="tm-subline">
-            <span>{{ active.legLabel || (active.legKind === 'deadhead' ? 'Deadhead · Empty transit (0 kg)' : (active.cargoKg ? (active.cargoLabel || 'Cargo') + ' · ' + formatCargo(active.cargoKg) : 'Deadhead · Empty transit (0 kg)')) }}</span>
-            <span class="tm-pill" :class="{ on: !active.trailerMissing && (active.trailerState === 'attached' || active.trailerState === 'staged'), warn: active.trailerMissing }">
+            <span class="tm-sub-strong">{{ active.legLabel || (active.legKind === 'deadhead' ? 'Deadhead · Empty transit (0 kg)' : (active.cargoKg ? (active.cargoLabel || 'Cargo') + ' · ' + formatCargo(active.cargoKg) : 'Deadhead · Empty transit (0 kg)')) }}</span>
+            <BngPill
+              marked
+              :class="active.trailerMissing ? 'tm-pill-warn' : ((active.trailerState === 'attached' || active.trailerState === 'staged') ? 'tm-pill-ok' : 'tm-pill-neutral')"
+            >
               {{ logisticsBadge(active) }}
-            </span>
+            </BngPill>
           </div>
           <div v-else-if="active.mode === 'parcel'" class="tm-subline">
             <span class="tm-num">
               <b>{{ active.parcelsRemaining ?? 0 }}/{{ active.parcelsTotal ?? 0 }}</b> parcels left · {{ formatCargo(active.cargoCurrentKg || 0) }}
               <span v-if="active.parcelsReturned > 0"> (+{{ active.parcelsReturned }} ret)</span>
             </span>
-            <span class="tm-pill" :class="{ on: active.parcelAction !== 'pickup_return', warn: active.parcelAction === 'pickup_return' }">
+            <BngPill marked :class="active.parcelAction === 'pickup_return' ? 'tm-pill-warn' : 'tm-pill-ok'">
               {{ active.parcelAction === 'pickup_return' ? ('Return +' + (active.parcelCount || 1)) : ('Deliver ' + (active.parcelCount || 1) + 'x') }}
-            </span>
+            </BngPill>
           </div>
-          <div v-if="active.mode === 'bus' && active.nextStopName" class="tm-stop-addr">
+
+          <div v-if="active.mode === 'bus' && active.nextStopName" class="tm-sub">
             Next Stop after this: {{ active.nextStopName }}
           </div>
-          <div class="tm-metrics">
-            <div class="tm-metric">
-              <span class="tm-metric-k">To stop</span>
-              <b class="tm-num">{{ formatDist(active.distM, metric) }}</b>
-            </div>
-            <div v-if="active.etaS != null" class="tm-metric">
-              <span class="tm-metric-k">ETA</span>
-              <b class="tm-num">{{ formatDur(active.etaS) }}</b>
-            </div>
-            <div class="tm-metric">
-              <span class="tm-metric-k">Score</span>
-              <b class="tm-num">{{ active.score }}/100</b>
-            </div>
+
+          <div class="tm-prop-grid cols-3">
+            <BngPropVal
+              :icon-type="icons.location1"
+              icon-color="var(--bng-orange-b400)"
+              key-label="To stop"
+              :value-label="formatDist(active.distM, metric)"
+              class="tm-prop"
+            />
+            <BngPropVal
+              v-if="active.etaS != null"
+              :icon-type="icons.timer"
+              icon-color="var(--bng-cool-gray-200)"
+              key-label="ETA"
+              :value-label="formatDur(active.etaS)"
+              class="tm-prop"
+            />
+            <BngPropVal
+              :icon-type="icons.star"
+              icon-color="var(--bng-ter-yellow-300)"
+              key-label="Score"
+              :value-label="active.score + '/100'"
+              class="tm-prop"
+            />
           </div>
-          <div v-if="active.cargoSensitivity === 'fragile' || active.cargoSensitivity === 'hazmat'" class="tm-integrity">
-            <div class="tm-integrity-row">
-              <div class="tm-integrity-title">
-                <span class="tm-sens-badge" :class="'sens-' + active.cargoSensitivity">{{ sensitivityBadgeLabel(active.cargoSensitivity) }}</span>
-                <span v-if="active.sensitivityLabel" class="tm-integrity-lbl">{{ active.sensitivityLabel }}</span>
-              </div>
-              <b class="tm-num tm-integrity-pct" :class="'tier-' + integrityTier(active.cargoIntegrity)">{{ Math.round(active.cargoIntegrity ?? 100) }}%</b>
+
+          <!-- Cargo Sensitivity & Integrity -->
+          <div v-if="active.cargoSensitivity === 'fragile' || active.cargoSensitivity === 'hazmat'" class="tm-inset">
+            <div class="tm-inline-head">
+              <BngIcon
+                :type="active.cargoSensitivity === 'hazmat' ? icons.hazard : icons.fragile"
+                :color="active.cargoSensitivity === 'hazmat' ? 'var(--bng-add-red-400)' : 'var(--bng-ter-yellow-400)'"
+              />
+              <BngPill marked :class="active.cargoSensitivity === 'hazmat' ? 'tm-pill-danger' : 'tm-pill-warn'">
+                {{ sensitivityBadgeLabel(active.cargoSensitivity) }}
+              </BngPill>
+              <span v-if="active.sensitivityLabel" class="tm-sub">{{ active.sensitivityLabel }}</span>
+              <b class="tm-num tm-integrity-pct" :class="'tier-' + integrityTier(active.cargoIntegrity)">
+                {{ Math.round(active.cargoIntegrity ?? 100) }}%
+              </b>
             </div>
-            <div class="tm-bar">
-              <span
-                class="tm-bar-fill integrity"
-                :class="'tier-' + integrityTier(active.cargoIntegrity)"
-                :style="{ width: Math.max(0, Math.min(100, active.cargoIntegrity ?? 100)) + '%' }"
-              ></span>
-            </div>
+            <BngProgressBar
+              class="tm-progress"
+              :value="Math.max(0, Math.min(100, Math.round(active.cargoIntegrity ?? 100)))"
+              :min="0"
+              :max="100"
+              :show-value-label="false"
+              :value-color="integrityBarColor(active.cargoIntegrity)"
+            />
           </div>
-          <div v-if="active.trailerMissing" class="tm-bay-hint is-warn">
-            {{ active.bayHint || 'Trailer missing · Go back & hitch your trailer' }}
+
+          <!-- Trailer / Bay Dwell Status -->
+          <div v-if="active.trailerMissing" class="tm-hint is-warn">
+            <BngIcon :type="icons.warning" color="var(--bng-ter-yellow-400)" />
+            <span>{{ active.bayHint || 'Trailer missing · Go back & hitch your trailer' }}</span>
           </div>
-          <div v-else-if="active.dwellFrac > 0" class="tm-dwell" :class="{ fallback: active.dwellMode === 'fallback' }">
-            <div class="tm-dwell-row">
-              <span>{{ dwellLabel }}</span>
-              <span class="tm-num">{{ dwellTimerText }}</span>
-            </div>
-            <div class="tm-bar">
-              <span
-                class="tm-bar-fill"
-                :class="active.dwellMode === 'fallback' ? 'fallback' : 'dwell'"
-                :style="{ width: Math.round(active.dwellFrac * 100) + '%' }"
-              ></span>
-            </div>
+          <div v-else-if="active.dwellFrac > 0" class="tm-inset">
+            <BngProgressBar
+              class="tm-progress"
+              :header-left="dwellLabel"
+              :header-right="dwellTimerText"
+              :value="Math.round(active.dwellFrac * 100)"
+              :min="0"
+              :max="100"
+              :show-value-label="false"
+              :value-color="active.dwellMode === 'fallback' ? 'var(--bng-ter-yellow-400)' : 'var(--bng-add-green-400)'"
+            />
           </div>
-          <div v-else-if="active.distM != null && active.distM <= (active.trailerState === 'staged' ? 50 : 35)" class="tm-bay-hint">
-            {{ active.trailerState === 'staged' ? 'Back up to the staged trailer in the bay to hitch' : (currentStop && currentStop.stopType === 'loading_bay' ? 'Pull into the loading bay and stop' : 'Pull up to the kerbside bay and stop') }}
+          <div v-else-if="active.distM != null && active.distM <= (active.trailerState === 'staged' ? 50 : 35)" class="tm-hint">
+            <BngIcon :type="icons.info" color="var(--bng-add-blue-300)" />
+            <span>{{ active.trailerState === 'staged' ? 'Back up to the staged trailer in the bay to hitch' : (currentStop && currentStop.stopType === 'loading_bay' ? 'Pull into the loading bay and stop' : 'Pull up to the kerbside bay and stop') }}</span>
           </div>
         </div>
-        <div class="tm-actions">
-          <button class="tm-btn" @click="skipStop">Skip Stop</button>
-          <button class="tm-btn danger" @click="cancelJob">Cancel Job</button>
-        </div>
+
         <div v-if="stops.length" class="tm-stops">
           <div
             v-for="(s, idx) in stops"
@@ -194,56 +241,92 @@
             :class="{ done: idx + 1 < active.stopIndex, current: idx + 1 === active.stopIndex }"
             @click="$emit('focus-stop', s)"
           >
-            <span class="tm-stop-num tm-num">{{ idx + 1 < active.stopIndex ? '✓' : idx + 1 }}</span>
-            <span class="tm-stop-label">{{ s.name }}<span v-if="s.recipient" class="tm-stop-loc"> · {{ s.recipient }}</span><span v-else-if="s.locality" class="tm-stop-loc"> · {{ s.locality }}</span></span>
-            <span class="tm-stop-kind">{{ active.mode === 'parcel' ? (s.parcelAction === 'pickup_return' ? ('↩ ' + (s.parcelCount || 1) + 'x') : ((s.parcelCount || 1) + 'x')) : (s.stopType === 'loading_bay' ? 'Bay' : stopKindLabel(s.kind)) }}</span>
+            <span class="tm-stop-num tm-num">
+              <BngIcon v-if="idx + 1 < active.stopIndex" :type="icons.checkmark" color="var(--bng-add-green-400)" />
+              <template v-else>{{ idx + 1 }}</template>
+            </span>
+            <span class="tm-stop-label">
+              {{ s.name }}<span v-if="s.recipient" class="tm-stop-loc"> · {{ s.recipient }}</span><span v-else-if="s.locality" class="tm-stop-loc"> · {{ s.locality }}</span>
+            </span>
+            <span class="tm-stop-kind">
+              {{ active.mode === 'parcel' ? (s.parcelAction === 'pickup_return' ? ('Ret +' + (s.parcelCount || 1)) : ((s.parcelCount || 1) + 'x')) : (s.stopType === 'loading_bay' ? 'Bay' : stopKindLabel(s.kind)) }}
+            </span>
           </div>
         </div>
       </div>
-    </template>
+      <template #buttons>
+        <BngButton :accent="ACCENTS.outlined" @click="skipStop">Skip Stop</BngButton>
+        <BngButton :accent="ACCENTS.destructive" :icon-left="icons.abandon" @click="cancelJob">Cancel Job</BngButton>
+      </template>
+    </BngCard>
 
-    <!-- Pending request -->
-    <template v-else-if="pending || busy">
-      <div class="tm-card">
-        <div class="tm-head">
-          <span class="tm-badge" :class="'mode-' + ((pending && pending.mode) || selectedMode)">{{ modeLabel((pending && pending.mode) || selectedMode) }}</span>
-          <span class="tm-stop-count">Locating bays</span>
-        </div>
-        <div class="tm-title">Generating {{ modeLabel((pending && pending.mode) || selectedMode) }} route...</div>
-        <div class="tm-note">Finding clear loading bays and kerbside stops nearby.</div>
-        <div class="tm-actions">
-          <button class="tm-btn danger" @click="cancelJob">Cancel</button>
-        </div>
+    <!-- Pending Route Generation -->
+    <BngCard v-else-if="pending || busy" class="tm-card">
+      <BngCardHeading type="line">{{ modeLabel((pending && pending.mode) || selectedMode) }}</BngCardHeading>
+      <div class="tm-body">
+        <div class="tm-job-title">Generating {{ modeLabel((pending && pending.mode) || selectedMode) }} route...</div>
+        <div class="tm-sub">Finding clear loading bays and kerbside stops nearby.</div>
       </div>
-    </template>
+      <template #buttons>
+        <BngButton :accent="ACCENTS.destructive" @click="cancelJob">Cancel</BngButton>
+      </template>
+    </BngCard>
 
-    <!-- Completion Summary -->
-    <template v-else-if="summary">
-      <div class="tm-card" :class="'mode-border-' + summary.mode">
-        <div class="tm-head">
-          <span class="tm-badge" :class="'mode-' + summary.mode">{{ modeLabel(summary.mode) }}</span>
-          <span class="tm-stop-count is-complete">Job Complete</span>
-        </div>
-        <div v-if="summary.title" class="tm-title">{{ summary.title }}</div>
-        <div class="tm-summary-grid">
-          <div v-if="summary.mode === 'taxi'"><span>Trip</span><b class="tm-num">{{ summary.stopsCompleted >= 2 ? 'Pickup -> Drop-off' : 'Skipped' }}</b></div>
-          <div v-else><span>Stops</span><b class="tm-num">{{ summary.stopsCompleted }}/{{ summary.stopCount }}</b></div>
-          <div><span>Distance</span><b class="tm-num">{{ formatDist(summary.drivenM, metric) }}</b></div>
-          <div><span>Time</span><b class="tm-num">{{ formatDur(summary.elapsedS) }}</b></div>
-          <div><span>Smoothness</span><b class="tm-num">{{ summary.smoothnessPct }}%</b></div>
-          <div><span>Collisions</span><b class="tm-num">{{ summary.collisions }}</b></div>
-          <div v-if="summary.mode === 'logistics' && summary.cargoKg"><span>Cargo</span><b class="tm-num">{{ formatCargo(summary.cargoKg) }}</b></div>
-          <div v-else-if="summary.mode === 'parcel'"><span>Parcels</span><b class="tm-num">{{ summary.parcelsDelivered ?? 0 }}/{{ summary.parcelsTotal ?? 0 }}<span v-if="summary.parcelsReturned > 0"> (+{{ summary.parcelsReturned }} ret)</span></b></div>
-          <div v-if="summary.cargoSensitivity === 'fragile' || summary.cargoSensitivity === 'hazmat'">
-            <span>Integrity</span>
-            <b class="tm-num">{{ Math.round(summary.cargoIntegrity ?? 100) }}%</b>
-          </div>
-          <div class="is-score"><span>Score</span><b class="tm-num">{{ summary.score }}/100</b></div>
+    <!-- Job Completion Summary Card -->
+    <BngCard v-else-if="summary" class="tm-card">
+      <BngCardHeading type="line">
+        {{ modeLabel(summary.mode) }}
+        <span class="tm-heading-sub is-ok">Complete</span>
+      </BngCardHeading>
+      <div class="tm-body">
+        <div v-if="summary.title" class="tm-job-title">{{ summary.title }}</div>
+        <div class="tm-prop-grid cols-3">
+          <BngPropVal
+            v-if="summary.mode === 'taxi'"
+            key-label="Trip"
+            :value-label="summary.stopsCompleted >= 2 ? 'Pickup -> Drop-off' : 'Skipped'"
+            class="tm-prop"
+          />
+          <BngPropVal
+            v-else
+            key-label="Stops"
+            :value-label="summary.stopsCompleted + '/' + summary.stopCount"
+            class="tm-prop"
+          />
+          <BngPropVal key-label="Distance" :value-label="formatDist(summary.drivenM, metric)" class="tm-prop" />
+          <BngPropVal key-label="Time" :value-label="formatDur(summary.elapsedS)" class="tm-prop" />
+          <BngPropVal key-label="Smoothness" :value-label="summary.smoothnessPct + '%'" class="tm-prop" />
+          <BngPropVal key-label="Collisions" :value-label="String(summary.collisions)" class="tm-prop" />
+          <BngPropVal
+            v-if="summary.mode === 'logistics' && summary.cargoKg"
+            key-label="Cargo"
+            :value-label="formatCargo(summary.cargoKg)"
+            class="tm-prop"
+          />
+          <BngPropVal
+            v-else-if="summary.mode === 'parcel'"
+            key-label="Parcels"
+            :value-label="(summary.parcelsDelivered ?? 0) + '/' + (summary.parcelsTotal ?? 0) + (summary.parcelsReturned > 0 ? (' (+' + summary.parcelsReturned + ' ret)') : '')"
+            class="tm-prop"
+          />
+          <BngPropVal
+            v-if="summary.cargoSensitivity === 'fragile' || summary.cargoSensitivity === 'hazmat'"
+            key-label="Integrity"
+            :value-label="Math.round(summary.cargoIntegrity ?? 100) + '%'"
+            class="tm-prop"
+          />
+          <BngPropVal
+            :icon-type="icons.star"
+            icon-color="var(--bng-orange-b400)"
+            key-label="Score"
+            :value-label="summary.score + '/100'"
+            class="tm-prop"
+          />
         </div>
 
-        <!-- Itemized Payout Breakdown -->
-        <div v-if="summary.payout" class="tm-payout">
-          <div class="tm-payout-head">Payout Breakdown</div>
+        <!-- Itemized Payout Ledger -->
+        <div v-if="summary.payout" class="tm-inset tm-payout">
+          <div class="tm-section-label">Payout Breakdown</div>
           <div class="tm-payout-row">
             <span>{{ summary.mode === 'taxi' ? 'Base Fare' : 'Route Base Pay' }}</span>
             <b class="tm-num">{{ formatMoney(summary.payout.basePay) }}</b>
@@ -273,54 +356,57 @@
             <b class="tm-num">{{ formatMoney(summary.payout.totalEarned, { signed: summary.payout.totalEarned > 0 }) }}</b>
           </div>
         </div>
+      </div>
+      <template #buttons>
+        <BngButton v-if="summary.mode === 'taxi'" :accent="ACCENTS.main" @click="nextPassenger">Next Passenger</BngButton>
+        <BngButton :accent="summary.mode === 'taxi' ? ACCENTS.outlined : ACCENTS.main" @click="dismissSummary">New Route</BngButton>
+      </template>
+    </BngCard>
 
-        <div class="tm-actions">
-          <button v-if="summary.mode === 'taxi'" class="tm-btn primary" @click="nextPassenger">Next Passenger</button>
-          <button class="tm-btn" :class="{ primary: summary.mode !== 'taxi' }" @click="dismissSummary">New Route</button>
+    <!-- Idle Job Dispatch Picker -->
+    <BngCard v-if="!active && !pending && !busy && !summary" class="tm-card">
+      <BngCardHeading type="line">Dispatch</BngCardHeading>
+      <div class="tm-body">
+        <div v-if="vehicleMatch" class="tm-veh-row">
+          <BngIcon
+            :type="vehicleMatch.hasTrailer ? icons.trailer : icons.car"
+            :color="vehicleMatch.hasTrailer ? 'var(--bng-add-green-400)' : 'var(--bng-orange-b400)'"
+          />
+          <div class="tm-veh-copy">
+            <span class="tm-veh-label">Vehicle: <b>{{ vehicleMatch.vehicleLabel }}</b></span>
+            <span class="tm-sub">{{ vehicleMatch.readiness }}</span>
+          </div>
         </div>
-      </div>
-    </template>
 
-    <!-- Idle Job Picker -->
-    <template v-if="!active && !pending && !busy && !summary">
-      <div v-if="vehicleMatch" class="tm-veh-banner">
-        <span class="tm-veh-dot" :class="{ hitched: vehicleMatch.hasTrailer }"></span>
-        <div class="tm-veh-text">
-          <span class="tm-veh-label">Current Vehicle: <b>{{ vehicleMatch.vehicleLabel }}</b></span>
-          <span class="tm-veh-sub">{{ vehicleMatch.readiness }}</span>
+        <div class="tm-section-label">Mode</div>
+        <div class="tm-mode-grid">
+          <BngButton
+            v-for="m in TRANSPORT_MODES"
+            :key="m.id"
+            class="tm-mode-btn"
+            :accent="selectedMode === m.id ? ACCENTS.main : ACCENTS.outlined"
+            :icon-left="modeIcon(m.id)"
+            @click="setMode(m.id)"
+          >
+            {{ m.label }}
+            <span v-if="isRecommendedMode(m.id)" class="tm-rec-mark" title="Recommended for current vehicle">★</span>
+          </BngButton>
         </div>
-      </div>
+        <div class="tm-sub">{{ activeModeDesc }}</div>
 
-      <div class="tm-section-label">Mode</div>
-      <div class="tm-seg">
-        <button
-          v-for="m in TRANSPORT_MODES"
-          :key="m.id"
-          class="tm-btn"
-          :class="{ on: selectedMode === m.id, rec: isRecommendedMode(m.id) }"
-          @click="setMode(m.id)"
-        >
-          <span>{{ m.label }}</span>
-          <span v-if="isRecommendedMode(m.id)" class="tm-rec-dot" title="Recommended for current vehicle"></span>
-        </button>
+        <div class="tm-section-label">Scale / Distance</div>
+        <BngSelect
+          class="tm-tier-select"
+          :value="selectedTier"
+          :options="currentTiers"
+          :config="tierSelectConfig"
+          @valueChanged="setTier"
+        />
       </div>
-      <div class="tm-mode-desc">{{ activeModeDesc }}</div>
-
-      <div class="tm-section-label">Scale / Distance</div>
-      <div class="tm-tiers">
-        <button
-          v-for="t in currentTiers"
-          :key="t.id"
-          class="tm-tier-btn"
-          :class="{ on: selectedTier === t.id }"
-          @click="setTier(t.id)"
-        >{{ t.label }}</button>
-      </div>
-
-      <div class="tm-actions">
-        <button class="tm-btn primary" :disabled="!ready" @click="startJob">Start Job</button>
-      </div>
-    </template>
+      <template #buttons>
+        <BngButton :accent="ACCENTS.main" :icon-left="icons.routeSimple" :disabled="!ready" @click="startJob">Start Job</BngButton>
+      </template>
+    </BngCard>
 
     <div v-if="errText" class="tm-note is-error">{{ errText }}</div>
   </div>
@@ -328,6 +414,9 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from "vue"
+import {
+  BngCard, BngCardHeading, BngButton, BngSelect, BngPropVal, BngPill, BngProgressBar, BngIcon, ACCENTS, icons,
+} from "@/common/components/base"
 import {
   TRANSPORT_MODES, selectedMode, selectedTier, currentTiers,
   transportState, busy, actionError,
@@ -342,6 +431,7 @@ const props = defineProps({
 defineEmits(["focus-stop"])
 
 const resetConfirm = ref(false)
+const tierSelectConfig = { label: t => t.label, value: t => t.id }
 
 onMounted(() => { if (!props.externalPoll) start() })
 onUnmounted(() => { if (!props.externalPoll) stop() })
@@ -359,12 +449,26 @@ const nearestFuelStation = computed(() => st.value.nearestFuelStation || null)
 const refueling = computed(() => st.value.refueling || null)
 const metric = computed(() => st.value.metric === true)
 const stops = computed(() => active.value ? toArray(active.value.stops) : [])
+
 const recommendedSet = computed(() => {
   const list = vehicleMatch.value ? toArray(vehicleMatch.value.recommendedModes) : []
   return new Set(list)
 })
 function isRecommendedMode(id) {
   return recommendedSet.value.has(id)
+}
+function modeIcon(id) {
+  if (id === "taxi") return icons.taxi
+  if (id === "bus") return icons.bus
+  if (id === "logistics") return icons.deliveryTruck
+  if (id === "parcel") return icons.cardboardBox
+  return icons.routeSimple
+}
+function integrityBarColor(val) {
+  const tier = integrityTier(val)
+  if (tier === "high") return "var(--bng-add-green-400)"
+  if (tier === "mid") return "var(--bng-ter-yellow-400)"
+  return "var(--bng-add-red-400)"
 }
 function confirmResetCareer() {
   resetConfirm.value = false
@@ -376,6 +480,20 @@ function formatCareerDist(km, isMetric) {
   const mi = v * 0.621371
   return `${mi.toFixed(mi < 100 ? 1 : 0)} mi`
 }
+const refuelHeading = computed(() => {
+  const rf = refueling.value
+  if (!rf) return ""
+  if (rf.active) return `Refueling at ${rf.stationName}`
+  if (rf.overdraftHit) return `Overdraft Limit · ${rf.stationName}`
+  if (rf.done) return `Refueled at ${rf.stationName}`
+  return `Pump Ready · Hold stopped (${Number(rf.holdS || 0).toFixed(1)}/${Number(rf.holdTargetS || 1.2).toFixed(1)}s)`
+})
+const refuelProgressValue = computed(() => {
+  const rf = refueling.value
+  if (!rf) return 0
+  if (rf.active || rf.done) return Math.max(0, Math.min(100, fuelPct.value ?? 0))
+  return Math.max(0, Math.min(100, Math.round(((rf.holdS || 0) / (rf.holdTargetS || 1.2)) * 100)))
+})
 const currentStop = computed(() => {
   if (!active.value || !stops.value.length) return null
   return stops.value[(active.value.stopIndex || 1) - 1] || null
@@ -423,571 +541,391 @@ const activeModeDesc = computed(() => {
 const errText = computed(() => actionError.value || st.value.error || "")
 </script>
 
-<style scoped>
+<style scoped lang="scss">
 .tm-root {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  font-size: 13px;
-  color: #edf1f6;
+  gap: 0.5rem;
+  font-family: "Overpass", var(--fnt-defs);
+  color: var(--bng-off-white);
 }
+
 .tm-num {
   font-variant-numeric: tabular-nums;
 }
 
-/* Career Strip */
-.tm-career {
+.tm-card {
+  --bg-opacity: 0.72;
+  width: 100%;
+}
+
+.tm-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(16, 20, 26, 0.90);
-  border: 1px solid rgba(255, 255, 255, 0.11);
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem 0.75rem;
 }
-.tm-career-top {
+
+.tm-heading-sub {
+  margin-left: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-style: normal;
+  color: var(--bng-cool-gray-300);
+
+  &.is-ok {
+    color: var(--bng-add-green-400);
+  }
+}
+
+.tm-career-head,
+.tm-stop-head,
+.tm-subline,
+.tm-inline-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 0.4rem;
+  flex-wrap: wrap;
 }
-.tm-rank-wrap {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+
+.tm-inline-head {
+  justify-content: flex-start;
+}
+
+.tm-inline-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--bng-off-white);
+  flex: 1 1 auto;
   min-width: 0;
 }
-.tm-rank-badge {
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 10.5px;
+
+.tm-refuel-cost {
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  background: rgba(255, 102, 0, 0.16);
-  border: 1px solid rgba(255, 102, 0, 0.44);
-  color: #ff9c47;
+  font-size: 0.85rem;
+  color: var(--bng-add-blue-300);
+  white-space: nowrap;
 }
-.tm-streak-pill {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(61, 220, 132, 0.14);
-  border: 1px solid rgba(61, 220, 132, 0.34);
-  color: #6ae696;
+
+.tm-pills {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
+
+.tm-pill-brand {
+  --bng-pill-marked-background-color: var(--bng-orange-700);
+  --bng-pill-text-color: var(--bng-off-white);
+  font-size: 0.75rem;
+  padding: 0.15em 0.6em;
+}
+
+.tm-pill-ok {
+  --bng-pill-marked-background-color: var(--bng-add-green-700);
+  --bng-pill-text-color: var(--bng-off-white);
+  font-size: 0.75rem;
+  padding: 0.15em 0.6em;
+}
+
+.tm-pill-warn {
+  --bng-pill-marked-background-color: var(--bng-ter-yellow-700);
+  --bng-pill-text-color: var(--bng-off-white);
+  font-size: 0.75rem;
+  padding: 0.15em 0.6em;
+}
+
+.tm-pill-danger {
+  --bng-pill-marked-background-color: var(--bng-add-red-700);
+  --bng-pill-text-color: var(--bng-off-white);
+  font-size: 0.75rem;
+  padding: 0.15em 0.6em;
+}
+
+.tm-pill-neutral {
+  --bng-pill-marked-background-color: var(--bng-ter-blue-gray-800);
+  --bng-pill-default-border-color: var(--bng-ter-blue-gray-600);
+  --bng-pill-text-color: var(--bng-cool-gray-100);
+  font-size: 0.75rem;
+  padding: 0.15em 0.6em;
+}
+
 .tm-career-reset {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 0.25rem;
   flex-shrink: 0;
 }
-.tm-mini-btn {
-  padding: 2px 7px;
-  border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.05);
-  color: #a9b5c2;
-  font: inherit;
-  font-size: 10.5px;
-  cursor: pointer;
-}
-.tm-mini-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
-.tm-mini-btn.danger {
-  background: rgba(180, 52, 46, 0.78);
-  border-color: rgba(224, 92, 84, 0.65);
-  color: #fff;
-}
-.tm-career-stats {
+
+.tm-prop-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.35rem 0.5rem;
+
+  &.cols-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
-.tm-root:not(.compact) .tm-career-stats {
-  grid-template-columns: repeat(4, 1fr);
+
+.tm-prop {
+  --icon-size: 1.15em;
+  font-size: 0.85rem;
 }
-.tm-cstat {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 6px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-.tm-cstat-k {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #8492a0;
-}
-.tm-cstat b {
-  font-size: 12.5px;
-  color: #eef3f8;
-}
-.tm-cstat b.is-accent {
-  color: #f59e0b;
-}
-.tm-cstat b.is-debt {
-  color: #ff8a80;
-}
-.tm-fuel-pill {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(56, 189, 248, 0.14);
-  border: 1px solid rgba(56, 189, 248, 0.34);
-  color: #7dd3fc;
-}
-.tm-fuel-pill.low {
-  background: rgba(245, 158, 11, 0.20);
-  border-color: rgba(245, 158, 11, 0.55);
-  color: #fbbf24;
-}
-.tm-lowfuel-banner {
-  display: flex;
+
+.tm-lowfuel-row {
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.36);
+  gap: 0.5rem;
 }
-.tm-lowfuel-info {
+
+.tm-lowfuel-copy {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tm-warn-text {
+  color: var(--bng-ter-yellow-300);
+  font-size: 0.9rem;
+}
+
+.tm-job-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--bng-cool-gray-200);
+}
+
+.tm-stop-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.tm-stop-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--bng-off-white);
   min-width: 0;
 }
-.tm-lowfuel-title { font-size: 11.5px; color: #fbbf24; }
-.tm-lowfuel-sub { font-size: 10.5px; color: #d6dfe8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-mini-btn.fuel {
-  background: rgba(56, 189, 248, 0.18);
-  border-color: rgba(56, 189, 248, 0.46);
-  color: #bae6fd;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.tm-mini-btn.fuel:hover { background: rgba(56, 189, 248, 0.30); color: #fff; }
-.tm-refuel-banner {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  background: rgba(14, 34, 48, 0.90);
-  border: 1px solid rgba(56, 189, 248, 0.42);
-  border-left: 3px solid #38bdf8;
-}
-.tm-refuel-banner.done { border-left-color: #3ddc84; border-color: rgba(61, 220, 132, 0.38); }
-.tm-refuel-banner.warn { border-left-color: #f59e0b; border-color: rgba(245, 158, 11, 0.44); }
-.tm-refuel-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11.5px;
-}
-.tm-refuel-title { font-weight: 600; color: #e0f2fe; }
-.tm-refuel-receipt { font-weight: 700; color: #7dd3fc; white-space: nowrap; }
-.tm-bar-fill.fuel { background: #38bdf8; }
 
-/* Vehicle Match Banner */
-.tm-veh-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  background: rgba(16, 20, 26, 0.90);
-  border: 1px solid rgba(255, 255, 255, 0.11);
-  border-left: 3px solid #f59e0b;
-}
-.tm-veh-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #f59e0b;
-  flex-shrink: 0;
-}
-.tm-veh-dot.hitched { background: #3ddc84; }
-.tm-veh-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.tm-veh-label {
-  font-size: 12px;
-  color: #dce4ec;
-}
-.tm-veh-sub {
-  font-size: 11px;
-  color: #93a1af;
+.tm-sub {
+  font-size: 0.82rem;
+  color: var(--bng-cool-gray-300);
+  line-height: 1.35;
 }
 
-.tm-section-label {
-  font-size: 10.5px;
+.tm-sub-strong {
+  font-size: 0.85rem;
+  color: var(--bng-cool-gray-100);
+}
+
+.tm-accent-val {
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #8896a4;
-  margin-top: 2px;
+  color: var(--bng-orange-300);
 }
-.tm-mode-desc {
-  font-size: 12px;
-  color: #b4c0cc;
-  line-height: 1.4;
-}
-.tm-seg {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-.tm-seg .tm-btn {
-  flex: 1 1 70px;
-  padding: 6px 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-}
-.tm-rec-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #f59e0b;
-  flex-shrink: 0;
-}
-.tm-tiers {
+
+.tm-inset {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 0.35rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--bng-corners-1);
+  background: rgba(var(--bng-ter-blue-gray-900-rgb), 0.65);
 }
-.tm-btn, .tm-tier-btn {
-  padding: 6px 10px;
-  border-radius: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(16, 20, 26, 0.90);
-  color: #e6ecf2;
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  text-align: center;
-  transition: background 0.12s ease, border-color 0.12s ease;
-}
-.tm-tier-btn { text-align: left; }
-.tm-btn:hover:not(:disabled), .tm-tier-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.11);
-  border-color: rgba(255, 255, 255, 0.24);
-}
-.tm-btn.on, .tm-tier-btn.on {
-  border-color: #ff6600;
-  background: rgba(255, 102, 0, 0.18);
-  color: #ffd6b5;
-  font-weight: 600;
-}
-.tm-btn.primary {
-  background: #ff6600;
-  border-color: #ff7a1f;
-  color: #fff;
-  font-weight: 700;
-}
-.tm-btn.primary:hover:not(:disabled) { background: #ff791f; }
-.tm-btn.danger {
-  background: rgba(163, 48, 42, 0.85);
-  border-color: #c84840;
-}
-.tm-btn:disabled { opacity: 0.45; cursor: default; }
 
-.tm-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 11px;
-  border-radius: 6px;
-  background: rgba(16, 20, 26, 0.90);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+.tm-progress {
+  font-size: 0.8rem;
+  width: 100%;
 }
-.tm-card.mode-border-taxi { border-left: 3px solid #f59e0b; }
-.tm-card.mode-border-bus { border-left: 3px solid #38bdf8; }
-.tm-card.mode-border-logistics { border-left: 3px solid #ff6600; }
-.tm-card.mode-border-parcel { border-left: 3px solid #34d399; }
 
-.tm-head {
+.tm-integrity-pct {
+  margin-left: auto;
+  font-size: 0.85rem;
+
+  &.tier-high { color: var(--bng-add-green-400); }
+  &.tier-mid { color: var(--bng-ter-yellow-300); }
+  &.tier-low { color: var(--bng-add-red-400); }
+}
+
+.tm-hint {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.tm-head-badges {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.tm-badge {
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border: 1px solid transparent;
-  background: #334;
-}
-.tm-badge.mode-taxi { background: rgba(245, 158, 11, 0.18); border-color: rgba(245, 158, 11, 0.45); color: #fbbf24; }
-.tm-badge.mode-bus { background: rgba(56, 189, 248, 0.18); border-color: rgba(56, 189, 248, 0.45); color: #7dd3fc; }
-.tm-badge.mode-logistics { background: rgba(255, 102, 0, 0.18); border-color: rgba(255, 102, 0, 0.45); color: #ff9c47; }
-.tm-badge.mode-parcel { background: rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.45); color: #6ee7b7; }
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--bng-add-blue-200);
 
-.tm-type-pill {
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
+  &.is-warn {
+    color: var(--bng-ter-yellow-300);
+    font-weight: 600;
+  }
 }
-.tm-type-pill.type-loading_bay {
-  background: rgba(56, 189, 248, 0.15);
-  color: #7dd3fc;
-  border: 1px solid rgba(56, 189, 248, 0.34);
-}
-.tm-type-pill.type-kerbside {
-  background: rgba(255, 255, 255, 0.08);
-  color: #c2cedb;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-}
-
-.tm-stop-count { font-size: 12px; color: #c8d2dc; font-weight: 600; white-space: nowrap; }
-.tm-stop-count.is-complete { color: #6ae696; }
-.tm-title { font-weight: 600; font-size: 13px; color: #fff; line-height: 1.3; }
-.tm-current {
-  padding: 8px 9px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.32);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.tm-stop-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.tm-stop-name { font-weight: 600; font-size: 13.5px; color: #fff; min-width: 0; }
-.tm-stop-tags {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-.tm-sector-tag {
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.08);
-  color: #b4c5d6;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-}
-.tm-kind-tag {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #8c99a6;
-  flex-shrink: 0;
-}
-.tm-stop-loc { color: #8c99a6; font-weight: 400; font-size: 11px; }
-.tm-stop-addr { font-size: 11px; color: #93a0ad; }
-.tm-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding-top: 5px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 12px;
-  color: #d6dfe8;
-}
-.tm-metric { display: inline-flex; align-items: baseline; gap: 5px; }
-.tm-metric-k { font-size: 11px; color: #8c99a6; }
-.tm-subline {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11.5px;
-  color: #cdd6df;
-}
-.tm-pill {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.09);
-  color: #b8c4d0;
-}
-.tm-pill.on {
-  background: rgba(61, 220, 132, 0.18);
-  color: #6ae696;
-}
-.tm-pill.warn {
-  background: rgba(245, 158, 11, 0.22);
-  color: #fbbf24;
-}
-.tm-fare { font-weight: 700; color: #fbbf24; }
-
-.tm-dwell { margin-top: 2px; }
-.tm-dwell-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: #6ae696;
-  margin-bottom: 4px;
-  font-weight: 600;
-}
-.tm-dwell.fallback .tm-dwell-row { color: #c8e972; }
-.tm-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
-.tm-bar-fill { display: block; height: 100%; transition: width 0.14s linear; }
-.tm-bar-fill.dwell { background: #3ddc84; }
-.tm-bar-fill.fallback { background: #a9d94c; }
-.tm-integrity {
-  margin-top: 4px;
-  padding: 5px 7px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-.tm-integrity-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-  font-size: 11px;
-}
-.tm-integrity-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.tm-integrity-lbl { color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-sens-badge {
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  flex-shrink: 0;
-}
-.tm-sens-badge.sens-fragile { background: rgba(245, 158, 11, 0.20); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.45); }
-.tm-sens-badge.sens-hazmat { background: rgba(239, 68, 68, 0.22); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.50); }
-.tm-integrity-pct.tier-good { color: #34d399; }
-.tm-integrity-pct.tier-warn { color: #f59e0b; }
-.tm-integrity-pct.tier-crit { color: #ef4444; }
-.tm-bar-fill.integrity.tier-good { background: #34d399; }
-.tm-bar-fill.integrity.tier-warn { background: #f59e0b; }
-.tm-bar-fill.integrity.tier-crit { background: #ef4444; }
-.tm-bay-hint { font-size: 11px; color: #7dd3fc; margin-top: 2px; }
-.tm-bay-hint.is-warn { color: #fbbf24; font-weight: 600; }
-
-.tm-actions { display: flex; gap: 8px; }
-.tm-actions .tm-btn { flex: 1; }
 
 .tm-stops {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  max-height: 180px;
+  gap: 0.2rem;
+  max-height: 11rem;
   overflow-y: auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding-top: 6px;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(var(--bng-cool-gray-600-rgb), 0.35);
 }
-.compact .tm-stops { max-height: 150px; }
+
 .tm-stop-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  font-size: 12px;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: var(--bng-corners-1);
+  font-size: 0.82rem;
   cursor: pointer;
+  color: var(--bng-cool-gray-200);
+
+  &:hover {
+    background: rgba(var(--bng-cool-gray-700-rgb), 0.35);
+  }
+
+  &.done {
+    color: var(--bng-cool-gray-400);
+  }
+
+  &.current {
+    background: rgba(var(--bng-orange-600-rgb), 0.24);
+    color: var(--bng-off-white);
+    font-weight: 600;
+  }
 }
-.tm-stop-row:hover { background: rgba(255, 255, 255, 0.08); }
-.tm-stop-row.done { opacity: 0.52; }
-.tm-stop-row.current { background: rgba(255, 102, 0, 0.16); font-weight: 600; }
+
 .tm-stop-num {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
+  width: 1.35rem;
   text-align: center;
-  line-height: 18px;
-  font-size: 11px;
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--bng-cool-gray-300);
+}
+
+.tm-stop-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tm-stop-loc {
+  color: var(--bng-cool-gray-400);
+  font-weight: 400;
+}
+
+.tm-stop-kind {
+  font-size: 0.75rem;
+  color: var(--bng-cool-gray-300);
+  white-space: nowrap;
   flex-shrink: 0;
 }
-.tm-stop-row.done .tm-stop-num { background: rgba(61, 220, 132, 0.25); color: #6ae696; }
-.tm-stop-row.current .tm-stop-num { background: #ff6600; color: #fff; }
-.tm-stop-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-stop-kind { font-size: 10px; color: #93a0ad; text-transform: uppercase; letter-spacing: 0.03em; }
 
-.tm-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
-  font-size: 12px;
-}
-.tm-summary-grid > div {
-  display: flex;
-  justify-content: space-between;
-  padding: 5px 7px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-.tm-summary-grid > div.is-score b { color: #6ae696; }
-.tm-summary-grid span { color: #93a0ad; }
-
-/* Itemized Payout Breakdown */
-.tm-payout {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 9px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.34);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-}
-.tm-payout-head {
-  font-size: 10px;
+.tm-section-label {
+  font-size: 0.75rem;
   font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #8c99a6;
-  margin-bottom: 2px;
+  color: var(--bng-cool-gray-300);
 }
+
 .tm-payout-row {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
-  color: #cdd6df;
+  align-items: center;
+  font-size: 0.85rem;
+  color: var(--bng-cool-gray-200);
+
+  &.is-bonus { color: var(--bng-add-green-300); }
+  &.is-penalty { color: var(--bng-add-red-300); }
 }
-.tm-payout-row.is-bonus { color: #8be9a8; }
-.tm-payout-row.is-penalty { color: #ff9c94; }
+
 .tm-payout-total {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  margin-top: 3px;
-  padding-top: 5px;
-  border-top: 1px solid rgba(255, 255, 255, 0.11);
-  font-size: 13px;
+  align-items: center;
+  padding-top: 0.35rem;
+  margin-top: 0.15rem;
+  border-top: 1px solid rgba(var(--bng-cool-gray-600-rgb), 0.4);
+  font-size: 0.95rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--bng-orange-300);
 }
-.tm-payout-total b { color: #f59e0b; font-size: 14px; }
 
-.tm-note { font-size: 12px; color: #b8c2cc; }
-.tm-note.is-warn { color: #ffb27a; }
-.tm-note.is-error { color: #ff8a80; }
+.tm-veh-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--bng-corners-1);
+  background: rgba(var(--bng-ter-blue-gray-900-rgb), 0.65);
+}
+
+.tm-veh-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.tm-veh-label {
+  font-size: 0.85rem;
+  color: var(--bng-off-white);
+}
+
+.tm-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.tm-mode-btn {
+  max-width: none;
+  justify-content: flex-start;
+}
+
+.tm-rec-mark {
+  margin-left: 0.35rem;
+  color: var(--bng-ter-yellow-300);
+}
+
+.tm-tier-select {
+  width: 100%;
+}
+
+.tm-note {
+  font-size: 0.85rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--bng-corners-1);
+  background: rgba(var(--bng-off-black-rgb), 0.65);
+  color: var(--bng-cool-gray-200);
+
+  &.is-warn {
+    color: var(--bng-ter-yellow-300);
+  }
+
+  &.is-error {
+    color: var(--bng-add-red-300);
+  }
+}
+
+.tm-root.compact {
+  gap: 0.4rem;
+
+  .tm-body {
+    padding: 0.4rem 0.6rem 0.55rem;
+    gap: 0.4rem;
+  }
+
+  .tm-prop-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
 </style>
