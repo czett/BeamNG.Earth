@@ -110,21 +110,6 @@ M.SOLO_CARGO_CAP_KG = {
   semi = 5000,
 }
 
--- Physical 3D cargo prop constants
--- Parcel mode prioritizes compact boxes so props fit cleanly inside van/pickup cargo bays.
-M.PARCEL_PROP_MODELS = { 'cardboard_box', 'cargo_load_box_S', 'cargo_load_box_M' }
-M.CRATE_PROP_MODELS = { 'woodcrate', 'EuroPallet', 'cargo_load_box_L', 'cargo_load_box_M', 'cardboard_box' }
-M.OPEN_TRAILER_MODELS = { boxutility = true, boxutility_large = true, tsfb = true, flatbed = true }
-M.PROP_EST_MASS_KG = {
-  cardboard_box = 10,
-  cargo_load_box_S = 10,
-  cargo_load_box_M = 16,
-  cargo_load_box_L = 25,
-  woodcrate = 35,
-  EuroPallet = 60,
-}
-M.MAX_CARGO_PROPS = 8
-
 -- Interactive OSM Fuel Stations & Career Refueling Economy
 M.FUEL_QUERY_INTERVAL_S = 6.0
 M.FUEL_QUERY_MOVE_M = 400.0
@@ -999,163 +984,6 @@ function M.discoverTrailerModels(existsFn, modelListFn)
   return out
 end
 
--- Pure: discover installed BeamNG 3D cargo prop models (parcel boxes + crates/pallets).
-function M.discoverCargoPropModels(existsFn, modelListFn)
-  existsFn = existsFn or M.modelExists
-  local out = { parcel = {}, crate = {}, seen = {} }
-  local function add(bucket, m)
-    if type(m) ~= 'string' or m == '' or out.seen[bucket .. ':' .. m] then return end
-    if existsFn(m) then
-      out.seen[bucket .. ':' .. m] = true
-      table.insert(out[bucket], m)
-    end
-  end
-  for _, m in ipairs(M.PARCEL_PROP_MODELS) do add('parcel', m) end
-  for _, m in ipairs(M.CRATE_PROP_MODELS) do add('crate', m) end
-
-  local list = nil
-  if type(modelListFn) == 'function' then
-    local ok, res = pcall(modelListFn)
-    if ok and type(res) == 'table' then list = res end
-  else
-    local cv = rawget(_G, 'core_vehicles')
-    if cv and cv.getModelList then
-      local ok, res = pcall(cv.getModelList)
-      if ok and type(res) == 'table' then list = res end
-    end
-  end
-  local models = list and (list.models or list)
-  if type(models) == 'table' then
-    local keys = {}
-    for k, info in pairs(models) do
-      if type(info) == 'table' then
-        local tp = tostring(info.Type or ''):lower()
-        local kl = tostring(k):lower()
-        if tp == 'prop' or kl:find('cardboard') or kl:find('woodcrate') or kl:find('cargo_load_box') or kl:find('pallet') then
-          keys[#keys + 1] = tostring(k)
-        end
-      end
-    end
-    table.sort(keys)
-    for _, k in ipairs(keys) do
-      local kl = k:lower()
-      if kl:find('cardboard') or (kl:find('cargo_load_box') and not kl:find('_l$') and not kl:find('_xl')) then
-        add('parcel', k)
-        add('crate', k)
-      elseif kl:find('woodcrate') or kl:find('pallet') or kl:find('crate') or kl:find('cargo_load_box') then
-        add('crate', k)
-      end
-    end
-  end
-  return out
-end
-
--- Pure: compute safe interior/bed local cargo volume bounds for a vehicle or open trailer.
--- Local coordinates: +x = right, +y = forward, +z = up relative to vehicle center/floor.
--- Returns nil when vehicle has no safe interior/bed clearance (triggers pure node-mass fallback).
-function M.computeCargoBayBounds(info)
-  if type(info) ~= 'table' then return nil end
-  local jb = type(info.jbeam) == 'string' and info.jbeam:lower() or ''
-  local mtype = type(info.modelType) == 'string' and info.modelType:lower() or ''
-  local cfg = type(info.configName) == 'string' and info.configName:lower() or ''
-  local lenM = tonumber(info.lengthM)
-  local widM = tonumber(info.widthM)
-  local halfL = lenM and (lenM * 0.5) or nil
-  local halfW = widM and math.max(0.45, widM * 0.5 - 0.28) or nil
-
-  -- Open trailers
-  if jb == 'boxutility' then
-    return { halfW = 0.60, yMin = -0.95, yMax = 0.80, zFloor = 0.48, maxProps = 4, layers = 1, kind = 'crate' }
-  elseif jb == 'boxutility_large' then
-    return { halfW = 0.78, yMin = -1.45, yMax = 1.25, zFloor = 0.52, maxProps = 6, layers = 1, kind = 'crate' }
-  elseif jb == 'tsfb' then
-    return { halfW = 0.86, yMin = -1.90, yMax = 1.55, zFloor = 0.60, maxProps = 6, layers = 1, kind = 'crate' }
-  elseif jb == 'flatbed' then
-    return { halfW = 1.02, yMin = -4.80, yMax = 4.20, zFloor = 1.30, maxProps = 8, layers = 1, kind = 'crate' }
-  end
-  if info.isTrailer then return nil end
-
-  -- Vans & box trucks
-  if jb == 'md_series' or (jb == 'van' and (cfg:find('box') or cfg:find('upfit') or (lenM and lenM >= 6.0))) then
-    local hl = halfL or 3.3
-    return { halfW = math.min(0.82, halfW or 0.80), yMin = -hl + 0.70, yMax = 0.35, zFloor = 0.88, maxProps = 8, layers = 2, kind = 'parcel' }
-  elseif jb == 'van' or jb == 'stambecco' or mtype == 'van' then
-    local hl = halfL or 2.65
-    local yMin = -hl + 0.72
-    return { halfW = math.min(0.56, halfW or 0.56), yMin = yMin, yMax = math.max(-0.15, yMin + 0.50), zFloor = 0.70, maxProps = 6, layers = 2, kind = 'parcel' }
-  end
-
-  -- Pickups (open bed)
-  if jb == 'pickup' or jb == 'dseries' or mtype == 'pickup' or mtype == 'truck' then
-    local hl = halfL or 2.75
-    local yMin = -hl + 0.70
-    return { halfW = math.min(0.56, halfW or 0.56), yMin = yMin, yMax = math.max(-0.45, yMin + 0.50), zFloor = 0.86, maxProps = 6, layers = 1, kind = 'parcel' }
-  end
-
-  -- Hatchbacks, wagons, SUVs, vans/MPVs (compact trunk/cargo bay)
-  if jb == 'lansdale' or jb == 'roamer' or jb == 'vivace' or jb == 'covet' or jb == 'legran' or jb == 'pessima'
-      or mtype == 'hatchback' or mtype == 'wagon' or mtype == 'suv' or (lenM and lenM >= 4.0) then
-    local hl = halfL or 2.25
-    return { halfW = math.min(0.48, halfW or 0.46), yMin = -hl + 0.45, yMax = -hl + 1.15, zFloor = 0.62, maxProps = 3, layers = 1, kind = 'parcel' }
-  end
-
-  return nil
-end
-
--- Pure: generate local-frame { lx, ly, lz } slots ordered front-to-rear / bottom-to-top
--- (so despawning from the tail removes rearmost/topmost props first).
-function M.cargoPropSlots(bounds, count, itemSize)
-  if type(bounds) ~= 'table' then return {} end
-  count = math.min(math.max(0, math.floor(tonumber(count) or 0)), math.min(bounds.maxProps or M.MAX_CARGO_PROPS, M.MAX_CARGO_PROPS))
-  if count <= 0 then return {} end
-  local sz = tonumber(itemSize) or 0.48
-  local halfSz = sz * 0.5
-  local margin = 0.08
-  local xSpan = math.max(0.0, (bounds.halfW or 0.56) - halfSz)
-  local nCols = (xSpan >= sz * 0.42) and 2 or 1
-  local yMin = bounds.yMin or -1.2
-  local yMax = bounds.yMax or 0.0
-  local yLen = math.max(0.2, yMax - yMin)
-  local yLo = yMin + halfSz
-  local yHi = yMax - halfSz
-  if yLo > yHi then
-    local yMid = (yMin + yMax) * 0.5
-    yLo, yHi = yMid, yMid
-  end
-  local nRows = math.max(1, math.floor((yLen + margin) / (sz + margin)))
-  local maxLayers = math.max(1, tonumber(bounds.layers) or 1)
-  local zBase = bounds.zFloor or 0.68
-
-  local slots = {}
-  for layer = 0, maxLayers - 1 do
-    for r = 0, nRows - 1 do
-      local ty = (nRows == 1) and 0.5 or (r / (nRows - 1))
-      -- Front-to-rear so tail removal unloads from the tailgate/doors first
-      local ly = yHi - ty * (yHi - yLo)
-      for c = 0, nCols - 1 do
-        local lx = (nCols == 1) and 0.0 or ((c == 0 and -1 or 1) * math.min(xSpan, sz * 0.54))
-        slots[#slots + 1] = {
-          lx = lx,
-          ly = ly,
-          lz = zBase + layer * (sz + 0.06),
-        }
-        if #slots >= count then return slots end
-      end
-    end
-  end
-  return slots
-end
-
--- Pure: map remaining parcel/cargo units to desired visible 3D prop count in [0..initialProps].
-function M.desiredCargoPropCount(remaining, total, initialProps)
-  local init = math.max(0, math.floor(tonumber(initialProps) or 0))
-  local rem = math.max(0, tonumber(remaining) or 0)
-  local tot = math.max(0, tonumber(total) or 0)
-  if init == 0 or rem <= 0 or tot <= 0 then return 0 end
-  if rem >= tot then return init end
-  return math.max(1, math.min(init, math.ceil((rem / tot) * init)))
-end
-
 -- Pure: pick best installed trailer JBeam model for coupler + cargo domain/type/tier.
 function M.pickTrailerModel(coupler, cargoType, tier, existsFn, cargoDomain, seed, discovered)
   existsFn = existsFn or M.modelExists
@@ -1737,14 +1565,7 @@ end
 
 local function applyCargoMassToJob(j, kg)
   if not j then return end
-  kg = math.max(0, tonumber(kg) or 0)
-  local propKg = 0
-  if type(j.cargoProps) == 'table' then
-    for _, pr in ipairs(j.cargoProps) do
-      propKg = propKg + (tonumber(pr.estMassKg) or 0)
-    end
-  end
-  local nodeKg = math.max(0, kg - propKg)
+  local nodeKg = math.max(0, tonumber(kg) or 0)
   local targetId = j.trailerId or vehIdOf(M.playerVeh())
   if not targetId then return end
   if applyCargoMassToId(targetId, nodeKg) then
@@ -1766,138 +1587,6 @@ local function deleteObjectById(id)
     return true
   end
   return false
-end
-
-local function cleanupCargoProps(j)
-  if not j or type(j.cargoProps) ~= 'table' then return end
-  for i = #j.cargoProps, 1, -1 do
-    local pr = j.cargoProps[i]
-    if pr and pr.id then
-      deleteObjectById(pr.id)
-    end
-    j.cargoProps[i] = nil
-  end
-  j.cargoPropsInitial = 0
-end
-
-local function despawnCargoProps(j, removeCount)
-  if not j or type(j.cargoProps) ~= 'table' then return 0 end
-  local n = math.max(0, math.floor(tonumber(removeCount) or 0))
-  local removed = 0
-  while removed < n and #j.cargoProps > 0 do
-    local pr = table.remove(j.cargoProps)
-    if pr and pr.id then deleteObjectById(pr.id) end
-    removed = removed + 1
-  end
-  return removed
-end
-
-local function syncCargoPropCount(j, targetCount)
-  if not j or type(j.cargoProps) ~= 'table' then return 0 end
-  local want = math.max(0, math.floor(tonumber(targetCount) or 0))
-  if #j.cargoProps <= want then return 0 end
-  return despawnCargoProps(j, #j.cargoProps - want)
-end
-
-local function spawnCargoPropsForTarget(j, targetVeh, count, propBucket, isTrailer, modelOverride)
-  if not j or not targetVeh then return 0 end
-  local cv = rawget(_G, 'core_vehicles')
-  if not (cv and cv.spawnNewVehicle) then return 0 end
-  local jb = modelOverride or (targetVeh.getJBeamFilename and targetVeh:getJBeamFilename()) or targetVeh.JBeam or ''
-  local lenM, widM = nil, nil
-  local center, fwd, right, up = nil, nil, nil, nil
-  if targetVeh.getSpawnWorldOOBB then
-    local okO, oobb = pcall(targetVeh.getSpawnWorldOOBB, targetVeh)
-    if okO and oobb then
-      if oobb.getHalfExtents then
-        local okE, ext = pcall(oobb.getHalfExtents, oobb)
-        if okE and ext then
-          local ex, ey = math.abs(tonumber(ext.x) or 0), math.abs(tonumber(ext.y) or 0)
-          lenM = math.max(ex, ey) * 2
-          widM = math.min(ex, ey) * 2
-        end
-      end
-      if oobb.getCenter then
-        local okC, c = pcall(oobb.getCenter, oobb)
-        if okC and c then center = c end
-      end
-    end
-  end
-  if not center and targetVeh.getPosition then
-    local okP, p = pcall(targetVeh.getPosition, targetVeh)
-    if okP and p then center = p end
-  end
-  if targetVeh.getDirectionVector then
-    local okD, d = pcall(targetVeh.getDirectionVector, targetVeh)
-    if okD and d then fwd = d end
-  end
-  if targetVeh.getDirectionVectorUp then
-    local okU, u = pcall(targetVeh.getDirectionVectorUp, targetVeh)
-    if okU and u then up = u end
-  end
-  if not center or not fwd then return 0 end
-  if not up then up = vec3(0, 0, 1) end
-  local fLen = math.sqrt(fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z)
-  if fLen < 1e-6 then return 0 end
-  local fx, fy, fz = fwd.x / fLen, fwd.y / fLen, fwd.z / fLen
-  local ux, uy, uz = up.x, up.y, up.z
-  local rx, ry, rz = fy * uz - fz * uy, fz * ux - fx * uz, fx * uy - fy * ux
-  local rLen = math.sqrt(rx * rx + ry * ry + rz * rz)
-  if rLen < 1e-6 then rx, ry, rz = fy, -fx, 0 else rx, ry, rz = rx / rLen, ry / rLen, rz / rLen end
-
-  local ge = (not isTrailer) and inspectGeVehicle() or {}
-  local bounds = M.computeCargoBayBounds({
-    jbeam = jb,
-    modelType = ge.modelType,
-    configName = ge.configName,
-    lengthM = lenM or ge.lengthM,
-    widthM = widM,
-    isTrailer = isTrailer == true,
-  })
-  if not bounds then return 0 end
-
-  local disc = M.discoverCargoPropModels()
-  local bucket = propBucket or bounds.kind or 'parcel'
-  local models = disc[bucket]
-  if not models or #models == 0 then
-    models = (bucket == 'parcel') and disc.crate or disc.parcel
-  end
-  if not models or #models == 0 then return 0 end
-
-  local itemSz = (bucket == 'crate') and 0.65 or 0.44
-  local slots = M.cargoPropSlots(bounds, count, itemSz)
-  if #slots == 0 then return 0 end
-
-  j.cargoProps = j.cargoProps or {}
-  local rot = quatFromDir(vec3(fx, fy, 0):normalized(), vec3(0, 0, 1))
-  local spawned = 0
-  for idx, sl in ipairs(slots) do
-    if #j.cargoProps >= M.MAX_CARGO_PROPS then break end
-    local model = models[((idx - 1) % #models) + 1]
-    local wx = center.x + rx * sl.lx + fx * sl.ly + ux * sl.lz
-    local wy = center.y + ry * sl.lx + fy * sl.ly + uy * sl.lz
-    local wz = center.z + rz * sl.lx + fz * sl.ly + uz * sl.lz
-    local okS, obj = pcall(cv.spawnNewVehicle, model, {
-      pos = vec3(wx, wy, wz),
-      rot = rot,
-      autoEnterVehicle = false,
-      vehicleName = 'bne_cargo_prop',
-    })
-    if okS and obj then
-      local pid = vehIdOf(obj)
-      if pid then
-        j.cargoProps[#j.cargoProps + 1] = {
-          id = pid,
-          model = model,
-          estMassKg = M.PROP_EST_MASS_KG[model] or 12,
-        }
-        spawned = spawned + 1
-      end
-    end
-  end
-  j.cargoPropsInitial = #j.cargoProps
-  j.cargoPropsMax = bounds.maxProps or M.MAX_CARGO_PROPS
-  return spawned
 end
 
 local function flushDespawnQueue()
@@ -1940,7 +1629,6 @@ end
 
 local function detachAndQueueDespawn(j)
   if not j then return end
-  cleanupCargoProps(j)
   if j.trailerId then
     applyCargoMassToId(j.trailerId, 0)
   end
@@ -1968,7 +1656,6 @@ local function cleanupJobTrailer(j)
     flushDespawnQueue()
     return
   end
-  cleanupCargoProps(j)
   applyCargoMassToJob(j, 0)
   if j.trailerOwnedByJob and j.trailerId then
     local pv = M.playerVeh()
@@ -2075,10 +1762,6 @@ local function stageTrailerAtBay(j, stop, sx, sy, fx, fy, rx, ry, leg, playerZ)
   j.trailerState = 'staged'
   j.lastCoupleTryAt = -math.huge
   pcall(trl.queueLuaCommand, trl, 'if input and input.event then input.event("parkingbrake", 0, 2) end')
-  if M.OPEN_TRAILER_MODELS[tostring(model):lower()] then
-    local crateCount = math.max(2, math.min(M.MAX_CARGO_PROPS, math.ceil((tonumber(leg.cargoMassKg) or 800) / 450)))
-    spawnCargoPropsForTarget(j, trl, crateCount, 'crate', true, model)
-  end
   M.say(string.format('%s staged at %s — back up to hitch', j.trailerLabel, stop.name or 'loading bay'), 5)
   return true
 end
@@ -2624,7 +2307,8 @@ function M.onJobResult(msg)
         road = tostring(s.road or ''),
         roadClass = tostring(s.roadClass or ''),
         bidirectional = s.bidirectional == true,
-        bearing = tonumber(s.bearing) or 0,
+        bearing = tonumber(s.bearing) or tonumber(s.bearingDeg) or 0,
+        domain = s.domain and tostring(s.domain) or nil,
         zoneRadius = math.max(8, math.min(20, tonumber(s.zoneRadius) or M.DEFAULT_ZONE_RADIUS_M)),
         cargoDeltaKg = cDelta,
         paxBoard = tonumber(s.paxBoard) or 0,
@@ -2779,24 +2463,17 @@ function M.onJobResult(msg)
     trailerState = preAttachedId and 'attached' or ((mode == 'logistics' and 'en_route_pickup') or 'none'),
     lastCoupleTryAt = -math.huge,
     hitchPlan = nil,
-    -- Parcel Courier & 3D Cargo Props state
+    -- Parcel Courier state
     parcelsTotal = (mode == 'parcel') and ((parcelMeta and tonumber(parcelMeta.parcelsTotal)) or sumDeliverParcels) or nil,
     parcelsRemaining = (mode == 'parcel') and ((parcelMeta and tonumber(parcelMeta.parcelsTotal)) or sumDeliverParcels) or nil,
     parcelsDelivered = (mode == 'parcel') and 0 or nil,
     parcelsReturned = (mode == 'parcel') and 0 or nil,
-    cargoProps = {},
-    cargoPropsInitial = 0,
-    cargoPropsMax = M.MAX_CARGO_PROPS,
   }
   if mode == 'parcel' then
     local initKg = (parcelMeta and tonumber(parcelMeta.initialMassKg)) or (cargoKg > 0 and cargoKg) or sumDeliverKg
     activeJob.cargoKg = initKg
     activeJob.cargoCurrentKg = initKg
     activeJob.totalCargoHauledKg = initKg
-    local pv = M.playerVeh()
-    if pv and (activeJob.parcelsTotal or 0) > 0 then
-      spawnCargoPropsForTarget(activeJob, pv, activeJob.parcelsTotal, 'parcel', false)
-    end
     applyCargoMassToJob(activeJob, initKg)
   end
   syncGpsToStop(stops[1], 1, #stops)
@@ -2912,17 +2589,11 @@ local function advanceStop(completed, isFallback)
       if doneStop.parcelAction == 'pickup_return' or doneStop.kind == 'pickup' then
         j.parcelsReturned = (j.parcelsReturned or 0) + pCnt
         j.cargoCurrentKg = math.max(0, (j.cargoCurrentKg or 0) + math.abs(tonumber(doneStop.cargoDeltaKg) or 10))
-        local pv = M.playerVeh()
-        if pv and #(j.cargoProps or {}) < (j.cargoPropsMax or M.MAX_CARGO_PROPS) then
-          spawnCargoPropsForTarget(j, pv, 1, 'parcel', false)
-        end
       else
         j.parcelsDelivered = (j.parcelsDelivered or 0) + pCnt
         j.parcelsRemaining = math.max(0, (j.parcelsRemaining or 0) - pCnt)
         local dropKg = math.abs(tonumber(doneStop.cargoDeltaKg) or 12)
         j.cargoCurrentKg = math.max(0, (j.cargoCurrentKg or 0) - dropKg)
-        local wantProps = M.desiredCargoPropCount(j.parcelsRemaining, j.parcelsTotal, j.cargoPropsInitial)
-        syncCargoPropCount(j, wantProps)
       end
       applyCargoMassToJob(j, j.cargoCurrentKg)
     elseif j.mode == 'logistics' and doneStop then
@@ -2932,14 +2603,6 @@ local function advanceStop(completed, isFallback)
         local loadKg = nextLeg and (tonumber(nextLeg.cargoMassKg) or 0) or (j.cargoKg or 0)
         j.cargoCurrentKg = loadKg
         j.totalCargoHauledKg = (j.totalCargoHauledKg or 0) + loadKg
-        if nextLeg and nextLeg.legKind == 'loaded_solo' then
-          local pv = M.playerVeh()
-          if pv then
-            cleanupCargoProps(j)
-            local propCnt = math.max(2, math.min(M.MAX_CARGO_PROPS, math.ceil(loadKg / 350)))
-            spawnCargoPropsForTarget(j, pv, propCnt, 'crate', false)
-          end
-        end
         applyCargoMassToJob(j, loadKg)
         if nextLeg and nextLeg.legKind == 'loaded_trailer' and j.trailerId then
           j.trailerState = 'attached'
@@ -2948,8 +2611,6 @@ local function advanceStop(completed, isFallback)
         local nxtStop = j.stops[doneIdx + 1]
         if nextLeg and nextLeg.legKind ~= 'deadhead' and nxtStop and nxtStop.kind == 'delivery' then
           local remKg = tonumber(nextLeg.cargoMassKg) or math.max(0, (j.cargoCurrentKg or 0) + (doneStop.cargoDeltaKg or 0))
-          local wantProps = M.desiredCargoPropCount(remKg, math.max(1, j.cargoCurrentKg or remKg), j.cargoPropsInitial)
-          syncCargoPropCount(j, wantProps)
           j.cargoCurrentKg = remKg
           applyCargoMassToJob(j, remKg)
         else
@@ -3947,7 +3608,6 @@ function M.hudPayload()
       parcelsTotal = activeJob.mode == 'parcel' and (activeJob.parcelsTotal or 0) or nil,
       parcelsDelivered = activeJob.mode == 'parcel' and (activeJob.parcelsDelivered or 0) or nil,
       parcelsReturned = activeJob.mode == 'parcel' and (activeJob.parcelsReturned or 0) or nil,
-      cargoPropsCount = activeJob.cargoProps and #activeJob.cargoProps or 0,
       collisions = activeJob.collisions,
       fuelPct = fuelPct,
       lowFuel = lowFuel,
@@ -4103,7 +3763,6 @@ function M.uiState()
       parcelsTotal = activeJob.mode == 'parcel' and (activeJob.parcelsTotal or 0) or nil,
       parcelsDelivered = activeJob.mode == 'parcel' and (activeJob.parcelsDelivered or 0) or nil,
       parcelsReturned = activeJob.mode == 'parcel' and (activeJob.parcelsReturned or 0) or nil,
-      cargoPropsCount = activeJob.cargoProps and #activeJob.cargoProps or 0,
       collisions = activeJob.collisions,
     } or nil,
     summary = summary,

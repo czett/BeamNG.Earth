@@ -605,7 +605,7 @@ do
   tm.cancelJob()
 end
 
--- 12. Phase 6: Parcel Courier mode + Physical 3D Cargo Props (discovery, bounds, slots, dynamic despawn & cleanup)
+-- 12. Phase 6: Parcel Courier mode (pure cargo weight simulation, zero 3D cargo props, curb-side bay alignment)
 do
   -- Validation, compact bay & fast 2.5 s dwell + recipient dwell label
   T.check(tm.validateRequest('parcel', 'local') and tm.validateRequest('parcel', 'city')
@@ -619,44 +619,24 @@ do
   T.check(tm.dwellStatusLabel('parcel', 'pickup', 'bay', nil, nil, nil, { parcelAction = 'pickup_return', recipient = 'M. Gruber' }) == 'Picking up return parcel · M. Gruber',
     'parcel return pickup dwell label includes recipient')
 
-  -- Prop discovery, cargo bay bounds & slot packing
-  local disc = tm.discoverCargoPropModels(
-    function(m) return m == 'cardboard_box' or m == 'cargo_load_box_S' or m == 'cargo_load_box_M' or m == 'woodcrate' or m == 'EuroPallet' end,
-    function() return { models = { cardboard_box = { Type = 'Prop' }, cargo_load_box_S = { Type = 'Prop' }, cargo_load_box_M = { Type = 'Prop' }, woodcrate = { Type = 'Prop' }, EuroPallet = { Type = 'Prop' } } } end
-  )
-  T.check(#disc.parcel == 3 and disc.parcel[1] == 'cardboard_box' and disc.parcel[2] == 'cargo_load_box_S' and disc.parcel[3] == 'cargo_load_box_M',
-    'discoverCargoPropModels prioritizes compact boxes and excludes woodcrate from parcel')
-  T.check(#disc.crate >= 2 and disc.crate[1] == 'woodcrate', 'discoverCargoPropModels finds woodcrate/EuroPallet for crates')
+  -- 3D cargo prop helpers and constants are removed
+  T.check(tm.discoverCargoPropModels == nil and tm.computeCargoBayBounds == nil
+    and tm.cargoPropSlots == nil and tm.desiredCargoPropCount == nil
+    and tm.PARCEL_PROP_MODELS == nil and tm.CRATE_PROP_MODELS == nil,
+    '3D in-vehicle cargo prop helpers and constants are removed')
 
-  local bVan = tm.computeCargoBayBounds({ jbeam = 'van', lengthM = 5.4, widthM = 2.0 })
-  local bPickup = tm.computeCargoBayBounds({ jbeam = 'pickup', lengthM = 5.5, widthM = 2.0 })
-  local bHatch = tm.computeCargoBayBounds({ jbeam = 'vivace', modelType = 'Hatchback', lengthM = 4.3, widthM = 1.8 })
-  local bFlat = tm.computeCargoBayBounds({ jbeam = 'flatbed', isTrailer = true })
-  local bUtil = tm.computeCargoBayBounds({ jbeam = 'boxutility', isTrailer = true })
-  local bDry = tm.computeCargoBayBounds({ jbeam = 'dryvan', isTrailer = true })
-  local bMicro = tm.computeCargoBayBounds({ jbeam = 'pigeon', lengthM = 2.6, widthM = 1.2 })
-  T.check(bVan and bVan.maxProps == 6 and bPickup and bPickup.maxProps == 6, 'van & pickup cargo bounds computed')
-  T.check(bVan.halfW <= 0.58 and bPickup.halfW <= 0.58, 'van & pickup halfW tightened <= 0.58 m')
-  T.check(bVan.yMin >= -(5.4 * 0.5) + 0.65 and bPickup.yMin >= -(5.5 * 0.5) + 0.65,
-    'van & pickup rear yMin inset >= 0.65 m inside rear bumper/doors')
-  T.check(bVan.zFloor >= 0.68 and bPickup.zFloor >= 0.82, 'van & pickup zFloor lifted above floor pan')
-  T.check(bHatch and bHatch.maxProps == 3, 'hatchback compact trunk bounds computed')
-  T.check(bFlat and bFlat.maxProps == 8 and bUtil and bUtil.maxProps == 4, 'open trailer bounds computed')
-  T.check(bDry == nil and bMicro == nil, 'enclosed trailer & tiny microcar return nil bounds (node-mass fallback)')
+  -- Travel-aligned curb side preserved by bayFrame (northbound: right curb is +X east; southbound: right curb is -X west)
+  local fxN, fyN, rxN, ryN = tm.bayFrame(0, 1, 0)
+  local fxS, fyS, rxS, ryS = tm.bayFrame(0, 1, 180)
+  T.check(math.abs(fxN) < 1e-6 and math.abs(fyN - 1) < 1e-6 and math.abs(rxN - 1) < 1e-6 and math.abs(ryN) < 1e-6,
+    'northbound bayFrame aligns forward +Y and right-hand curb +X')
+  T.check(math.abs(fxS) < 1e-6 and math.abs(fyS + 1) < 1e-6 and math.abs(rxS + 1) < 1e-6 and math.abs(ryS) < 1e-6,
+    'southbound bayFrame aligns forward -Y and right-hand curb -X')
 
-  local slots = tm.cargoPropSlots(bVan, 6, 0.48)
-  T.check(#slots == 6, 'cargoPropSlots packs 6 slots for van')
-  for _, sl in ipairs(slots) do
-    T.check(math.abs(sl.lx) + 0.24 <= bVan.halfW + 1e-6 and sl.ly - 0.24 >= bVan.yMin - 1e-6 and sl.ly + 0.24 <= bVan.yMax + 1e-6,
-      'slot footprint stays cleanly within van cargo bay bounds')
-  end
-  T.check(tm.desiredCargoPropCount(14, 14, 6) == 6 and tm.desiredCargoPropCount(7, 14, 6) == 3 and tm.desiredCargoPropCount(0, 14, 6) == 0,
-    'desiredCargoPropCount maps remaining parcels monotonically to 0')
-
-  -- End-to-end parcel run with mocked 3D props spawn, stop-by-stop despawn, return pickup & cleanup
-  local nextPropId = 5000
-  local liveProps, deletedProps = {}, {}
-  local oldScenetree, oldCv, oldBe, origPlayerVeh, origModelExists = scenetree, core_vehicles, be, tm.playerVeh, tm.modelExists
+  -- End-to-end parcel run: zero spawned 3D props, full cargo node-mass simulation, manifest completion & cancel cleanup
+  local spawnedProps = 0
+  local massCmds = {}
+  local oldScenetree, oldCv, oldBe, origPlayerVeh = scenetree, core_vehicles, be, tm.playerVeh
   local vanObj = {
     id = 950, JBeam = 'van',
     getID = function(self) return self.id end,
@@ -664,31 +644,16 @@ do
     getPosition = function() return vec3(0, 0, 10) end,
     getDirectionVector = function() return vec3(0, 1, 0) end,
     getDirectionVectorUp = function() return vec3(0, 0, 1) end,
-    queueLuaCommand = function() end,
+    queueLuaCommand = function(_, c) massCmds[#massCmds + 1] = c end,
   }
   tm.playerVeh = function() return vanObj end
-  tm.modelExists = function(m) return m == 'cardboard_box' or m == 'woodcrate' or m == 'boxutility' end
   core_vehicles = {
-    getModelList = function() return { models = { cardboard_box = { Type = 'Prop' }, woodcrate = { Type = 'Prop' } } } end,
-    spawnNewVehicle = function(model, opts)
-      nextPropId = nextPropId + 1
-      local pid = nextPropId
-      local obj = {
-        id = pid, model = model,
-        getID = function(self) return self.id end,
-        getPosition = function() return opts.pos end,
-        getDirectionVector = function() return vec3(0, 1, 0) end,
-        queueLuaCommand = function() end,
-        delete = function(self)
-          liveProps[self.id] = nil
-          deletedProps[#deletedProps + 1] = self.id
-        end,
-      }
-      liveProps[pid] = obj
-      return obj
+    spawnNewVehicle = function()
+      spawnedProps = spawnedProps + 1
+      return nil
     end,
   }
-  scenetree = { findObjectById = function(id) return liveProps[id] or (id == 950 and vanObj or nil) end }
+  scenetree = { findObjectById = function(id) return id == 950 and vanObj or nil end }
   be = { getObjectCount = function() return 0 end }
 
   tm.startJob('parcel', 'local')
@@ -699,41 +664,38 @@ do
     parcel = { parcelsTotal = 6, initialMassKg = 72, returnCount = 1 },
     cargo = { type = 'parcels', label = 'Courier Parcels', massKg = 72, vehicleClass = 'van', useTrailer = false },
     stops = {
-      { index = 1, kind = 'delivery', stopType = 'kerbside', name = 'Birkenweg 14', address = 'Fam. Weber · Birkenweg 14', recipient = 'Fam. Weber', parcelCount = 2, parcelAction = 'deliver', cargoDeltaKg = -24, parcelsRemaining = 4, parcelsTotal = 6, lat = 47.714, lon = 11.383, dwellTargetS = 2.5 },
-      { index = 2, kind = 'pickup', stopType = 'kerbside', name = 'Hauptstraße 27a', address = 'M. Gruber · Hauptstraße 27a', recipient = 'M. Gruber', parcelCount = 1, parcelAction = 'pickup_return', cargoDeltaKg = 10, parcelsRemaining = 4, parcelsTotal = 6, lat = 47.716, lon = 11.383, dwellTargetS = 2.5 },
-      { index = 3, kind = 'delivery', stopType = 'kerbside', name = 'Lindenstraße 8', address = 'Praxis Dr. König · Lindenstraße 8', recipient = 'Praxis Dr. König', parcelCount = 4, parcelAction = 'deliver', cargoDeltaKg = -48, parcelsRemaining = 0, parcelsTotal = 6, lat = 47.718, lon = 11.383, dwellTargetS = 2.5 },
+      { index = 1, kind = 'delivery', stopType = 'kerbside', bearingDeg = 180, domain = 'residential', name = 'Birkenweg 14', address = 'Fam. Weber · Birkenweg 14', recipient = 'Fam. Weber', parcelCount = 2, parcelAction = 'deliver', cargoDeltaKg = -24, parcelsRemaining = 4, parcelsTotal = 6, lat = 47.714, lon = 11.383, dwellTargetS = 2.5 },
+      { index = 2, kind = 'pickup', stopType = 'kerbside', bearing = 0, domain = 'commercial', name = 'Hauptstraße 27a', address = 'Autohaus Huber · Hauptstraße 27a', recipient = 'Autohaus Huber', parcelCount = 1, parcelAction = 'pickup_return', cargoDeltaKg = 10, parcelsRemaining = 4, parcelsTotal = 6, lat = 47.716, lon = 11.383, dwellTargetS = 2.5 },
+      { index = 3, kind = 'delivery', stopType = 'kerbside', bearing = 0, domain = 'commercial', name = 'Lindenstraße 8', address = 'Praxis Dr. König · Lindenstraße 8', recipient = 'Praxis Dr. König', parcelCount = 4, parcelAction = 'deliver', cargoDeltaKg = -48, parcelsRemaining = 0, parcelsTotal = 6, lat = 47.718, lon = 11.383, dwellTargetS = 2.5 },
     },
   })
   local hp0 = tm.hudPayload()
   T.check(hp0.mode == 'parcel' and hp0.parcelsRemaining == 6 and hp0.parcelsTotal == 6 and hp0.recipient == 'Fam. Weber', 'parcel job initializes 6/6 manifest and recipient')
-  T.check(hp0.cargoPropsCount == 6, 'parcel job spawns 6 physical 3D parcel props inside van bay')
+  T.check(spawnedProps == 0 and hp0.cargoCurrentKg == 72 and #massCmds >= 1, 'parcel job spawns 0 3D props and applies full 72 kg cargo mass')
 
   local pCoords = { [47.714] = { 0, 0 }, [47.716] = { 0, 200 }, [47.718] = { 0, 400 } }
   local anchorP = { geodeticToEnu = function(_, lat) local c = pCoords[lat] or { 0, 0 }; return c[1], c[2] end }
   local plP = { x = 0, y = 0, z = 10, vx = 0, vy = 0, vz = 0, speed = 0.2 }
 
-  -- Complete stop 1 (deliver 2 parcels -> 4/6 remaining, 2 props deleted)
+  -- Complete stop 1 (deliver 2 parcels -> 4/6 remaining, cargo mass drops to 48 kg)
   for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorP, plP, false, false) end
   local hp1 = tm.hudPayload()
-  T.check(hp1.stopIndex == 2 and hp1.parcelsRemaining == 4 and hp1.cargoPropsCount == 4 and #deletedProps == 2, 'delivering 2 parcels steps manifest to 4/6 and despawns 2 props')
-  T.check(hp1.parcelAction == 'pickup_return' and hp1.recipient == 'M. Gruber', 'stop 2 exposes pickup_return action and recipient')
+  T.check(hp1.stopIndex == 2 and hp1.parcelsRemaining == 4 and hp1.cargoCurrentKg == 48 and spawnedProps == 0, 'delivering 2 parcels steps manifest to 4/6 and updates cargo mass to 48 kg with 0 props')
+  T.check(hp1.parcelAction == 'pickup_return' and hp1.recipient == 'Autohaus Huber', 'stop 2 exposes pickup_return action and commercial recipient')
 
-  -- Complete stop 2 (return pickup +1 parcel -> parcelsReturned == 1, cargoCurrentKg increases by +10)
+  -- Complete stop 2 (return pickup +1 parcel -> parcelsReturned == 1, cargoCurrentKg increases by +10 kg)
   plP.y = 200
   for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorP, plP, false, false) end
   local hp2 = tm.hudPayload()
-  T.check(hp2.stopIndex == 3 and hp2.parcelsReturned == 1 and hp2.cargoCurrentKg == 58 and hp2.cargoPropsCount == 5, 'return pickup increments parcelsReturned, mass (+10 kg) and spawns return prop')
+  T.check(hp2.stopIndex == 3 and hp2.parcelsReturned == 1 and hp2.cargoCurrentKg == 58 and spawnedProps == 0, 'return pickup increments parcelsReturned and mass (+10 kg) with 0 props')
 
-  -- Complete stop 3 (final delivery -> summary, all remaining props cleaned up)
+  -- Complete stop 3 (final delivery -> summary)
   plP.y = 400
   for _ = 1, 5 do fakeNow = fakeNow + 0.5; tm.update(0.5, 0.5, anchorP, plP, false, false) end
   local hpDone = tm.hudPayload()
   T.check(hpDone.state == 'summary' and hpDone.parcelsDelivered == 6 and hpDone.parcelsReturned == 1, 'parcel summary reports 6 delivered + 1 return')
-  local liveCount = 0
-  for _ in pairs(liveProps) do liveCount = liveCount + 1 end
-  T.check(liveCount == 0, 'all 3D cargo props cleaned up on job completion')
 
-  -- Verify cancelJob() cleans up active parcel props too
+  -- Verify cancelJob() resets cargo mass cleanly with 0 props spawned
   tm.startJob('parcel', 'local')
   tm.onJobResult({
     id = sentReqs[#sentReqs].id, ok = true, mode = 'parcel', tier = 'local',
@@ -742,13 +704,11 @@ do
       { index = 1, kind = 'delivery', name = 'Ahornweg 4', recipient = 'S. Bauer', parcelCount = 4, parcelAction = 'deliver', cargoDeltaKg = -48, lat = 47.714, lon = 11.383 },
     },
   })
-  T.check(tm.hudPayload().cargoPropsCount == 4, 'second parcel job spawns 4 props')
+  T.check(spawnedProps == 0 and tm.hudPayload().cargoCurrentKg == 48, 'second parcel job applies cargo mass without spawning props')
   tm.cancelJob()
-  liveCount = 0
-  for _ in pairs(liveProps) do liveCount = liveCount + 1 end
-  T.check(liveCount == 0, 'cancelJob cleans up all remaining 3D cargo props')
+  T.check(tm.hudPayload() == nil, 'cancelJob returns cleanly to idle')
 
-  tm.playerVeh, tm.modelExists = origPlayerVeh, origModelExists
+  tm.playerVeh = origPlayerVeh
   scenetree, core_vehicles, be = oldScenetree, oldCv, oldBe
 end
 

@@ -523,7 +523,7 @@ TRANSPORT_STOP_FIELDS = {
     "dwellTargetS": F(NUM, OPT), "dwellS": F(NUM, OPT), "role": F(str, OPT), "cargoDeltaKg": F(NUM, OPT),
     "paxBoard": F(int, OPT), "paxAlight": F(int, OPT),
     "targetArrivalS": F(NUM, OPT),
-    "locality": F(str, OPT), "sectorLabel": F(str, OPT),
+    "locality": F(str, OPT), "sectorLabel": F(str, OPT), "domain": F(str, OPT),
     "recipient": F(str, OPT), "parcelCount": F(int, OPT), "parcelAction": F(str, OPT),
     "parcelsRemaining": F(int, OPT), "parcelsTotal": F(int, OPT),
 }
