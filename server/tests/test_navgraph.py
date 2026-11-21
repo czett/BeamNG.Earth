@@ -1019,3 +1019,36 @@ class PostedLimitTest(unittest.TestCase):
         self.assertEqual(ng.posted_field(24.6, 18.0, True), 24.6)     # (a bend: the limit)
         self.assertEqual(ng.posted_field(24.6, 18.0, False), -24.6)   # (the class's default: negative)
         self.assertIsNone(ng.posted_field(None, 10.0, True))
+
+
+class AutobahnMetadataTest(unittest.TestCase):
+    """Loop 8: Autobahn unlimited vs posted motorway edge metadata (e[12]) and motorway curve comfort."""
+
+    def test_german_autobahn_unlimited_vs_posted_edge_flag(self):
+        f = features([[(0, 0), (400, 0)]], ["motorway"])
+        f.rules["connectors"] = rules([(0, "A", 0.0, 0.0), (0, "B", 1.0, 1.0)])
+        f.rules["oneway"] = rules([(0, 1.0)], "float")
+        g_unlim = navgraph.build(FRAME, [f], flat, (0.0, 0.0), mph=False, country="DE",
+                                 urban_fn=lambda lat, lon: np.zeros_like(lat, dtype=bool))
+        self.assertTrue(g_unlim["edges"])
+        self.assertTrue(all(len(e) >= 13 and e[12] == 2 for e in g_unlim["edges"]),
+                        "untagged rural DE motorway emits unlimited Autobahn flag e[12] == 2")
+        self.assertTrue(all(e[5] >= navgraph.DE_RICHTGESCHWINDIGKEIT_MS - 0.1 for e in g_unlim["edges"]),
+                        "unlimited DE Autobahn keeps >= 130 km/h baseline target")
+
+        f.rules["max_speed_kmh"] = rules([(0, 120.0)], "float")
+        g_posted = navgraph.build(FRAME, [f], flat, (0.0, 0.0), mph=False, country="DE",
+                                  urban_fn=lambda lat, lon: np.zeros_like(lat, dtype=bool))
+        self.assertTrue(all(len(e) >= 13 and e[12] == 1 for e in g_posted["edges"]),
+                        "posted 120 km/h DE motorway emits highway flag e[12] == 1, not unlimited")
+
+    def test_motorway_gentle_curve_uses_higher_lateral_accel(self):
+        # Arc of radius ~500 m: standard CURVE_ACCEL (2.0) caps at ~31.6 m/s (114 km/h),
+        # while MOTORWAY_CURVE_ACCEL (3.2) allows ~40.0 m/s (144 km/h).
+        r = 500.0
+        ang = np.linspace(0.0, 0.4, 9)
+        xy = np.column_stack([r * np.sin(ang), r * (1.0 - np.cos(ang))])
+        v_std = navgraph._speed_profile(xy, 7.4, True, limit=40.0, urban=False, curve_accel=navgraph.CURVE_ACCEL)
+        v_mw = navgraph._speed_profile(xy, 7.4, True, limit=40.0, urban=False, curve_accel=navgraph.MOTORWAY_CURVE_ACCEL)
+        self.assertGreater(float(v_mw.min()), float(v_std.min()) + 5.0,
+                           "banked motorway curve profile avoids unnecessary braking")

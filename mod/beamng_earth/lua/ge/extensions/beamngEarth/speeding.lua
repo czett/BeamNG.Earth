@@ -53,14 +53,63 @@ function M.cap(limit, fast, street)
   return limit * (1 + (limit >= M.FAST_MS and fast or street))
 end
 
+-- Persona-driven speed cap (m/s) honoring truck/bus highway limits, courier pace, commuter limits, and Autobahn speeders.
+-- Pure given limit (m/s), persona table (from navgraph.assignVehiclePersona), and optional roadProfile ({ highway, unlimited, rough }).
+function M.personaCap(limit, persona, roadProfile)
+  if type(persona) ~= 'table' or not limit then return nil end
+  local kind = persona.persona
+  local isHighway = (roadProfile and roadProfile.highway == true) or limit >= M.FAST_MS
+  local isUnlimited = roadProfile and roadProfile.unlimited == true or false
+  local isRough = roadProfile and roadProfile.rough == true or false
+  local cap
+  if kind == 'truck' or kind == 'bus' then
+    local cruise = tonumber(persona.highwayCruiseMs) or (86 / 3.6)
+    if isHighway or isUnlimited then
+      cap = isUnlimited and cruise or math.min(limit, cruise)
+    else
+      cap = math.max(4.5, limit + (tonumber(persona.urbanDeltaKph) or -2) / 3.6)
+    end
+  elseif kind == 'courier' then
+    local cruise = tonumber(persona.highwayCruiseMs) or (102 / 3.6)
+    if isHighway or isUnlimited then
+      cap = isUnlimited and cruise or math.min(limit * 1.08, cruise)
+    else
+      cap = math.max(4.5, limit + (tonumber(persona.urbanDeltaKph) or 2) / 3.6)
+    end
+  elseif kind == 'speeder' then
+    if isUnlimited then
+      cap = tonumber(persona.highwayCruiseMs) or (185 / 3.6)
+    elseif isHighway then
+      cap = limit + (tonumber(persona.highwayDeltaKph) or 20) / 3.6
+    else
+      cap = math.min(limit * 1.18, math.max(4.5, limit + (tonumber(persona.urbanDeltaKph) or 6) / 3.6))
+    end
+  else
+    -- commuter (or unknown persona)
+    if isUnlimited then
+      cap = tonumber(persona.highwayCruiseMs) or (130 / 3.6)
+    else
+      cap = math.max(4.5, limit + (tonumber(persona.urbanDeltaKph) or 0) / 3.6)
+    end
+  end
+  if isRough then
+    cap = math.min(cap, limit)
+  end
+  return cap
+end
+
 -- A road OpenStreetMap tags smoothness=bad or worse (navgraph's edge flag "rough", server navgraph.ROUGH_SMOOTHNESS:
 -- passability, not a speed limit) is not sped on: a habit over the limit keeps to the limit there (PR #1122).
-local function rough(obj)
+local function roadProfileOf(obj)
   local ng = package.loaded['beamngEarth/navgraph']
-  if not (ng and ng.speedProfileAt and obj and obj.getPosition) then return false end
+  if not (ng and ng.speedProfileAt and obj and obj.getPosition) then return nil end
   local p = obj:getPosition()
   local ok, r = pcall(ng.speedProfileAt, p.x, p.y, p.z)
-  return ok and type(r) == 'table' and r.rough == true or false
+  return ok and type(r) == 'table' and r or nil
+end
+local function rough(obj)
+  local r = roadProfileOf(obj)
+  return r ~= nil and r.rough == true or false
 end
 M._rough = rough        -- (tests)
 
@@ -91,12 +140,17 @@ function M.update(dt, graph)
   for id, c in pairs(cars) do
     if not data[id] then cars[id] = nil end        -- (gone)
   end
+  local ng = package.loaded['beamngEarth/navgraph']
   for id, v in pairs(data) do
     local role = v.role
-    local free = v.isAi and id ~= player and role and role.name == 'standard' and role.state == 'none'
+    local busDwelling = ng and ng.isBusDwelling and ng.isBusDwelling(id) == true or false
+    local free = v.isAi and id ~= player and not busDwelling and role and role.name == 'standard' and role.state == 'none'
       and role.actionName == 'none' and v.state == 'active'
     local c = cars[id]
-    if not free then
+    if busDwelling then
+      -- Do not overwrite the bus stop smooth-stop command while dwelling; resume cap updates once released.
+      if c then c.sent = nil end
+    elseif not free then
       if c then release(id, c) end
     else
       if not c or c.country ~= cc then
@@ -106,10 +160,17 @@ function M.update(dt, graph)
       end
       local limit = v.tracking and tonumber(v.tracking.speedLimit)
       if limit and limit > 4.2 then
-        local cap = M.cap(limit, c.fast, c.street)
         local obj = getObjectByID(id)
-        if cap > limit and rough(obj) then cap = limit end     -- (a rough road: no speeding there)
-        if not c.sent or math.abs(cap - c.sent) >= M.MIN_CHANGE or clock - c.at >= M.RESEND_S then
+        local rp = roadProfileOf(obj)
+        local persona = ng and ng.getVehiclePersona and ng.getVehiclePersona(id) or nil
+        local cap
+        if persona then
+          cap = M.personaCap(limit, persona, rp)
+        else
+          cap = M.cap(limit, c.fast, c.street)
+          if cap > limit and rp and rp.rough == true then cap = limit end     -- (a rough road: no speeding there)
+        end
+        if cap and (not c.sent or math.abs(cap - c.sent) >= M.MIN_CHANGE or clock - c.at >= M.RESEND_S) then
           if obj then
             obj:queueLuaCommand(string.format('ai.setSpeedMode("limit") ai.setSpeed(%.2f)', cap))
             c.sent, c.at = cap, clock

@@ -50,6 +50,9 @@ SIMPLIFY_M = 0.6            # a shape point is kept where the chord would be off
 MAX_EDGE_M = 80.0           # long straight edges are split (the AI and the spawner like shorter ones)
 WINDOW_M = 1100.0           # half size of the square around the player the graph covers
 CURVE_ACCEL = 2.0           # m/s^2: comfortable lateral acceleration, a driving target rather than a posted limit
+MOTORWAY_CURVE_ACCEL = 3.2  # m/s^2: banked motorway/trunk sweeps (avoids AI braking on gentle Autobahn curves)
+HIGHWAY_CLASSES = {"motorway", "trunk"}
+DE_RICHTGESCHWINDIGKEIT_MS = 130.0 / 3.6
 BRAKE_ACCEL = 2.5           # m/s^2: spread a tight bend's target back along its approaches
 NARROW_M = 5.5              # narrower two-way town streets need slower encounters with oncoming traffic (parked cars,
 NARROW_MS = 30.0 / 3.6      # doors); a narrow rural road keeps its limit (the Netherlands' 60 km/h country roads, ~5 m
@@ -214,6 +217,38 @@ def rumble_eligible(country, spec):
     return getattr(spec, "cls", None) in RUMBLE_RURAL_CLASSES and not getattr(spec, "urban", True)
 
 
+def is_unlimited_autobahn(feats, i, spec, at=0.5, country=None):
+    """Whether road feature i at fraction at is an unlimited German Autobahn mainline segment."""
+    if str(country or "").upper() != "DE":
+        return False
+    if spec is None or getattr(spec, "cls", None) != "motorway" or getattr(spec, "link", False):
+        return False
+    speed = getattr(feats, "rules", {}).get("max_speed_kmh")
+    if speed is not None:
+        for r in speed.rows(i):
+            if speed.start[r] <= at <= speed.end[r]:
+                v = float(speed.value[r])
+                if math.isfinite(v) and v > 0:
+                    return False
+    osm_ms = getattr(feats, "attrs", {}).get("osm_maxspeed")
+    if osm_ms is not None and 0 <= i < len(osm_ms) and osm_ms[i] is not None:
+        raw = str(osm_ms[i]).strip().lower()
+        if raw in ("none", "de:motorway", "0", "0.0"):
+            return True
+        if raw not in ("", "nan", "null", "unknown", "signals", "variable", "implicit"):
+            return False
+    return True
+
+
+def highway_flag(feats, i, spec, at=0.5, country=None):
+    """Optional edge[12] highway metadata: 2 = unlimited German Autobahn, 1 = posted motorway/trunk mainline, 0 = other."""
+    if spec is None or getattr(spec, "link", False) or getattr(spec, "cls", None) not in HIGHWAY_CLASSES:
+        return 0
+    if is_unlimited_autobahn(feats, i, spec, at=at, country=country):
+        return 2
+    return 1
+
+
 def road_mph(feats, i, spec, mph=True, at=0.5, country=None, de_on=False, propagated=None):
     """The speed limit (mph) of road feature i at fraction at (default: its middle), else the class default
     (capped in town for arterials), or None for a class the AI does not drive. Shared by the graph and the speed-limit
@@ -282,7 +317,7 @@ def _rdp(p, tol):
     return np.flatnonzero(keep)
 
 
-def _speed_profile(xy, width, oneway, limit=math.inf, urban=True):
+def _speed_profile(xy, width, oneway, limit=math.inf, urban=True, curve_accel=CURVE_ACCEL):
     """Advisory speeds at graph points. Both directions can brake before a bend; legal limits stay in road_mph.
     No curve is invented between separate roads, and straight wide roads keep their original target."""
     target = min(limit, NARROW_MS) if urban and not oneway and width < NARROW_M else limit
@@ -298,7 +333,7 @@ def _speed_profile(xy, width, oneway, limit=math.inf, urban=True):
         radius[bend] = la[bend] * lb[bend] * chord[bend] / (2 * cross[bend])
         reversal = (~bend) & ((a * b).sum(1) < 0)
         radius[reversal] = 0.0
-        v2[1:-1] = np.minimum(v2[1:-1], np.maximum(dnp.sq(10 / 3.6), CURVE_ACCEL * radius))
+        v2[1:-1] = np.minimum(v2[1:-1], np.maximum(dnp.sq(10 / 3.6), curve_accel * radius))
     for j in range(1, len(xy)):
         v2[j] = min(v2[j], v2[j - 1] + 2 * BRAKE_ACCEL * lengths[j - 1])
     for j in range(len(xy) - 2, -1, -1):
@@ -384,6 +419,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
     posted = {}                 # id(edge) -> its posted limit where the AI's target is not it (posted_field)
     rough_edges = set()          # id(edge) -> OSM smoothness class says traffic should not overspeed
     rumble_edges = set()         # id(edge) -> likely ATLM/rural rumble strip corridor
+    highway_edges = {}           # id(edge) -> 1 (posted motorway/trunk) | 2 (unlimited DE Autobahn)
     carriage, carriage_ll = [], []     # sampled ground carriageways, with heights batched below
     signal_parts, signal_walks, signal_depths = [], {}, {}
     copies = roads.copies_of(feats_list)
@@ -568,7 +604,8 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                           if spec.lanes or tags else _lanes(w, False, n))
             else:
                 lo, li = _lanes(w, direction != 0, spec.lanes)
-            profile = _speed_profile(xy, w, direction != 0, urban=bool(getattr(spec, "urban", True)))
+            curve_a = MOTORWAY_CURVE_ACCEL if (spec.cls in HIGHWAY_CLASSES and not getattr(spec, "link", False)) else CURVE_ACCEL
+            profile = _speed_profile(xy, w, direction != 0, urban=bool(getattr(spec, "urban", True)), curve_accel=curve_a)
             # (a pass road's widened hairpins: its half width there, roads.hairpin_extra on its whole line)
             hx = roads.hairpin_extra(frame, spec, np.asarray(p, np.float64)[:, :2])
             hxm = np.zeros(len(full)) if hx is None else np.interp(full, s, hx)
@@ -585,7 +622,10 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                 if a == b:
                     continue
                 at = (full[j] + full[j + 1]) / (2 * L)
+                hwy_flag = highway_flag(feats, i, spec, at=at, country=country)
                 legal = road_mph(feats, i, spec, mph, at=at, country=country, de_on=de_on, propagated=de_propagated) * MPH
+                if hwy_flag == 2:
+                    legal = max(legal, DE_RICHTGESCHWINDIGKEIT_MS)
                 in_tunnel = False
                 if tunnel_ranges and any(t0 <= at <= t1 for t0, t1 in tunnel_ranges):
                     # each end inside the tunnel on its built floor (an end past a portal is on the ground)
@@ -643,6 +683,8 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                     rough_edges.add(id(edges[-1]))
                 if rumble_eligible(country, spec):
                     rumble_edges.add(id(edges[-1]))
+                if hwy_flag:
+                    highway_edges[id(edges[-1])] = hwy_flag
                 if in_tunnel:
                     tube_edges.add(id(edges[-1]))
     # The static props use 3D solved roads/decks. A 2D graph clearance line would falsely block every level below
@@ -737,18 +779,21 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
             uniq.append(e)
     if tube_edges:
         portal_taper(nodes, uniq, tube_edges, set(tunnel_node))
-    for e in uniq:              # (posted limit e[10], rough flag e[11], rumble candidate e[12], after optional portal radius e[9])
+    for e in uniq:              # (posted e[9], rough e[10], rumble e[11], highway/unlimited e[12], after optional portal radius e[8])
         pf = posted.get(id(e))
         rough = id(e) in rough_edges
         rumble = id(e) in rumble_edges
-        if pf is not None or rough or rumble:
+        hwy = highway_edges.get(id(e), 0)
+        if pf is not None or rough or rumble or hwy:
             if len(e) == 8:
                 e.append(None)
             e.append(pf)
-            if rough or rumble:
-                e.append(bool(rough))      # (false, not null: no hole before the rumble flag in the mod's array)
-            if rumble:
-                e.append(True)
+            if rough or rumble or hwy:
+                e.append(bool(rough))      # (false, not null: no hole before rumble/highway in the mod's array)
+            if rumble or hwy:
+                e.append(bool(rumble))
+            if hwy:
+                e.append(int(hwy))
     lines = [ln for ln in lines if max(abs(ln[0] - cx), abs(ln[1] - cy), abs(ln[2] - cx), abs(ln[3] - cy)) <= window]
     return {"nodes": nodes, "edges": uniq, "signals": signals, "lines": lines,
             "trafficProfile": _traffic_profile(frame, density_lines, cx, cy), "mph": bool(mph)}

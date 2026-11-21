@@ -3243,6 +3243,10 @@ local function onUpdate(dtReal, dtSim)
       pcall(package.loaded['beamngEarth/keepup'].tick, st)
     end
     navgraph.update(st.anchorId, pb, gov)
+    do
+      local ok, err = pcall(navgraph.updateTrafficDirector, dtReal, st.player, pb)
+      if not ok then log('W', 'beamngEarth', 'navgraph director: ' .. tostring(err)) end
+    end
     t = mark('navgraph', t)
     do
       local ok, err = pcall(require('beamngEarth/rumble').update, dtReal, navgraph.currentGraph(), not st.paused)

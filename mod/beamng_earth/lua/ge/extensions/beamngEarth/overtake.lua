@@ -31,12 +31,16 @@ M.SHIFT_MIN_M = 30
 M.PAST_M = 15
 M.COOLDOWN_S = 8
 M.GIVE_UP_S = 25
+M.MERGE_RIGHT_S = 2.0
+M.SPEEDER_HELD_S = 0.8
+M.SPEEDER_LOOK_M = 80
 
 local held = {}         -- car id -> os.clock() it started being held
 local passing = {}      -- car id -> { lead, at }: passing it
 local lastPass = {}     -- car id -> os.clock() of its last pass
+local campSince = {}    -- car id -> os.clock() it has been camping in a passing lane with no lead car
 local lastScan = -math.huge
-local stats = { passes = 0 }
+local stats = { passes = 0, mergesRight = 0 }
 
 -- Pure: the lanes going the car's way on an edge (lanes string: '+' along in -> out, '-' against; research §2.2),
 -- whether it drives along in -> out.
@@ -62,6 +66,26 @@ function M.passShift(k, n, w, leftHand)
   if not k or not n or n < 2 then return nil end
   if leftHand then return k < n - 1 and w or nil end
   return k > 0 and -w or nil
+end
+
+-- Pure: Rechtsfahrgebot (keep-right) merge shift (m, + right) toward the slow/outer lane when not actively passing,
+-- or nil when the vehicle is already in its preferred cruising lane.
+function M.rechtsfahrgebotShift(k, n, w, leftHand, persona, isPassing)
+  if not k or not n or n < 2 or not w or w <= 0 or isPassing then return nil end
+  local outer = leftHand and 0 or (n - 1)
+  local inner = leftHand and (n - 1) or 0
+  local step = leftHand and -w or w
+  if persona == 'truck' or persona == 'bus' then
+    return k ~= outer and step or nil
+  elseif persona == 'courier' then
+    -- Couriers use right/middle lanes; only merge out of the leftmost passing lane on 3+ lane highways
+    if n >= 3 and k == inner then return step end
+    return nil
+  elseif persona == 'commuter' or persona == 'speeder' then
+    -- Return from passing lane when clear
+    return k == inner and step or nil
+  end
+  return nil
 end
 
 -- Pure: is a car (speed v m/s, road limit m/s) held by a vehicle ahead in its lane at gap m doing leadV m/s?
@@ -117,7 +141,8 @@ end
 
 -- One scan (navgraph.update calls it every frame; it runs every SCAN_S). cars: {id = true} of the traffic cars; player:
 -- the player's car id while it autodrives, else nil. nearJunction(x, y, r) -> bool. leftHand: traffic on the left.
-function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn)
+-- personaFn(id) -> persona table (optional: enforces Rechtsfahrgebot & speeder pass thresholds).
+function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn, personaFn)
   if not M.enabled or now - lastScan < M.SCAN_S then return end
   lastScan = now
   if simTimeAuthority and simTimeAuthority.getPause and simTimeAuthority.getPause() then return end
@@ -142,7 +167,11 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn)
     local ok, err = pcall(function()
       if not c.passer then return end
       local road = onRoad(m, c.o, c.p, c.f)
-      if not road then held[c.id], passing[c.id] = nil, nil return end
+      if not road then held[c.id], passing[c.id], campSince[c.id] = nil, nil, nil return end
+      local pinfo = personaFn and personaFn(c.id) or nil
+      local pkind = pinfo and pinfo.persona or nil
+      local isSpeeder = pkind == 'speeder'
+      local lookM = isSpeeder and M.SPEEDER_LOOK_M or M.LOOK_M
       -- the others round it, in its frame
       local others, lead, gap = {}, nil, nil
       for _, o in ipairs(all) do
@@ -165,12 +194,45 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn)
         end
         return
       end
-      if not lead or not M.isHeld(c.v, road.limit, gap, lead.v) or c.v < M.MIN_MS * 0.5 then
+      -- Rechtsfahrgebot: trucks/buses strictly favor rightmost lane; commuters/speeders merge back right when clear
+      local rightShift = M.rechtsfahrgebotShift(road.k, road.n, road.w, leftHand, pkind, false)
+      local canMergeRight = rightShift ~= nil and (not lead or gap > lookM)
+      if canMergeRight and c.v >= M.MIN_MS then
+        campSince[c.id] = campSince[c.id] or now
+        local waitS = (pkind == 'truck' or pkind == 'bus') and 0.5 or M.MERGE_RIGHT_S
+        if now - campSince[c.id] >= waitS and now - (lastPass[c.id] or -math.huge) >= M.COOLDOWN_S * 0.5 then
+          if not (nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M))
+              and M.laneClear(others, rightShift, M.CLEAR_BACK_M, M.CLEAR_AHEAD_M * 0.75, c.v) then
+            c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
+              rightShift))
+            lastPass[c.id], campSince[c.id], held[c.id] = now, nil, nil
+            stats.mergesRight = (stats.mergesRight or 0) + 1
+            return
+          end
+        end
+      else
+        campSince[c.id] = nil
+      end
+      if pinfo and pinfo.overtakeAllowed == false then
+        held[c.id] = nil
+        return
+      end
+      local isCarHeld = false
+      if lead and gap <= lookM and c.v >= M.MIN_MS * 0.5 then
+        if isSpeeder then
+          local want = (pinfo.highwayCruiseMs or (road.limit + 5.5))
+          isCarHeld = lead.v < want - 3.0 and lead.v < c.v + 2.5
+        else
+          isCarHeld = M.isHeld(c.v, road.limit, gap, lead.v)
+        end
+      end
+      if not isCarHeld then
         held[c.id] = nil
         return
       end
       held[c.id] = held[c.id] or now
-      if now - held[c.id] < M.HELD_S or now - (lastPass[c.id] or -math.huge) < M.COOLDOWN_S then return end
+      local heldWait = isSpeeder and M.SPEEDER_HELD_S or M.HELD_S
+      if now - held[c.id] < heldWait or now - (lastPass[c.id] or -math.huge) < M.COOLDOWN_S then return end
       local shift = M.passShift(road.k, road.n, road.w, leftHand)
       if not shift or c.v < M.MIN_MS then return end
       if nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M) then return end
@@ -178,21 +240,21 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn)
       c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
         shift))
       passing[c.id] = { lead = lead.id, at = now }
-      lastPass[c.id], held[c.id] = now, nil
+      lastPass[c.id], held[c.id], campSince[c.id] = now, nil, nil
       stats.passes = stats.passes + 1
     end)
     if not ok then log('W', 'beamngEarth', 'overtake: ' .. tostring(err)) end
   end
   -- forget the cars that are gone
   for id in pairs(lastPass) do
-    if not carIds[id] and id ~= playerAuto then lastPass[id], held[id], passing[id] = nil, nil, nil end
+    if not carIds[id] and id ~= playerAuto then lastPass[id], held[id], passing[id], campSince[id] = nil, nil, nil, nil end
   end
 end
 
-function M.status() return { passes = stats.passes } end
+function M.status() return { passes = stats.passes, mergesRight = stats.mergesRight or 0 } end
 
 function M.reset()
-  held, passing, lastPass, lastScan = {}, {}, {}, -math.huge
+  held, passing, lastPass, campSince, lastScan = {}, {}, {}, {}, -math.huge
 end
 
 return M

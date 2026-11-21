@@ -191,6 +191,7 @@ function M.compactShortEdges(nodes, protected)
   local function sameLanes(a, b)
     return a.oneWay == b.oneWay and a.lanes == b.lanes and a.drivability == b.drivability
       and a.rough == b.rough and a.rumble == b.rumble
+      and a.highway == b.highway and a.unlimited == b.unlimited
   end
   local ids, removed = {}, 0
   for id in pairs(nodes) do ids[#ids + 1] = id end
@@ -278,10 +279,11 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
       local A, B = node(a), node(bb)
       if not A.links[bb] then
         local edge = { drivability = e[7], oneWay = e[3] == 1, lanes = M.lanes(e[4], e[5], leftHand),
+          lanesOut = e[4], lanesIn = e[5],
           speedLimit = e[6], inNode = a, outNode = bb, inPos = A.pos, outPos = B.pos,
           inRadius = e[8], outRadius = e[9] or e[8],      -- (e[9]: a road narrowing to a tunnel's portal)
-          posted = e[10], rough = e[11] == true, rumble = e[12] == true } -- (posted/legal speed, OSM rough-road
-          -- metadata, the country/road rumble heuristic)
+          posted = e[10], rough = e[11] == true, rumble = e[12] == true,
+          highway = (e[13] == 1 or e[13] == 2), unlimited = (e[13] == 2) } -- (e[13]: 1=highway, 2=unlimited DE Autobahn)
         A.links[bb] = edge
         B.links[a] = edge
         ne = ne + 1
@@ -679,6 +681,8 @@ local function closestRoad(x, y, z)
   local qx, qy = i.pos.x + t * ex, i.pos.y + t * ey
   return { dist = math.sqrt((x - qx) ^ 2 + (y - qy) ^ 2), dx = ex / l, dy = ey / l, oneWay = e.oneWay,
     speedLimit = e.speedLimit, posted = e.posted, rough = e.rough == true,
+    highway = e.highway == true, unlimited = e.unlimited == true,
+    lanes = e.lanes, lanesOut = e.lanesOut, lanesIn = e.lanesIn,
     lateral = (ex * (y - qy) - ey * (x - qx)) / l, halfWidth = (e.inRadius or 3.5) +
       ((e.outRadius or e.inRadius or 3.5) - (e.inRadius or 3.5)) * t, rumble = e.rumble == true,
     edgeKey = tostring(e.inNode or n1) .. ':' .. tostring(e.outNode or n2) }
@@ -689,7 +693,9 @@ end
 function M.speedProfileAt(x, y, z)
   local r = closestRoad(x, y, z)
   if not r or r.dist > 35 then return nil end
-  return { target = r.speedLimit, posted = r.posted, rough = r.rough, distance = r.dist }
+  return { target = r.speedLimit, posted = r.posted, rough = r.rough, distance = r.dist,
+    highway = r.highway == true, unlimited = r.unlimited == true,
+    lanes = r.lanes, lanesOut = r.lanesOut, lanesIn = r.lanesIn }
 end
 
 -- Lane-departure strip metadata for the rumble audio. The server only marks selected country/road classes; only the
@@ -1025,6 +1031,588 @@ function M.regionalGroupParams(cc, getSetting, includePolice)
   return params, region
 end
 
+-- Smart Regional Traffic Overhaul: deterministic archetype & livery roster, driving personas,
+-- OSM bus stop dwell state machine, and zero-GC horizon spawn/despawn director.
+M.DIRECTOR_TICK_S = 0.25
+M.HORIZON_SPAWN_MIN_M = 160
+M.HORIZON_SPAWN_MAX_M = 340
+M.HORIZON_SAFE_MIN_M = 95
+M.HORIZON_BEHIND_DESPAWN_M = 420
+
+M.BUS_STOP_RANGE_M = 18.0
+M.BUS_STOP_MAX_SPEED_MS = 14.0
+M.BUS_STOP_COOLDOWN_S = 45.0
+M.BUS_STOP_DWELL_MIN_S = 3.5
+M.BUS_STOP_DWELL_MAX_S = 4.5
+M.BUS_STOP_LATERAL_MAX_M = 12.0
+
+M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
+M.COURIER_MODELS = { van = true, boxtruck = true, h_series = true, gavril_h = true }
+M.TRUCK_MODELS = { semi = true, us_semi = true, t_series = true, md_series = true }
+M.SPEEDER_MODELS = { etk800 = true, etkc = true, vivace = true, sbr = true, scintilla = true, bastion = true,
+                     sunburst = true, bolide = true }
+
+M.COURIER_PAINTS = {
+  europe = {
+    { tag = 'dhl_amber', paintName = 'DHL Amber', paint = { 0.98, 0.78, 0.04, 1.0 } },
+    { tag = 'commercial_white', paintName = 'Commercial White', paint = { 0.93, 0.94, 0.95, 1.0 } },
+    { tag = 'courier_slate', paintName = 'Courier Slate', paint = { 0.32, 0.36, 0.42, 1.0 } },
+    { tag = 'ups_brown', paintName = 'Courier Brown', paint = { 0.22, 0.13, 0.07, 1.0 } },
+  },
+  northAmerica = {
+    { tag = 'commercial_white', paintName = 'Commercial White', paint = { 0.93, 0.94, 0.95, 1.0 } },
+    { tag = 'ups_brown', paintName = 'Courier Brown', paint = { 0.22, 0.13, 0.07, 1.0 } },
+    { tag = 'courier_slate', paintName = 'Courier Slate', paint = { 0.32, 0.36, 0.42, 1.0 } },
+    { tag = 'dhl_amber', paintName = 'DHL Amber', paint = { 0.98, 0.78, 0.04, 1.0 } },
+  },
+  asiaPacific = {
+    { tag = 'commercial_white', paintName = 'Commercial White', paint = { 0.93, 0.94, 0.95, 1.0 } },
+    { tag = 'courier_slate', paintName = 'Courier Slate', paint = { 0.32, 0.36, 0.42, 1.0 } },
+    { tag = 'dhl_amber', paintName = 'DHL Amber', paint = { 0.98, 0.78, 0.04, 1.0 } },
+  },
+}
+
+local director = {
+  accum = 0,
+  clock = 0,
+  rosterArchetype = {},
+  personas = {},
+  busStops = {},
+  busStopCount = 0,
+  busDwell = {},
+  busStopCooldowns = {},
+}
+
+local function hasAnyKeyword(str, list)
+  for i = 1, #list do
+    if str:find(list[i], 1, true) then return true end
+  end
+  return false
+end
+
+local EXCLUDED_KEYWORDS = {
+  'hero', 'jato', 'ramplow', 'destructor', 'derby', 'drag', 'drift', 'monster',
+  'stunt', 'crawler', 'capsule', 'demolition', 'ambulance', 'fire', 'swat', 'rally',
+}
+local POLICE_KEYWORDS = { 'police', 'polizei', 'interceptor', 'sheriff', 'patrol', 'carabinieri', 'gendarmerie' }
+local BUS_LIVERY_KEYWORDS = { 'city', 'transit', 'metro', 'shuttle', 'municipal', 'express', 'local', 'coach' }
+local COURIER_KEYWORDS = {
+  'cargo', 'delivery', 'courier', 'parcel', 'box', 'upfit', 'panel', 'commercial',
+  'fleet', 'dhl', 'dpd', 'hermes', 'ups', 'fedex', 'post', 'mail', 'freight', 'van',
+}
+local SPEEDER_KEYWORDS = {
+  'ttsport', 'sport', 'gt4', 'gt3', 'gt2', 'gt', 'rs', 'redtail', 'battlehawk',
+  'arsenal', 'sv', 'track', '340', '410', 'v10', 'v8', 'em', '_s', ' s ',
+}
+local REGION_SPEEDER_PREF = {
+  europe = { etk800 = 30, etkc = 28, vivace = 25, scintilla = 22, sbr = 15, sunburst = 10, bastion = 5 },
+  northAmerica = { bastion = 30, sbr = 25, scintilla = 22, etk800 = 18, etkc = 16, sunburst = 14, vivace = 8 },
+  asiaPacific = { sunburst = 30, sbr = 28, vivace = 20, etk800 = 15, etkc = 14, scintilla = 12, bastion = 6 },
+}
+
+-- Pure: classify a vehicle (model, config, optional entry metadata) into an archetype or 'excluded'.
+function M.classifyVehicle(model, config, entry)
+  local m = tostring(model or ''):lower()
+  local c = tostring(config or ''):lower()
+  local nm = type(entry) == 'table' and tostring(entry.name or ''):lower() or ''
+  local combined = m .. ' ' .. c .. ' ' .. nm
+  if type(entry) == 'table' and entry.isPolice == true then return 'police' end
+  if hasAnyKeyword(combined, POLICE_KEYWORDS) then return 'police' end
+  if hasAnyKeyword(combined, EXCLUDED_KEYWORDS) then return 'excluded' end
+  if M.BUS_MODELS[m] or combined:find('citybus', 1, true) or combined:find('wentward', 1, true) then
+    return 'bus'
+  end
+  if M.COURIER_MODELS[m] then
+    return 'courier'
+  end
+  if m == 'md_series' then
+    if hasAnyKeyword(combined, COURIER_KEYWORDS) then return 'courier' end
+    return 'truck'
+  end
+  if M.TRUCK_MODELS[m] then
+    return 'truck'
+  end
+  if M.SPEEDER_MODELS[m] and (m == 'scintilla' or m == 'bolide' or hasAnyKeyword(combined, SPEEDER_KEYWORDS)) then
+    return 'speeder'
+  end
+  return 'commuter'
+end
+
+local function cloneEntry(src, archetype, liveryTag, paint, paintName)
+  local out = {
+    model = src.model,
+    config = src.config,
+    archetype = archetype,
+  }
+  if src.name then out.name = src.name end
+  if liveryTag then out.liveryTag = liveryTag end
+  if paint then out.paint = paint elseif src.paint then out.paint = src.paint end
+  if paintName then out.paintName = paintName elseif src.paintName then out.paintName = src.paintName end
+  return out
+end
+
+-- Pure deterministic regional traffic roster builder.
+-- Enforces Police == 0 whenever deEnabled is false/nil (unless opts.includePolice == true).
+function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
+  opts = type(opts) == 'table' and opts or {}
+  local reg = region
+  if type(reg) == 'string' and not M.REGIONS[reg] then
+    reg = M.regionOf(reg) or reg
+  end
+  reg = M.REGIONS[reg] and reg or 'europe'
+  local allowPolice = (deEnabled == true and reg == 'europe') or (opts.includePolice == true)
+  local urban = opts.urban ~= false
+  local targetSize = math.max(1, math.floor(tonumber(opts.size) or M.GROUP_SIZE))
+
+  local buckets = { bus = {}, courier = {}, truck = {}, speeder = {}, commuter = {}, police = {} }
+  local seen = {}
+  for _, item in ipairs(type(allConfigs) == 'table' and allConfigs or {}) do
+    if type(item) == 'table' and type(item.model) == 'string' and item.model ~= '' then
+      local cfg = tostring(item.config or '')
+      local key = item.model:lower() .. ':' .. cfg:lower()
+      if not seen[key] then
+        seen[key] = true
+        local arch = M.classifyVehicle(item.model, cfg, item)
+        if arch ~= 'excluded' and (arch ~= 'police' or allowPolice) then
+          local score = 0
+          local cl = (cfg .. ' ' .. tostring(item.name or '')):lower()
+          local ml = item.model:lower()
+          if item.region == reg then score = score + 25 end
+          if arch == 'bus' then
+            if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then score = score + 100 end
+          elseif arch == 'courier' then
+            if hasAnyKeyword(cl, COURIER_KEYWORDS) then score = score + 100 end
+            if ml == 'van' or ml == 'boxtruck' then score = score + 20 end
+          elseif arch == 'truck' then
+            if ml == 'semi' or ml == 'us_semi' or ml == 't_series' then score = score + 30 end
+            if cl:find('hauler', 1, true) or cl:find('cargo', 1, true) or cl:find('sleeper', 1, true)
+              or cl:find('daycab', 1, true) or cl:find('flatbed', 1, true) then
+              score = score + 40
+            end
+          elseif arch == 'speeder' then
+            local pref = REGION_SPEEDER_PREF[reg]
+            score = score + (pref and pref[ml] or 10)
+            if hasAnyKeyword(cl, SPEEDER_KEYWORDS) then score = score + 40 end
+          elseif arch == 'police' then
+            if reg == 'europe' and (cl:find('polizei', 1, true) or ml == 'etk800' or ml == 'vivace') then
+              score = score + 50
+            end
+          end
+          buckets[arch][#buckets[arch] + 1] = { item = item, score = score, key = key }
+        end
+      end
+    end
+  end
+
+  local function cmp(a, b)
+    if a.score ~= b.score then return a.score > b.score end
+    return a.key < b.key
+  end
+  for _, list in pairs(buckets) do table.sort(list, cmp) end
+
+  local roster = {}
+  local counts = { bus = 0, courier = 0, truck = 0, speeder = 0, commuter = 0, police = 0 }
+  local function take(arch, limit, decorateFn)
+    local src = buckets[arch]
+    local n = math.min(#src, limit)
+    for i = 1, n do
+      if #roster >= targetSize then break end
+      local e = src[i].item
+      local tag, paint, paintName = nil, nil, nil
+      if decorateFn then tag, paint, paintName = decorateFn(e, i) end
+      roster[#roster + 1] = cloneEntry(e, arch, tag, paint, paintName)
+      counts[arch] = counts[arch] + 1
+    end
+  end
+
+  -- Quotas: urban favors 1-2 city buses and 2-4 couriers; rural/highway favors more trucks
+  local busQuota = urban and (targetSize >= 12 and 2 or 1) or 0
+  local courierQuota = math.max(1, math.min(4, math.floor(targetSize * 0.18 + 0.5)))
+  local truckQuota = urban and math.max(1, math.min(3, math.floor(targetSize * 0.12 + 0.5)))
+    or math.max(2, math.min(5, math.floor(targetSize * 0.25 + 0.5)))
+  local speederQuota = targetSize >= 8 and 2 or 1
+  local policeQuota = allowPolice and (targetSize >= 16 and 2 or 1) or 0
+
+  local courierPal = M.COURIER_PAINTS[reg] or M.COURIER_PAINTS.europe
+  take('bus', busQuota, function(e)
+    local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
+    if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then return 'transit_bus', nil, nil end
+    return 'city_bus', nil, nil
+  end)
+  take('courier', courierQuota, function(e, idx)
+    local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
+    if cl:find('dhl', 1, true) then return 'dhl_amber', nil, nil end
+    if cl:find('ups', 1, true) then return 'ups_brown', nil, nil end
+    if cl:find('dpd', 1, true) or cl:find('hermes', 1, true) then return 'courier_slate', nil, nil end
+    local swatch = courierPal[((idx - 1) % #courierPal) + 1]
+    return swatch.tag, swatch.paint, swatch.paintName
+  end)
+  take('truck', truckQuota)
+  take('speeder', speederQuota)
+  if allowPolice then take('police', policeQuota) end
+
+  -- Fill remaining slots with everyday commuters
+  local rem = targetSize - #roster
+  if rem > 0 then take('commuter', rem) end
+
+  roster.counts = counts
+  roster.region = reg
+  return roster
+end
+
+-- Pure deterministic AI driving persona assignment.
+function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetype)
+  local arch = rosterArchetype
+  if arch ~= 'bus' and arch ~= 'truck' and arch ~= 'courier' and arch ~= 'speeder' and arch ~= 'commuter' then
+    local cls = M.classifyVehicle(model, config)
+    arch = (cls == 'bus' or cls == 'truck' or cls == 'courier' or cls == 'speeder') and cls or 'commuter'
+  end
+  local idNum = math.abs(math.floor(tonumber(vehId) or 0))
+  local u1 = ((idNum * 2654435761 + 17) % 1000) / 1000
+  local u2 = ((idNum * 1597334677 + 53) % 1000) / 1000
+  local autobahn = isAutobahn == true
+
+  local risk, aggr, hwyKph, hwyDelta, urbDelta, laneBias, overtakeOk
+  if arch == 'truck' then
+    risk = 0.22 + u1 * 0.08
+    aggr = 0.25 + u1 * 0.10
+    hwyKph = 82 + u2 * 8
+    hwyDelta = 0
+    urbDelta = -4 + u2 * 4
+    laneBias = 'right'
+    overtakeOk = false
+  elseif arch == 'bus' then
+    risk = 0.24 + u1 * 0.08
+    aggr = 0.25 + u1 * 0.10
+    hwyKph = 84 + u2 * 8
+    hwyDelta = 0
+    urbDelta = -5 + u2 * 3
+    laneBias = 'right'
+    overtakeOk = false
+  elseif arch == 'courier' then
+    risk = 0.40 + u1 * 0.05
+    aggr = 0.42 + u1 * 0.08
+    hwyKph = 95 + u2 * 15
+    hwyDelta = 4 + u2 * 4
+    urbDelta = 0 + u2 * 4
+    laneBias = 'right_or_middle'
+    overtakeOk = true
+  elseif arch == 'speeder' then
+    risk = 0.72 + u1 * 0.16
+    aggr = 0.75 + u1 * 0.15
+    hwyKph = autobahn and (165 + u2 * 40) or nil
+    hwyDelta = 15 + u2 * 13
+    urbDelta = 4 + u2 * 6
+    laneBias = 'overtake_left'
+    overtakeOk = true
+  else
+    arch = 'commuter'
+    risk = 0.38 + u1 * 0.14
+    aggr = 0.38 + u1 * 0.14
+    hwyKph = autobahn and (126 + u2 * 10) or nil
+    hwyDelta = -4 + u2 * 8
+    urbDelta = -4 + u2 * 8
+    laneBias = 'right'
+    overtakeOk = true
+  end
+
+  return {
+    vehId = vehId,
+    persona = arch,
+    risk = math.floor(risk * 1000 + 0.5) / 1000,
+    aggression = math.floor(aggr * 1000 + 0.5) / 1000,
+    highwayCruiseKph = hwyKph and (math.floor(hwyKph * 10 + 0.5) / 10) or nil,
+    highwayCruiseMs = hwyKph and (hwyKph / 3.6) or nil,
+    highwayDeltaKph = math.floor(hwyDelta * 10 + 0.5) / 10,
+    urbanDeltaKph = math.floor(urbDelta * 10 + 0.5) / 10,
+    laneBias = laneBias,
+    overtakeAllowed = overtakeOk,
+    driveInLane = 'on',
+    avoidCars = 'on',
+    isAutobahn = autobahn,
+  }
+end
+
+-- Vehicle Lua command applying a persona's baseline AI parameters (called once per spawn/respawn).
+function M.personaAiCommand(p)
+  if type(p) ~= 'table' then return nil end
+  local waitTime = (p.persona == 'speeder') and 0.6 or ((p.persona == 'truck' or p.persona == 'bus') and 1.8 or 1.2)
+  local turnCoef = (p.persona == 'truck' or p.persona == 'bus') and 0.85 or ((p.persona == 'speeder') and 1.15 or 1.0)
+  return string.format(
+    'ai.setAggression(%.2f) ai.driveInLane("%s") ai.setAvoidCars("%s") ai.setParameters({ trafficWaitTime = %.2f, turnForceCoef = %.2f })',
+    tonumber(p.aggression) or 0.45,
+    tostring(p.driveInLane or 'on'),
+    tostring(p.avoidCars or 'on'),
+    waitTime,
+    turnCoef
+  )
+end
+
+function M.getVehiclePersona(vehId)
+  return director.personas[vehId]
+end
+
+-- OSM Bus Stop ingestion & dwell state machine (roads.lua -> navgraph.onBusStops).
+local function recountBusStops()
+  local n = 0
+  for _, list in pairs(director.busStops) do n = n + #list end
+  director.busStopCount = n
+end
+
+function M.onBusStops(key, stops)
+  if key == nil then return 0 end
+  if type(stops) ~= 'table' or #stops == 0 then
+    director.busStops[key] = nil
+    recountBusStops()
+    return 0
+  end
+  local clean = {}
+  for i, s in ipairs(stops) do
+    if type(s) == 'table' then
+      local x, y = tonumber(s.x or s[1]), tonumber(s.y or s[2])
+      if x and y then
+        clean[#clean + 1] = {
+          id = s.id or (tostring(key) .. ':' .. tostring(i)),
+          x = x, y = y, z = tonumber(s.z or s[3]) or 0,
+          yaw = tonumber(s.yaw or s[4]) or 0,
+        }
+      end
+    end
+  end
+  director.busStops[key] = #clean > 0 and clean or nil
+  recountBusStops()
+  return #clean
+end
+
+function M.dropBusStops(key)
+  if key ~= nil and director.busStops[key] then
+    director.busStops[key] = nil
+    recountBusStops()
+  end
+end
+
+function M.busStops()
+  return director.busStops
+end
+
+function M.isBusDwelling(vehId)
+  return director.busDwell[vehId] ~= nil
+end
+
+-- Step the city bus dwell state machine for one bus vehicle (zero table allocations on idle ticks).
+function M.stepBusStop(vehId, px, py, dx, dy, speed, now, obj)
+  local dwell = director.busDwell[vehId]
+  if dwell then
+    if now >= dwell.releaseAt then
+      director.busDwell[vehId] = nil
+      director.busStopCooldowns[dwell.stopId] = now + M.BUS_STOP_COOLDOWN_S
+      stats.busStopsServed = (stats.busStopsServed or 0) + 1
+      if obj and obj.queueLuaCommand then
+        obj:queueLuaCommand('electrics.set_warn_signal(0) ai.setSpeedMode("legal") ai.setMode("traffic")')
+      end
+      return 'released', dwell.stopId
+    end
+    return 'dwelling', dwell.stopId
+  end
+  if not speed or speed >= M.BUS_STOP_MAX_SPEED_MS then return 'none' end
+  if director.busStopCount <= 0 then return 'none' end
+
+  local range2 = M.BUS_STOP_RANGE_M * M.BUS_STOP_RANGE_M
+  local latMax = M.BUS_STOP_LATERAL_MAX_M
+  local bestStop, bestD2 = nil, range2 + 1
+  for _, list in pairs(director.busStops) do
+    for i = 1, #list do
+      local s = list[i]
+      local cd = director.busStopCooldowns[s.id]
+      if not cd or now >= cd then
+        local vx, vy = s.x - px, s.y - py
+        local d2 = vx * vx + vy * vy
+        if d2 <= range2 and d2 < bestD2 then
+          local along = vx * dx + vy * dy
+          if along >= -2.0 and along <= M.BUS_STOP_RANGE_M then
+            local lat = math.abs(vx * dy - vy * dx)
+            if lat <= latMax then
+              bestStop, bestD2 = s, d2
+            end
+          end
+        end
+      end
+    end
+  end
+  if not bestStop then return 'none' end
+
+  local frac = (((math.abs(math.floor(tonumber(vehId) or 0)) * 131 + math.floor(now * 10)) % 101) / 100)
+  local dwellS = M.BUS_STOP_DWELL_MIN_S + frac * (M.BUS_STOP_DWELL_MAX_S - M.BUS_STOP_DWELL_MIN_S)
+  director.busDwell[vehId] = {
+    stopId = bestStop.id,
+    startedAt = now,
+    releaseAt = now + dwellS,
+    dwellS = dwellS,
+  }
+  director.busStopCooldowns[bestStop.id] = now + dwellS + M.BUS_STOP_COOLDOWN_S
+  if obj and obj.queueLuaCommand then
+    obj:queueLuaCommand('electrics.set_warn_signal(1) ai.setSpeedMode("set") ai.setSpeed(0)')
+  end
+  return 'stopped', bestStop
+end
+
+-- Pure zero-alloc: true when AI vehicle at (vx, vy) lags > behindM behind player (px, py) heading unit (hx, hy).
+function M.shouldRecycleBehind(vx, vy, px, py, hx, hy, behindM)
+  local along = (vx - px) * hx + (vy - py) * hy
+  return along < -(behindM or M.HORIZON_BEHIND_DESPAWN_M)
+end
+
+-- Pure zero-alloc: forward-biased horizon respawn interval [lo, hi] along unit (hx, hy) from (px, py),
+-- clamped to box b's guard margin and never popping in within < HORIZON_SAFE_MIN_M of player or camera.
+function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY)
+  local hl = math.sqrt(hx * hx + hy * hy)
+  if hl < 1e-6 then return nil end
+  hx, hy = hx / hl, hy / hl
+  local reach = math.huge
+  if b then
+    if hx > 1e-6 then reach = math.min(reach, (b[3] - px) / hx)
+    elseif hx < -1e-6 then reach = math.min(reach, (b[1] - px) / hx) end
+    if hy > 1e-6 then reach = math.min(reach, (b[4] - py) / hy)
+    elseif hy < -1e-6 then reach = math.min(reach, (b[2] - py) / hy) end
+  end
+  local hi = math.min(M.HORIZON_SPAWN_MAX_M, reach - M.GUARD_M - 20)
+  local safeMin = M.HORIZON_SAFE_MIN_M
+  if camX and camY then
+    local camAlong = (camX - px) * hx + (camY - py) * hy
+    local camPerp = math.abs((camX - px) * hy - (camY - py) * hx)
+    if camPerp < M.HORIZON_SAFE_MIN_M then
+      local clearance = math.sqrt(M.HORIZON_SAFE_MIN_M * M.HORIZON_SAFE_MIN_M - camPerp * camPerp)
+      local needed = camAlong + clearance
+      if needed > safeMin then safeMin = needed end
+    end
+  end
+  local lo = math.max(M.HORIZON_SPAWN_MIN_M, safeMin)
+  if hi < lo then
+    lo = safeMin
+    if hi < lo then return nil end
+  end
+  return px, py, hx, hy, lo, hi
+end
+
+-- Throttled (~4 Hz) zero-GC traffic director: persona sync, bus stop dwell, and behind-player horizon recycling.
+function M.updateTrafficDirector(dtReal, player, box)
+  local dt = tonumber(dtReal) or 0
+  if dt < 0 then dt = 0 end
+  director.clock = director.clock + dt
+  director.accum = director.accum + dt
+  if director.accum < M.DIRECTOR_TICK_S then return false end
+  director.accum = 0
+
+  if not M.enabled then return false end
+  if simTimeAuthority and simTimeAuthority.getPause and simTimeAuthority.getPause() then return false end
+  local gt = gameplay_traffic
+  if not gt or not gt.getState or gt.getState() ~= 'on' then return false end
+  local data = gt.getTrafficData and gt.getTrafficData()
+  if type(data) ~= 'table' then return false end
+
+  local now = os.clock()
+  local me = playerId()
+  local px, py, pz, hx, hy = nil, nil, 0, 0, 0
+  if type(player) == 'table' and tonumber(player.x) and tonumber(player.y) then
+    px, py, pz = player.x, player.y, tonumber(player.z) or 0
+    local pvx, pvy = tonumber(player.vx) or 0, tonumber(player.vy) or 0
+    local psp = math.sqrt(pvx * pvx + pvy * pvy)
+    if psp >= 2.0 then
+      hx, hy = pvx / psp, pvy / psp
+    end
+  end
+  local pv = (px == nil or (hx == 0 and hy == 0)) and me >= 0 and getObjectByID and getObjectByID(me) or nil
+  if pv then
+    if px == nil then
+      local pp = pv:getPosition()
+      px, py, pz = pp.x, pp.y, pp.z
+    end
+    if hx == 0 and hy == 0 then
+      local pu = pv:getVelocity()
+      local psp = math.sqrt(pu.x * pu.x + pu.y * pu.y)
+      if psp >= 2.0 then
+        hx, hy = pu.x / psp, pu.y / psp
+      else
+        local pf = pv:getDirectionVector()
+        local pfl = math.sqrt(pf.x * pf.x + pf.y * pf.y)
+        if pfl > 1e-6 then hx, hy = pf.x / pfl, pf.y / pfl end
+      end
+    end
+  end
+  local hasHeading = (px ~= nil) and (hx * hx + hy * hy > 0.25)
+  local camX, camY = nil, nil
+  if core_camera and core_camera.getPosition then
+    local cp = core_camera.getPosition()
+    if cp then camX, camY = cp.x, cp.y end
+  end
+  local activeBox = box or (applied and applied.box) or nil
+
+  -- Clean stale personas / dwells for despawned vehicles
+  for id in pairs(director.personas) do
+    if data[id] == nil then director.personas[id] = nil end
+  end
+  for id in pairs(director.busDwell) do
+    if data[id] == nil then director.busDwell[id] = nil end
+  end
+
+  localplayers.snapshot(controlled)
+  for id, t in pairs(data) do
+    if type(t) == 'table' and t.isAi ~= false then
+      local o = getObjectByID and getObjectByID(id) or nil
+      if o and o:getActive() and not localplayers.controlled(id, o, controlled) then
+        local p = o:getPosition()
+        local u = o:getVelocity()
+        local f = o:getDirectionVector()
+        local sp = math.sqrt(u.x * u.x + u.y * u.y)
+        local dx, dy = 0, 0
+        if sp > 0.5 then
+          dx, dy = u.x / sp, u.y / sp
+        else
+          local fl = math.sqrt(f.x * f.x + f.y * f.y)
+          if fl > 1e-6 then dx, dy = f.x / fl, f.y / fl end
+        end
+
+        -- 1. Assign or refresh persona on first sight / after respawn
+        local rc = tonumber(t.respawnCount) or 0
+        local curP = director.personas[id]
+        if not curP or curP._respawnCount ~= rc then
+          local model = t.model or (o.getJBeamFilename and o:getJBeamFilename()) or ''
+          local config = t.config or t.partConfig or ''
+          local rkey = tostring(model):lower() .. ':' .. tostring(config):lower()
+          local road = map and map.getMap and closestRoad(p.x, p.y, p.z) or nil
+          local isAutobahn = road ~= nil and road.unlimited == true
+          local assigned = M.assignVehiclePersona(id, model, config, isAutobahn, director.rosterArchetype[rkey])
+          assigned._respawnCount = rc
+          director.personas[id] = assigned
+          curP = assigned
+          if t.risk ~= nil then t.risk = assigned.risk end
+          local cmd = M.personaAiCommand(assigned)
+          if cmd and o.queueLuaCommand then o:queueLuaCommand(cmd) end
+        end
+
+        -- 2. City bus OSM bus stop dwell state machine
+        if curP.persona == 'bus' and (dx ~= 0 or dy ~= 0) then
+          M.stepBusStop(id, p.x, p.y, dx, dy, sp, now, o)
+        end
+
+        -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m)
+        if hasHeading and not director.busDwell[id]
+            and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
+            and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
+          local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY)
+          if ax and gt.forceTeleport then
+            lastTeleport[id] = now
+            stillSince[id] = nil
+            stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
+            pcall(gt.forceTeleport, id, vec3(ax, ay, pz), vec3(ahx, ahy, 0), alo, ahi)
+          end
+        end
+      end
+    end
+  end
+  return true
+end
+
 local function regionalGroup()
   local st = rawget(_G, 'settings')
   local cc = graph and graph.rules and graph.rules.country
@@ -1037,6 +1625,36 @@ local function regionalGroup()
   if not (core_multiSpawn and core_multiSpawn.createGroup) then return nil end
   local ok, g = pcall(core_multiSpawn.createGroup, M.GROUP_SIZE, params)
   if not ok or type(g) ~= 'table' or not g[1] then return nil end
+  if not (st and st.getValue and st.getValue('trafficSimpleVehicles')) then
+    local candidates = {}
+    for i = 1, #g do candidates[i] = g[i] end
+    local cv = rawget(_G, 'core_vehicles')
+    if cv and cv.getConfigList then
+      local okC, list = pcall(cv.getConfigList)
+      if okC and type(list) == 'table' then
+        for _, v in pairs(list) do
+          if type(v) == 'table' and type(v.model_key) == 'string' and type(v.key) == 'string' then
+            candidates[#candidates + 1] = { model = v.model_key, config = v.key, name = v.Name or v.Configuration }
+          end
+        end
+      end
+    end
+    local prof = graph and graph.trafficProfile
+    local isUrban = not (type(prof) == 'table' and (prof.band == 'rural' or prof.band == 'highway'))
+    local roster = M.buildTrafficRoster(region, candidates, euPolice, {
+      urban = isUrban, size = M.GROUP_SIZE, includePolice = M.choice.police,
+    })
+    if type(roster) == 'table' and roster[1] then
+      g = roster
+      director.rosterArchetype = {}
+      for i = 1, #roster do
+        local e = roster[i]
+        if e.model and e.archetype then
+          director.rosterArchetype[tostring(e.model):lower() .. ':' .. tostring(e.config or ''):lower()] = e.archetype
+        end
+      end
+    end
+  end
   if euPolice and region == 'europe' then M.appendEuPolicePatrols(g, cc) end
   M.trafficRegion = region
   log('I', 'beamngEarth', string.format('traffic: %s vehicles (%s)', region, tostring(cc)))
@@ -1200,6 +1818,15 @@ function M.transform(xf, anchorId)
   end
   graph = { anchor = anchorId, serial = graph.serial, nodes = nodes, edges = graph.edges, signals = graph.signals,
             rules = graph.rules, lines = lines, trafficProfile = graph.trafficProfile, mph = graph.mph, moved = true }
+  -- Transform anchor-tile bus stops into the new frame (geotile stops are refreshed by roads.replace)
+  for key, list in pairs(director.busStops) do
+    if type(key) ~= 'string' or key:sub(1, 2) ~= 'g:' then
+      for i = 1, #list do
+        local s = list[i]
+        s.x, s.y, s.z = xf:apply(s.x, s.y, s.z)
+      end
+    end
+  end
   dirty, urgent = true, true
   if applied then applied.box = nil end
   return true
@@ -1390,7 +2017,8 @@ local function overtakeScan(now)
   if auto then ids[auto] = nil end
   localplayers.snapshot(controlled)
   overtake.update(now, ids, auto, nearJunction, M.rules.rightHandDrive,
-    function(id) return localplayers.controlled(id, getObjectByID(id), controlled) end)
+    function(id) return localplayers.controlled(id, getObjectByID(id), controlled) end,
+    M.getVehiclePersona)
 end
 
 function M.update(aid, b, gov)
@@ -1498,7 +2126,8 @@ function M.status()
   return { graph = graph and graph.serial or nil, applies = stats.applies, lastMs = stats.lastMs,
            nodes = stats.nodes, edges = stats.edges, junctions = stats.junctions, started = started,
            cuts = stats.cuts, cutRespawns = stats.cutRespawns, cutStopRespawns = stats.cutStopRespawns,
-           aheadRespawns = stats.aheadRespawns,
+           aheadRespawns = stats.aheadRespawns, horizonRespawns = stats.horizonRespawns,
+           busStopsLoaded = director.busStopCount, busStopsServed = stats.busStopsServed,
            launches = stats.launches, oncomingRespawns = stats.oncomingRespawns, overtake = overtake.status(),
            resetMs = stats.resetMs, signalsMs = stats.signalsMs, nodesMs = stats.nodesMs, gpsMs = stats.gpsMs,
            applyMs = stats.applyMs, guardMs = stats.guardMs, guardMaxMs = stats.guardMaxMs,
@@ -1532,6 +2161,13 @@ function M.reset()
   seenAt = {}
   lastTeleport = {}
   cuts = {}
+  director.accum, director.clock = 0, 0
+  director.rosterArchetype = {}
+  director.personas = {}
+  director.busStops = {}
+  director.busStopCount = 0
+  director.busDwell = {}
+  director.busStopCooldowns = {}
   M.restoreChoice()
   stats = { applies = 0, lastMs = 0, nodes = 0, edges = 0 }
   prep, waited = nil, 0

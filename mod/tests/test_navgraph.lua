@@ -511,4 +511,212 @@ do
   N.reset()
 end
 
+-- Loop 8: Smart Regional Traffic Overhaul tests
+-- 1. Highway & unlimited Autobahn edge metadata decoding + compaction boundary preservation
+do
+  local hg = {
+    nodes = { a = { 0, 0, 0, 7 }, b = { 50, 0, 0, 7 }, c = { 50.3, 0, 0, 7 }, d = { 100, 0, 0, 7 } },
+    edges = {
+      { 'a', 'b', 1, 3, 0, 36.11, 1, 7, nil, nil, false, false, 2 },
+      { 'b', 'c', 1, 3, 0, 36.11, 1, 7, nil, nil, false, false, 1 },
+      { 'c', 'd', 1, 3, 0, 36.11, 1, 7, nil, nil, false, false, 1 },
+    },
+  }
+  local hn = N.toNodes(hg, nil, 0, false)
+  T.check(hn.a.links.b.highway == true and hn.a.links.b.unlimited == true and hn.a.links.b.lanesOut == 3,
+    'autobahn unlimited flag (e[13]==2) and lanesOut survive decoding')
+  T.check(hn.b and hn.b.links.c and hn.b.links.c.highway == true and hn.b.links.c.unlimited == false,
+    'posted highway flag (e[13]==1) preserved and unlimited/posted boundary is not compacted')
+end
+
+-- 2. Deterministic regional vehicle archetype & livery roster builder
+do
+  local pool = {
+    { model = 'citybus', config = 'hero', name = 'Hero JATO Bus' },
+    { model = 'citybus', config = 'city', name = 'City Transit Bus' },
+    { model = 'wentward', config = 'metro_shuttle', name = 'Metro Shuttle' },
+    { model = 'van', config = 'h15_cargo', name = 'H15 Cargo Van' },
+    { model = 'van', config = 'h25_delivery', name = 'H25 Delivery' },
+    { model = 'md_series', config = 'box_courier', name = 'MD Courier Box' },
+    { model = 'boxtruck', config = 'parcel_upfit', name = 'Parcel Box Truck' },
+    { model = 'semi', config = 't75_hauler', name = 'T75 Hauler' },
+    { model = 'md_series', config = 'md70_flatbed', name = 'MD70 Flatbed' },
+    { model = 'etk800', config = '856_ttsport', name = 'ETK 856 ttSport' },
+    { model = 'etkc', config = 'kc6t_sport', name = 'ETK K-Series Sport' },
+    { model = 'scintilla', config = 'gt_coupe', name = 'Scintilla GT' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+    { model = 'vivace', config = 'police', name = 'Vivace Police' },
+    { model = 'etk800', config = '854d_wagon', name = 'ETK 854d' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+    { model = 'covet', config = 'dx_hatch', name = 'Covet DX' },
+    { model = 'pessima', config = 'lx_sedan', name = 'Pessima LX' },
+  }
+  local rOff = N.buildTrafficRoster('europe', pool, false, { size = 16, urban = true })
+  local rOff2 = N.buildTrafficRoster('DE', pool, false, { size = 16, urban = true })
+  T.check(#rOff == #rOff2 and rOff[1].model == rOff2[1].model and rOff[1].config == rOff2[1].config,
+    'buildTrafficRoster: deterministic across region/country alias calls')
+  T.check(rOff.counts.police == 0, 'buildTrafficRoster: strict Police == 0 when deEnabled == false')
+  T.check(rOff.counts.bus >= 1 and rOff.counts.bus <= 2, 'buildTrafficRoster: 1-2 city buses in urban pool')
+  T.check(rOff.counts.courier >= 2, 'buildTrafficRoster: courier/delivery vans populated')
+  T.check(rOff.counts.truck >= 1, 'buildTrafficRoster: commercial trucks populated')
+  T.check(rOff.counts.speeder >= 1 and rOff.counts.speeder <= 2, 'buildTrafficRoster: 1-2 speeders assigned')
+  T.check(rOff.counts.commuter >= 2, 'buildTrafficRoster: commuters fill remaining pool')
+  local sawHero, sawTransitBus, sawCourierPaint, sawPolice = false, false, false, false
+  for _, e in ipairs(rOff) do
+    if e.config == 'hero' then sawHero = true end
+    if e.archetype == 'bus' and (e.config == 'city' or e.config == 'metro_shuttle') then sawTransitBus = true end
+    if e.archetype == 'courier' and e.paint ~= nil and e.liveryTag ~= nil then sawCourierPaint = true end
+    if e.archetype == 'police' or tostring(e.config):find('poliz') or tostring(e.config):find('police') then
+      sawPolice = true
+    end
+  end
+  T.check(not sawHero and sawTransitBus, 'buildTrafficRoster: prefers transit/city bus liveries and excludes hero/jato')
+  T.check(sawCourierPaint, 'buildTrafficRoster: assigns realistic courier paint/livery tags to delivery vans')
+  T.check(not sawPolice, 'buildTrafficRoster: zero police entries leak when deEnabled == false')
+
+  local rOn = N.buildTrafficRoster('europe', pool, true, { size = 16, urban = true })
+  T.check(rOn.counts.police >= 1, 'buildTrafficRoster: includes EU police patrols when deEnabled == true')
+end
+
+-- 3. AI Driving Personas (risk, highway cruise speeds, Autobahn speeders, Rechtsfahrgebot lane bias)
+do
+  local pTruck = N.assignVehiclePersona(10, 'semi', 't75_hauler', true)
+  T.check(pTruck.persona == 'truck' and pTruck.risk >= 0.22 and pTruck.risk <= 0.32,
+    'persona truck: calm risk in [0.22, 0.32]')
+  T.check(pTruck.highwayCruiseKph >= 82 and pTruck.highwayCruiseKph <= 92 and pTruck.laneBias == 'right'
+    and pTruck.overtakeAllowed == false, 'persona truck: 82-92 km/h & strict right lane')
+
+  local pBus = N.assignVehiclePersona(11, 'citybus', 'city', true)
+  T.check(pBus.persona == 'bus' and pBus.risk >= 0.22 and pBus.risk <= 0.32
+    and pBus.highwayCruiseKph >= 82 and pBus.highwayCruiseKph <= 92 and pBus.laneBias == 'right',
+    'persona bus: calm risk, 82-92 km/h, strict right lane')
+
+  local pCourier = N.assignVehiclePersona(12, 'van', 'h25_delivery', true)
+  T.check(pCourier.persona == 'courier' and pCourier.risk >= 0.40 and pCourier.risk <= 0.45
+    and pCourier.highwayCruiseKph >= 95 and pCourier.highwayCruiseKph <= 110
+    and pCourier.laneBias == 'right_or_middle', 'persona courier: ~0.42 risk, 95-110 km/h, right/middle lanes')
+
+  local pComm = N.assignVehiclePersona(13, 'vivace', '160_diesel', false)
+  T.check(pComm.persona == 'commuter' and pComm.risk >= 0.38 and pComm.risk <= 0.52
+    and pComm.urbanDeltaKph >= -4 and pComm.urbanDeltaKph <= 4 and pComm.laneBias == 'right',
+    'persona commuter: balanced risk, posted +/-4 km/h, right lane bias')
+
+  local pSpeed = N.assignVehiclePersona(14, 'etk800', '856_ttsport', true)
+  T.check(pSpeed.persona == 'speeder' and pSpeed.risk >= 0.72 and pSpeed.risk <= 0.88
+    and pSpeed.highwayCruiseKph >= 165 and pSpeed.highwayCruiseKph <= 205
+    and pSpeed.highwayDeltaKph >= 15 and pSpeed.highwayDeltaKph <= 28
+    and pSpeed.laneBias == 'overtake_left', 'persona speeder: elevated risk, 165-205 km/h Autobahn, +15..28 posted')
+
+  local cmd = N.personaAiCommand(pSpeed)
+  T.check(cmd and cmd:find('ai.setAggression', 1, true) and cmd:find('ai.driveInLane("on")', 1, true)
+    and cmd:find('ai.setAvoidCars("on")', 1, true), 'personaAiCommand emits valid BeamNG AI setup')
+end
+
+-- 4. OSM Bus Stop pull-over, dwell, release & 45 s per-stop cooldown state machine
+do
+  N.reset()
+  local count = N.onBusStops('tile1', { { id = 'stop_main', x = 100, y = 4, z = 0, yaw = 0 } })
+  T.check(count == 1 and N.status().busStopsLoaded == 1, 'onBusStops registers tile stops')
+  local cmds = {}
+  local busObj = { queueLuaCommand = function(_, c) cmds[#cmds + 1] = c end }
+
+  -- Too fast (>= 14 m/s): must not trigger stop
+  local stFast = N.stepBusStop(50, 90, 0, 1, 0, 15.0, 100, busObj)
+  T.check(stFast == 'none' and not N.isBusDwelling(50) and #cmds == 0, 'bus stop: ignored at >= 14 m/s')
+
+  -- Approaching within 18 m at 8 m/s along heading: triggers smooth stop + hazard signal
+  local stStop = N.stepBusStop(50, 90, 0, 1, 0, 8.0, 100, busObj)
+  T.check(stStop == 'stopped' and N.isBusDwelling(50), 'bus stop: triggers dwell within 18 m')
+  T.check(#cmds == 1 and cmds[1]:find('electrics.set_warn_signal(1)', 1, true) and cmds[1]:find('ai.setSpeed(0)', 1, true),
+    'bus stop: commands hazard lights and smooth stop')
+
+  -- Still dwelling at +2.0 s (< 3.5 s)
+  local stDwell = N.stepBusStop(50, 95, 0, 1, 0, 0.0, 102, busObj)
+  T.check(stDwell == 'dwelling' and N.isBusDwelling(50) and #cmds == 1, 'bus stop: holds dwell during 3.5-4.5 s window')
+
+  -- Released after 4.6 s (> 4.5 s max dwell)
+  local stRel = N.stepBusStop(50, 95, 0, 1, 0, 0.0, 104.6, busObj)
+  T.check(stRel == 'released' and not N.isBusDwelling(50), 'bus stop: releases after dwell completes')
+  T.check(#cmds == 2 and cmds[2]:find('electrics.set_warn_signal(0)', 1, true) and cmds[2]:find('ai.setMode("traffic")', 1, true),
+    'bus stop: clears hazard signal and resumes traffic flow')
+
+  -- Within 45 s per-stop cooldown: another bus (or same bus) cannot re-trigger
+  local stCd = N.stepBusStop(51, 90, 0, 1, 0, 6.0, 130, busObj)
+  T.check(stCd == 'none' and not N.isBusDwelling(51), 'bus stop: 45 s per-stop cooldown blocks immediate re-trigger')
+
+  -- After 45 s cooldown expires (104.6 + 45 = 149.6 -> test at 150.0): triggers again
+  local stAfter = N.stepBusStop(51, 90, 0, 1, 0, 6.0, 150.0, busObj)
+  T.check(stAfter == 'stopped' and N.isBusDwelling(51), 'bus stop: triggers again after 45 s cooldown')
+
+  N.dropBusStops('tile1')
+  T.check(N.status().busStopsLoaded == 0, 'dropBusStops clears tile stops')
+  N.reset()
+end
+
+-- 5. Forward-biased horizon spawn/despawn recycling window & throttled director tick
+do
+  T.check(N.shouldRecycleBehind(-450, 0, 0, 0, 1, 0), 'shouldRecycleBehind: > 420 m behind player recycles')
+  T.check(not N.shouldRecycleBehind(-400, 0, 0, 0, 1, 0), 'shouldRecycleBehind: <= 420 m behind stays')
+  T.check(not N.shouldRecycleBehind(200, 0, 0, 0, 1, 0), 'shouldRecycleBehind: ahead of player stays')
+
+  local bigBox = { -600, -600, 600, 600 }
+  local x, y, hx, hy, lo, hi = N.horizonSpawnWindow(0, 0, 1, 0, bigBox, 0, 0)
+  T.check(x == 0 and y == 0 and hx == 1 and hy == 0 and lo == 160 and hi == 340,
+    'horizonSpawnWindow: [160, 340] forward cone in large box')
+
+  -- Camera ahead of player at +120 m: lo must stay >= 95 m past camera (>= 215 m)
+  local _, _, _, _, loCam, hiCam = N.horizonSpawnWindow(0, 0, 1, 0, bigBox, 120, 0)
+  T.check(loCam >= 215 - 1e-6 and hiCam == 340, 'horizonSpawnWindow: never pops in within < 95 m of camera')
+
+  -- Tiny box leaving < 95 m ahead: returns nil rather than popping in close
+  T.check(N.horizonSpawnWindow(0, 0, 1, 0, { -100, -100, 120, 100 }, 0, 0) == nil,
+    'horizonSpawnWindow: returns nil when box cannot guarantee >= 95 m clearance')
+
+  -- End-to-end updateTrafficDirector: 4 Hz throttle, persona assignment, and behind-player recycling
+  N.reset()
+  N.enabled = true
+  local sg = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+               be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
+  local clock0 = os.clock
+  local now = 2000
+  os.clock = function() return now end
+  local function v(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  local dirCmds, teleports = {}, {}
+  local aiObj = {
+    getActive = function() return true end,
+    getPosition = function() return v(-500, 0, 0) end,
+    getVelocity = function() return v(10, 0, 0) end,
+    getDirectionVector = function() return v(1, 0, 0) end,
+    queueLuaCommand = function(_, c) dirCmds[#dirCmds + 1] = c end,
+  }
+  getObjectByID = function(id) return id == 201 and aiObj or nil end
+  be = { getPlayerVehicleID = function() return 1 end }
+  core_camera = { getPosition = function() return v(0, 0, 0) end }
+  map = nil
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      return { [201] = { isAi = true, model = 'semi', config = 't75_hauler', respawnCount = 0, risk = 0.5 } }
+    end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      teleports[#teleports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  local player = { x = 0, y = 0, z = 0, vx = 25, vy = 0 }
+  T.check(N.updateTrafficDirector(0.10, player, bigBox) == false, 'director: throttled below 0.25 s')
+  T.check(N.updateTrafficDirector(0.16, player, bigBox) == true, 'director: ticks at >= 0.25 s (~4 Hz)')
+  T.check(N.getVehiclePersona(201) ~= nil and N.getVehiclePersona(201).persona == 'truck',
+    'director: assigns persona on first sight')
+  T.check(#dirCmds == 1 and dirCmds[1]:find('ai.setAggression', 1, true) ~= nil,
+    'director: sends persona AI command once')
+  T.check(#teleports == 1 and teleports[1].id == 201 and teleports[1].dmin == 160 and teleports[1].dmax == 340,
+    'director: recycles vehicle > 420 m behind into [160, 340] m forward cone')
+
+  os.clock = clock0
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
 T.done('test_navgraph')

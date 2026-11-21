@@ -493,6 +493,7 @@ local function dropTile(key)
   if t.sound then require('beamngEarth/ambience').dropSpaces(key) end
   if t.wells then require('beamngEarth/pumpjacks').dropKey(key) end
   if t.turbines then require('beamngEarth/windturbines').dropKey(key) end
+  if t.busStops then require('beamngEarth/navgraph').dropBusStops(key) end
   sea.release(t.waterguard)
   tiles[key] = nil
 end
@@ -941,6 +942,44 @@ function M.mapTurbines(pl, recs)
   return out
 end
 
+-- Extract OSM bus stop / platform coordinates from tile furniture props and optional explicit busStops rows.
+function M.extractBusStops(key, data, pl)
+  local out = {}
+  local dyaw = pl and geotile.yawOf(pl) or 0
+  if type(data.props) == 'table' and type(data.props.items) == 'table' and type(data.props.groups) == 'table' then
+    local busGroups = {}
+    for i, g in ipairs(data.props.groups) do
+      local gl = type(g) == 'string' and g:lower() or ''
+      if gl:find('busshelter', 1, true) or gl:find('bus_stop', 1, true) or gl:find('busstop', 1, true) or gl == 'platform' then
+        busGroups[i - 1] = true
+      end
+    end
+    if next(busGroups) ~= nil then
+      for i, r in ipairs(data.props.items) do
+        if type(r) == 'table' and busGroups[r[1]] and type(r[2]) == 'number' and type(r[3]) == 'number' then
+          local x, y, z = r[2], r[3], tonumber(r[4]) or 0
+          if pl then x, y, z = geotile.apply(pl, x, y, z) end
+          local yaw = (tonumber(r[5]) or 0) + dyaw
+          out[#out + 1] = { id = tostring(key) .. ':p' .. tostring(i), x = x, y = y, z = z, yaw = yaw }
+        end
+      end
+    end
+  end
+  if type(data.busStops) == 'table' then
+    for i, s in ipairs(data.busStops) do
+      if type(s) == 'table' then
+        local x, y, z = tonumber(s.x or s[1]), tonumber(s.y or s[2]), tonumber(s.z or s[3]) or 0
+        if x and y then
+          if pl then x, y, z = geotile.apply(pl, x, y, z) end
+          local yaw = (tonumber(s.yaw or s[4]) or 0) + dyaw
+          out[#out + 1] = { id = s.id or (tostring(key) .. ':b' .. tostring(i)), x = x, y = y, z = z, yaw = yaw }
+        end
+      end
+    end
+  end
+  return out
+end
+
 -- The rows of tile t (key) handed to their modules, mapped into its current placement (made: replaced in place).
 local function geoRows(key, t, data, replacing)
   local pl = t.rowPl.pl
@@ -956,6 +995,16 @@ local function geoRows(key, t, data, replacing)
     end
     require('beamngEarth/nightlights').onRows(key, M.mapRows(pl, data.props.items, 2, 5), data.props.groups)
     t.props = true
+  end
+  do
+    local stops = M.extractBusStops(key, data, pl)
+    if #stops > 0 then
+      require('beamngEarth/navgraph').onBusStops(key, stops)
+      t.busStops = true
+    elseif t.busStops then
+      require('beamngEarth/navgraph').dropBusStops(key)
+      t.busStops = nil
+    end
   end
   if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0 then
     if not replacing then
@@ -1611,6 +1660,13 @@ function M.onTile(msg, currentAnchor, a)
     require('beamngEarth/trees').onRows(msg.anchorId, 'p' .. tostring(msg.key), data.props.items, data.props.groups)
     require('beamngEarth/nightlights').onRows(key, data.props.items, data.props.groups)   -- (the lamps' light)
     tiles[key].props = true
+  end
+  do
+    local stops = M.extractBusStops(key, data, nil)
+    if #stops > 0 then
+      require('beamngEarth/navgraph').onBusStops(key, stops)
+      tiles[key].busStops = true
+    end
   end
   if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0 then
     require('beamngEarth/trees').onRows(msg.anchorId, 'g' .. tostring(msg.key),

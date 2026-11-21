@@ -33,4 +33,14 @@ T.check(O.laneClear({ { ahead = -60, side = -3.6, v = 20 } }, shift, 25, 70, 19)
 T.check(not O.laneClear({ { ahead = -60, side = -3.6, v = 36 } }, shift, 25, 70, 19),
   'one 60 m back closing at 17 m/s: not clear (it needs the room)')
 
+-- Loop 8: Rechtsfahrgebot keep-right lane shift logic
+T.check(O.rechtsfahrgebotShift(0, 2, 3.6, false, 'truck', false) == 3.6, 'RHT truck in left lane merges right')
+T.check(O.rechtsfahrgebotShift(1, 2, 3.6, false, 'truck', false) == nil, 'RHT truck in rightmost lane stays')
+T.check(O.rechtsfahrgebotShift(0, 3, 3.6, false, 'bus', false) == 3.6, 'RHT bus in passing lane merges right')
+T.check(O.rechtsfahrgebotShift(1, 3, 3.6, false, 'courier', false) == nil, 'RHT courier allowed in middle lane')
+T.check(O.rechtsfahrgebotShift(0, 3, 3.6, false, 'courier', false) == 3.6, 'RHT courier leaves leftmost passing lane')
+T.check(O.rechtsfahrgebotShift(0, 2, 3.6, false, 'speeder', false) == 3.6, 'RHT speeder merges right when not passing')
+T.check(O.rechtsfahrgebotShift(0, 2, 3.6, false, 'speeder', true) == nil, 'RHT speeder stays left while passing')
+T.check(O.rechtsfahrgebotShift(1, 2, 3.6, true, 'truck', false) == -3.6, 'LHT truck in outer passing lane merges left')
+
 T.done('test_overtake')

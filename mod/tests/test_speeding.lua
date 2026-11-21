@@ -52,4 +52,32 @@ T.check(S._rough(obj) == false, 'no navgraph: not rough')
 S.reset()
 T.check(next(S._cars()) == nil and sent[#sent]:find('legal') ~= nil, 'reset: all back to legal')
 
+-- Loop 8: personaCap & bus-dwell bypass
+do
+  local truckCap = S.personaCap(36.11, { persona = 'truck', highwayCruiseMs = 86 / 3.6, urbanDeltaKph = -2 }, { highway = true, unlimited = true })
+  T.near(truckCap, 86 / 3.6, 1e-3, 'personaCap: truck cruises at 86 km/h on unlimited Autobahn')
+
+  local speederAb = S.personaCap(36.11, { persona = 'speeder', highwayCruiseMs = 190 / 3.6, highwayDeltaKph = 22 }, { highway = true, unlimited = true })
+  T.near(speederAb, 190 / 3.6, 1e-3, 'personaCap: speeder cruises at 190 km/h on unlimited Autobahn')
+
+  local speederPosted = S.personaCap(100 / 3.6, { persona = 'speeder', highwayDeltaKph = 20 }, { highway = true, unlimited = false })
+  T.near(speederPosted, 120 / 3.6, 1e-3, 'personaCap: speeder runs +20 km/h over posted rural/highway limit')
+
+  local roughSpeeder = S.personaCap(100 / 3.6, { persona = 'speeder', highwayDeltaKph = 20 }, { highway = true, rough = true })
+  T.near(roughSpeeder, 100 / 3.6, 1e-3, 'personaCap: rough road clamps speeder back to legal limit')
+
+  -- Bus dwelling at an OSM bus stop is bypassed by speeding.lua (no speed command sent)
+  sent = {}
+  package.loaded['beamngEarth/navgraph'] = {
+    isBusDwelling = function(id) return id == 5 end,
+    getVehiclePersona = function() return { persona = 'bus', highwayCruiseMs = 86 / 3.6 } end,
+    speedProfileAt = function() return { target = 13.89, rough = false } end,
+  }
+  veh.role.actionName = 'none'
+  S.update(1.0, { rules = { country = 'DE' } })
+  T.check(#sent == 0, 'bus dwelling at stop: speeding.lua does not override smooth-stop command')
+  package.loaded['beamngEarth/navgraph'] = nil
+  S.reset()
+end
+
 T.done('test_speeding')
