@@ -78,7 +78,7 @@ angular.module('beamng.apps')
               '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10.5px;margin-bottom:3px;' + NUM + '">' +
                 '<div style="display:flex;align-items:center;gap:5px;min-width:0;">' +
                   '<span ng-style="tr.cargoSensitivity === \'hazmat\' ? {background:\'rgba(239,68,68,0.22)\',color:\'#fca5a5\',borderColor:\'rgba(239,68,68,0.50)\'} : {background:\'rgba(245,158,11,0.20)\',color:\'#fbbf24\',borderColor:\'rgba(245,158,11,0.45)\'}" ' +
-                    'style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-size:9.5px;font-weight:800;letter-spacing:0.05em;white-space:nowrap;">{{ tr.cargoSensitivity === \'hazmat\' ? \'HAZMAT ADR\' : \'FRAGILE\' }}</span>' +
+                    'style="padding:1px 5px;border-radius:3px;border:1px solid transparent;font-size:9.5px;font-weight:800;letter-spacing:0.05em;white-space:nowrap;">{{ tr.cargoSensitivity === \'hazmat\' ? \'GEFAHRGUT · +50%\' : \'FRAGILE · +35%\' }}</span>' +
                   '<span ng-if="tr.sensitivityLabel" style="color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ tr.sensitivityLabel }}</span>' +
                 '</div>' +
                 '<b ng-style="{color: integrityColor}" style="white-space:nowrap;">{{ integrityPct }}%</b>' +
@@ -129,7 +129,7 @@ angular.module('beamng.apps')
             '<div style="font-size:12px;color:#d6dee6;' + NUM + '">{{ tr.mode === \'taxi\' ? (tr.stopsCompleted >= 2 ? \'Pickup -> Drop-off\' : \'Ride Skipped\') : (\'Stops \' + tr.stopsCompleted + \'/\' + tr.stopCount) }} · {{ summaryDist }} · {{ summaryTime }}</div>' +
             '<div ng-if="tr.mode === \'taxi\' && tr.totalFare > 0" style="font-size:11.5px;color:#fbbf24;margin-top:2px;font-weight:600;' + NUM + '">Fare ${{ tr.fare.toFixed(2) }} + Tip ${{ tr.tip.toFixed(2) }}</div>' +
             '<div ng-if="tr.mode === \'parcel\'" style="font-size:11.5px;color:#6ee7b7;margin-top:2px;font-weight:600;' + NUM + '">Parcels {{ tr.parcelsDelivered || 0 }}/{{ tr.parcelsTotal || 0 }}<span ng-if="tr.parcelsReturned > 0"> (+{{ tr.parcelsReturned }} returns)</span></div>' +
-            '<div ng-if="(tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\') && tr.payout && tr.payout.hazardBonus > 0" style="font-size:11.5px;color:#34d399;margin-top:2px;font-weight:600;' + NUM + '">{{ tr.cargoSensitivity === \'hazmat\' ? \'Hazmat ADR Bonus\' : \'Fragile Bonus\' }} +${{ tr.payout.hazardBonus.toFixed(2) }} ({{ integrityPct }}% integrity)</div>' +
+            '<div ng-if="(tr.cargoSensitivity === \'fragile\' || tr.cargoSensitivity === \'hazmat\') && tr.payout && tr.payout.hazardBonus > 0" style="font-size:11.5px;color:#34d399;margin-top:2px;font-weight:600;' + NUM + '">{{ tr.cargoSensitivity === \'hazmat\' ? \'Gefahrgut Bonus\' : \'Fragile Bonus\' }} +${{ tr.payout.hazardBonus.toFixed(2) }} ({{ integrityPct }}% integrity)</div>' +
             '<div style="font-size:11px;color:#93a0ad;margin-top:2px;' + NUM + '">Smoothness {{ tr.smoothnessPct }}% · Collisions {{ tr.collisions }}<span ng-if="tr.driverRank"> · {{ tr.driverRank }}</span></div>' +
             '<div style="display:flex;gap:6px;margin-top:7px;">' +
               '<button ng-if="tr.mode === \'taxi\'" ng-click="nextPassenger()" style="flex:1;background:#ff6600;color:#fff;border:1px solid #ff7a1f;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer;">Next Passenger</button>' +

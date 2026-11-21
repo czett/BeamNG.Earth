@@ -906,17 +906,17 @@ class CargoSensitivityTest(unittest.TestCase):
                 self.assertEqual(s["hazardBonusMult"], 0.0)
                 self.assertEqual(s["sensitivityLabel"], "")
 
-        # city/regional/long on logistics & parcel hit ~35% fragile and ~20% hazmat
+        # city/regional/long on logistics hit ~35% fragile and ~20% hazmat
         counts = {"standard": 0, "fragile": 0, "hazmat": 0}
         for seed in range(200):
             s = tm.assign_cargo_sensitivity("logistics", "city", "industrial", "machinery", seed)
             counts[s["cargoSensitivity"]] += 1
             if s["cargoSensitivity"] == "fragile":
                 self.assertEqual(s["hazardBonusMult"], 0.35)
-                self.assertTrue(s["sensitivityLabel"].startswith("Fragile"))
+                self.assertEqual(s["sensitivityLabel"], "Zerbrechlich · Sanft fahren (+35% Bonus)")
             elif s["cargoSensitivity"] == "hazmat":
                 self.assertEqual(s["hazardBonusMult"], 0.50)
-                self.assertTrue(s["sensitivityLabel"].startswith("Hazmat ADR"))
+                self.assertEqual(s["sensitivityLabel"], "Gefahrgut · Vorsichtig fahren (+50% Bonus)")
             else:
                 self.assertEqual(s["hazardBonusMult"], 0.0)
                 self.assertEqual(s["sensitivityLabel"], "")
@@ -925,6 +925,23 @@ class CargoSensitivityTest(unittest.TestCase):
         self.assertLessEqual(counts["fragile"], 90)
         self.assertGreaterEqual(counts["hazmat"], 25)
         self.assertLessEqual(counts["hazmat"], 55)
+
+        # parcel deliveries never spawn hazmat, but still spawn fragile (~35%)
+        p_counts = {"standard": 0, "fragile": 0, "hazmat": 0}
+        for seed in range(200):
+            s = tm.assign_cargo_sensitivity("parcel", "city", "retail", "parcels", seed)
+            p_counts[s["cargoSensitivity"]] += 1
+            self.assertNotEqual(s["cargoSensitivity"], "hazmat")
+            if s["cargoSensitivity"] == "fragile":
+                self.assertEqual(s["hazardBonusMult"], 0.35)
+                self.assertEqual(s["sensitivityLabel"], "Zerbrechlich · Sanft fahren (+35% Bonus)")
+            else:
+                self.assertEqual(s["hazardBonusMult"], 0.0)
+                self.assertEqual(s["sensitivityLabel"], "")
+
+        self.assertEqual(p_counts["hazmat"], 0)
+        self.assertGreaterEqual(p_counts["fragile"], 50)
+        self.assertLessEqual(p_counts["fragile"], 90)
 
 
 if __name__ == "__main__":

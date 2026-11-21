@@ -111,7 +111,8 @@ M.SOLO_CARGO_CAP_KG = {
 }
 
 -- Physical 3D cargo prop constants
-M.PARCEL_PROP_MODELS = { 'cardboard_box', 'cargo_load_box_M', 'cargo_load_box_S', 'woodcrate', 'cargo_load_box_L' }
+-- Parcel mode prioritizes compact boxes so props fit cleanly inside van/pickup cargo bays.
+M.PARCEL_PROP_MODELS = { 'cardboard_box', 'cargo_load_box_S', 'cargo_load_box_M' }
 M.CRATE_PROP_MODELS = { 'woodcrate', 'EuroPallet', 'cargo_load_box_L', 'cargo_load_box_M', 'cardboard_box' }
 M.OPEN_TRAILER_MODELS = { boxutility = true, boxutility_large = true, tsfb = true, flatbed = true }
 M.PROP_EST_MASS_KG = {
@@ -1032,10 +1033,10 @@ function M.discoverCargoPropModels(existsFn, modelListFn)
     table.sort(keys)
     for _, k in ipairs(keys) do
       local kl = k:lower()
-      if kl:find('cardboard') or kl:find('cargo_load_box') then
+      if kl:find('cardboard') or (kl:find('cargo_load_box') and not kl:find('_l$') and not kl:find('_xl')) then
         add('parcel', k)
         add('crate', k)
-      elseif kl:find('woodcrate') or kl:find('pallet') or kl:find('crate') then
+      elseif kl:find('woodcrate') or kl:find('pallet') or kl:find('crate') or kl:find('cargo_load_box') then
         add('crate', k)
       end
     end
@@ -1071,23 +1072,25 @@ function M.computeCargoBayBounds(info)
   -- Vans & box trucks
   if jb == 'md_series' or (jb == 'van' and (cfg:find('box') or cfg:find('upfit') or (lenM and lenM >= 6.0))) then
     local hl = halfL or 3.3
-    return { halfW = math.min(0.88, halfW or 0.85), yMin = -hl + 0.55, yMax = 0.35, zFloor = 0.78, maxProps = 8, layers = 2, kind = 'parcel' }
+    return { halfW = math.min(0.82, halfW or 0.80), yMin = -hl + 0.70, yMax = 0.35, zFloor = 0.88, maxProps = 8, layers = 2, kind = 'parcel' }
   elseif jb == 'van' or jb == 'stambecco' or mtype == 'van' then
     local hl = halfL or 2.65
-    return { halfW = math.min(0.72, halfW or 0.70), yMin = -hl + 0.48, yMax = -0.20, zFloor = 0.58, maxProps = 6, layers = 2, kind = 'parcel' }
+    local yMin = -hl + 0.72
+    return { halfW = math.min(0.56, halfW or 0.56), yMin = yMin, yMax = math.max(-0.15, yMin + 0.50), zFloor = 0.70, maxProps = 6, layers = 2, kind = 'parcel' }
   end
 
   -- Pickups (open bed)
   if jb == 'pickup' or jb == 'dseries' or mtype == 'pickup' or mtype == 'truck' then
     local hl = halfL or 2.75
-    return { halfW = math.min(0.68, halfW or 0.66), yMin = -hl + 0.42, yMax = -0.45, zFloor = 0.76, maxProps = 6, layers = 1, kind = 'parcel' }
+    local yMin = -hl + 0.70
+    return { halfW = math.min(0.56, halfW or 0.56), yMin = yMin, yMax = math.max(-0.45, yMin + 0.50), zFloor = 0.86, maxProps = 6, layers = 1, kind = 'parcel' }
   end
 
   -- Hatchbacks, wagons, SUVs, vans/MPVs (compact trunk/cargo bay)
   if jb == 'lansdale' or jb == 'roamer' or jb == 'vivace' or jb == 'covet' or jb == 'legran' or jb == 'pessima'
       or mtype == 'hatchback' or mtype == 'wagon' or mtype == 'suv' or (lenM and lenM >= 4.0) then
     local hl = halfL or 2.25
-    return { halfW = math.min(0.48, halfW or 0.46), yMin = -hl + 0.45, yMax = -hl + 1.15, zFloor = 0.56, maxProps = 3, layers = 1, kind = 'parcel' }
+    return { halfW = math.min(0.48, halfW or 0.46), yMin = -hl + 0.45, yMax = -hl + 1.15, zFloor = 0.62, maxProps = 3, layers = 1, kind = 'parcel' }
   end
 
   return nil
@@ -1099,25 +1102,32 @@ function M.cargoPropSlots(bounds, count, itemSize)
   if type(bounds) ~= 'table' then return {} end
   count = math.min(math.max(0, math.floor(tonumber(count) or 0)), math.min(bounds.maxProps or M.MAX_CARGO_PROPS, M.MAX_CARGO_PROPS))
   if count <= 0 then return {} end
-  local sz = tonumber(itemSize) or 0.52
-  local margin = 0.14
-  local xSpan = math.max(0.0, (bounds.halfW or 0.6) - sz * 0.5)
+  local sz = tonumber(itemSize) or 0.48
+  local halfSz = sz * 0.5
+  local margin = 0.08
+  local xSpan = math.max(0.0, (bounds.halfW or 0.56) - halfSz)
   local nCols = (xSpan >= sz * 0.42) and 2 or 1
   local yMin = bounds.yMin or -1.2
   local yMax = bounds.yMax or 0.0
   local yLen = math.max(0.2, yMax - yMin)
+  local yLo = yMin + halfSz
+  local yHi = yMax - halfSz
+  if yLo > yHi then
+    local yMid = (yMin + yMax) * 0.5
+    yLo, yHi = yMid, yMid
+  end
   local nRows = math.max(1, math.floor((yLen + margin) / (sz + margin)))
   local maxLayers = math.max(1, tonumber(bounds.layers) or 1)
-  local zBase = bounds.zFloor or 0.55
+  local zBase = bounds.zFloor or 0.68
 
   local slots = {}
   for layer = 0, maxLayers - 1 do
     for r = 0, nRows - 1 do
       local ty = (nRows == 1) and 0.5 or (r / (nRows - 1))
       -- Front-to-rear so tail removal unloads from the tailgate/doors first
-      local ly = yMax - ty * (yMax - yMin)
+      local ly = yHi - ty * (yHi - yLo)
       for c = 0, nCols - 1 do
-        local lx = (nCols == 1) and 0.0 or ((c == 0 and -1 or 1) * math.min(xSpan, sz * 0.55))
+        local lx = (nCols == 1) and 0.0 or ((c == 0 and -1 or 1) * math.min(xSpan, sz * 0.54))
         slots[#slots + 1] = {
           lx = lx,
           ly = ly,
@@ -1848,7 +1858,7 @@ local function spawnCargoPropsForTarget(j, targetVeh, count, propBucket, isTrail
   end
   if not models or #models == 0 then return 0 end
 
-  local itemSz = (bucket == 'crate') and 0.65 or 0.48
+  local itemSz = (bucket == 'crate') and 0.65 or 0.44
   local slots = M.cargoPropSlots(bounds, count, itemSz)
   if #slots == 0 then return 0 end
 

@@ -708,41 +708,30 @@ def generate_cargo_manifest(vehicle, tier, seed, dest_domain="general"):
     }
 
 
-_FRAGILE_LABELS = {
-    "food": ("Fragile · Glass Bottles & Jars", "Fragile · Artisan Glassware"),
-    "medical": ("Fragile · Laboratory Optics", "Fragile · Sterile Vials"),
-    "hardware": ("Fragile · Ceramic Tiles & Fixtures", "Fragile · Precision Tooling"),
-    "retail": ("Fragile · Glass & Electronics", "Fragile · Fine Ceramics"),
-    "industrial": ("Fragile · Precision Instruments", "Fragile · CNC Optics"),
-    "general": ("Fragile · Glass & Electronics", "Fragile · Precision Instruments"),
-}
-_HAZMAT_LABELS = {
-    "fuel": ("Hazmat ADR · Flammable Liquids", "Hazmat ADR · Class 3 Fuel"),
-    "medical": ("Hazmat ADR · Bio-Medical Class 6", "Hazmat ADR · Cold-Chain Reagents"),
-    "industrial": ("Hazmat ADR · Corrosive Chemicals", "Hazmat ADR · Pressurized Cylinders"),
-    "hardware": ("Hazmat ADR · Solvents & Adhesives", "Hazmat ADR · Pressurized Aerosols"),
-    "general": ("Hazmat ADR · Flammable Liquids", "Hazmat ADR · Class 9 Batteries"),
-}
+_FRAGILE_LABEL = "Zerbrechlich · Sanft fahren (+35% Bonus)"
+_HAZMAT_LABEL = "Gefahrgut · Vorsichtig fahren (+50% Bonus)"
 
 
 def assign_cargo_sensitivity(mode, tier, domain="general", cargo_type="", seed=0):
-    """Deterministically assign standard/fragile/hazmat sensitivity on logistics & parcel city+ tiers."""
+    """Deterministically assign standard/fragile/hazmat sensitivity on city+ tiers.
+
+    Hazmat is exclusive to commercial logistics jobs and never spawned on
+    residential parcel deliveries; parcel deliveries can still spawn fragile.
+    """
     mode_l = str(mode or "").lower()
     tier_l = str(tier or "").lower()
     if mode_l not in ("logistics", "parcel") or tier_l not in ("city", "regional", "long"):
         return {"cargoSensitivity": "standard", "sensitivityLabel": "", "hazardBonusMult": 0.0}
 
     roll = _stable_index(seed, f"cargo_sens:{mode_l}:{tier_l}:{domain}:{cargo_type}", 100)
-    if roll < 20:
+    if mode_l == "logistics" and roll < 20:
         sens = "hazmat"
         mult = 0.50
-        pool = _HAZMAT_LABELS.get(domain) or _HAZMAT_LABELS["general"]
-        label = pool[_stable_index(seed, f"sens_lbl:{mode_l}:{tier_l}:{domain}", len(pool))]
-    elif roll < 55:
+        label = _HAZMAT_LABEL
+    elif (mode_l == "logistics" and roll < 55) or (mode_l == "parcel" and roll < 35):
         sens = "fragile"
         mult = 0.35
-        pool = _FRAGILE_LABELS.get(domain) or _FRAGILE_LABELS["general"]
-        label = pool[_stable_index(seed, f"sens_lbl:{mode_l}:{tier_l}:{domain}", len(pool))]
+        label = _FRAGILE_LABEL
     else:
         sens = "standard"
         mult = 0.0

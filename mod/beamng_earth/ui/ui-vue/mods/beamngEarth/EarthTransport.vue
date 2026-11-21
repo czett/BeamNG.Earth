@@ -261,7 +261,7 @@
             <b class="tm-num">{{ formatMoney(summary.payout.tipOrStreakBonus, { signed: true }) }}</b>
           </div>
           <div v-if="summary.payout.hazardBonus > 0" class="tm-payout-row is-bonus">
-            <span>{{ summary.cargoSensitivity === 'hazmat' ? 'Hazmat ADR Bonus' : 'Fragile Cargo Bonus' }}</span>
+            <span>{{ summary.cargoSensitivity === 'hazmat' ? 'Gefahrgut Bonus (+50%)' : 'Fragile Cargo Bonus (+35%)' }}</span>
             <b class="tm-num">{{ formatMoney(summary.payout.hazardBonus, { signed: true }) }}</b>
           </div>
           <div v-if="summary.payout.damagePenalty > 0" class="tm-payout-row is-penalty">
