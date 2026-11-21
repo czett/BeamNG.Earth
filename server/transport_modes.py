@@ -38,6 +38,9 @@ OVERPASS_MAX_CACHE = 64
 DRIVABLE_CLASSES = frozenset({
     "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "unknown",
 })
+HIGHWAY_FORBIDDEN_CLASSES = frozenset({"motorway", "motorway_link", "trunk", "trunk_link"})
+TAXI_ROAD_CLASSES = DRIVABLE_CLASSES - HIGHWAY_FORBIDDEN_CLASSES
+PARCEL_FALLBACK_ROAD_CLASSES = DRIVABLE_CLASSES - HIGHWAY_FORBIDDEN_CLASSES
 LOGISTICS_FALLBACK_CLASSES = DRIVABLE_CLASSES | frozenset({"service"})
 SKIP_SUBCLASSES = frozenset({"driveway", "parking_aisle", "sidewalk", "crosswalk", "cycle_crossing", "alley"})
 LOGISTICS_SITE_SUBCLASSES = frozenset({"parking_aisle", "driveway", "alley", ""})
@@ -80,8 +83,22 @@ TIERS = {
 
 RESIDENTIAL_BUILDING_CLASSES = frozenset({
     "house", "detached", "semidetached_house", "terrace", "apartments",
-    "residential", "bungalow", "cabin", "farm", "duplex",
+    "residential", "bungalow", "cabin", "duplex",
 })
+PARCEL_COMMERCIAL_BLD_CLASSES = frozenset({
+    "commercial", "retail", "office", "supermarket", "mall", "shop", "workshop",
+    "kiosk", "service", "clinic", "hospital", "hotel", "restaurant", "cafe", "bank",
+})
+PARCEL_INDUSTRIAL_BLD_CLASSES = frozenset({
+    "industrial", "warehouse", "manufacture", "factory", "depot", "storage", "hangar",
+    "farm", "farm_auxiliary", "barn", "greenhouse", "agricultural", "silo", "stable",
+})
+_PARCEL_INDUSTRIAL_KEYWORDS = (
+    "industrial", "warehouse", "factory", "manufactur", "farm", "agricult",
+    "landmaschinen", "hof", "bauern", "logistik", "spedition", "metallbau",
+    "holz", "sägewerk", "bauunternehmen", "gewerbe", "lager",
+)
+PARCEL_MAX_SNAP_DIST_M = 45.0
 PARCEL_ROAD_CLASSES = frozenset({
     "residential", "living_street", "unclassified", "tertiary", "secondary", "unknown",
 })
@@ -1274,28 +1291,55 @@ def _clear_of_buildings(clat, clon, ref_lat, ref_lon, bld_polys, min_clear_m=BLD
     return True
 
 
-def _apply_curb_offset(snapped, poi_lat=None, poi_lon=None, ref_lat=None, ref_lon=None, bld_polys=None):
-    """Offset a road-snapped stop to the right-hand curb/bay edge along road bearing, clear of buildings."""
+def _is_left_hand_traffic(lat, lon):
+    """Fast zero-I/O regional check for major left-hand-traffic countries (UK/IE, JP, AU, NZ, ZA, IN, SEA)."""
+    la, lo = float(lat), float(lon)
+    if 49.5 <= la <= 61.0 and -10.8 <= lo <= 2.2:      # UK & Ireland
+        return True
+    if 24.0 <= la <= 46.0 and 122.5 <= lo <= 146.5:    # Japan
+        return True
+    if -44.0 <= la <= -10.0 and 112.0 <= lo <= 154.5:  # Australia
+        return True
+    if -47.5 <= la <= -34.0 and 166.0 <= lo <= 179.0:  # New Zealand
+        return True
+    if -35.0 <= la <= -22.0 and 16.0 <= lo <= 33.0:    # South Africa
+        return True
+    if 5.5 <= la <= 35.5 and 67.0 <= lo <= 97.5:       # India / Sri Lanka / Pakistan / Bangladesh
+        return True
+    if -11.0 <= la <= 20.5 and 95.0 <= lo <= 141.0:    # Thailand / Malaysia / Singapore / Indonesia
+        return True
+    return False
+
+
+def _apply_curb_offset(snapped, poi_lat=None, poi_lon=None, ref_lat=None, ref_lon=None, bld_polys=None,
+                       travel_bearing=None, left_hand=False):
+    """Offset a road-snapped stop to the driver's own curb along road bearing (right-hand RHT, left-hand LHT)."""
     if not snapped:
         return None
-    brg = float(snapped.get("bearing") or 0.0) % 360.0
-    slat, slon = float(snapped["lat"]), float(snapped["lon"])
-    # On two-way roads, orient bearing so the right-hand curb (+90 deg) faces the POI/platform side
-    if poi_lat is not None and poi_lon is not None and not snapped.get("oneway"):
-        if dist_m(slat, slon, poi_lat, poi_lon) >= 1.5:
-            to_poi = bearing_deg(slat, slon, poi_lat, poi_lon)
-            right_brg = (brg + 90.0) % 360.0
-            if _heading_diff(right_brg, to_poi) > 90.0:
+    road_lat = float(snapped.get("_roadLat", snapped["lat"]))
+    road_lon = float(snapped.get("_roadLon", snapped["lon"]))
+    brg = float(snapped.get("_roadBearing", snapped.get("bearing") or 0.0)) % 360.0
+    curb_delta = -90.0 if left_hand else 90.0
+    if travel_bearing is not None and not snapped.get("oneway"):
+        # Align two-way road bearing with the incoming travel direction so the stop sits on the driver's own lane/curb
+        if _heading_diff(brg, float(travel_bearing) % 360.0) > 90.0:
+            brg = (brg + 180.0) % 360.0
+    elif poi_lat is not None and poi_lon is not None and not snapped.get("oneway"):
+        # Initial single-stop fallback: orient bearing so curb faces the POI/platform side
+        if dist_m(road_lat, road_lon, poi_lat, poi_lon) >= 1.5:
+            to_poi = bearing_deg(road_lat, road_lon, poi_lat, poi_lon)
+            curb_brg_0 = (brg + curb_delta) % 360.0
+            if _heading_diff(curb_brg_0, to_poi) > 90.0:
                 brg = (brg + 180.0) % 360.0
     half_w = _ROAD_HALF_W.get(str(snapped.get("roadClass") or "").lower(), 2.75)
     target_off = max(1.6, min(3.5, half_w - 0.7))
-    right_brg = (brg + 90.0) % 360.0
-    rlat, rlon = (ref_lat, ref_lon) if (ref_lat is not None and ref_lon is not None) else (slat, slon)
+    curb_brg = (brg + curb_delta) % 360.0
+    rlat, rlon = (ref_lat, ref_lon) if (ref_lat is not None and ref_lon is not None) else (road_lat, road_lon)
 
-    chosen_lat, chosen_lon = slat, slon
+    chosen_lat, chosen_lon = road_lat, road_lon
     for frac in (1.0, 0.7, 0.4, 0.0):
         off = target_off * frac
-        clat, clon = offset_latlon(slat, slon, off, right_brg) if off > 0.0 else (slat, slon)
+        clat, clon = offset_latlon(road_lat, road_lon, off, curb_brg) if off > 0.0 else (road_lat, road_lon)
         if not bld_polys or _clear_of_buildings(clat, clon, rlat, rlon, bld_polys, BLD_CLEAR_M):
             chosen_lat, chosen_lon = clat, clon
             break
@@ -1305,6 +1349,10 @@ def _apply_curb_offset(snapped, poi_lat=None, poi_lon=None, ref_lat=None, ref_lo
         "lon": round(float(chosen_lon), 6),
         "bearing": round(brg, 1),
         "stopType": snapped.get("stopType") or "kerbside",
+        "_roadLat": road_lat,
+        "_roadLon": road_lon,
+        "_roadBearing": brg,
+        "_oneway": bool(snapped.get("oneway")),
     }
 
 
@@ -1631,7 +1679,7 @@ def _enrich_stops_locality(md, stops, deadline):
     return stops
 
 
-def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None, poi_domain=None, locality="", sector_label=""):
+def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type=None, dwell_target_s=None, poi_domain=None, locality="", sector_label="", domain=None):
     road = snapped.get("road") or ""
     road_cls = str(snapped.get("roadClass") or "").strip().lower()
     addr = address or road or f"{snapped['lat']:.5f}, {snapped['lon']:.5f}"
@@ -1655,6 +1703,13 @@ def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type
         stop["dwellTargetS"] = round(float(dwell_target_s), 1)
     if poi_domain:
         stop["_poiDomain"] = poi_domain
+    if domain:
+        stop["domain"] = str(domain)
+    if "_roadLat" in snapped and "_roadLon" in snapped:
+        stop["_roadLat"] = float(snapped["_roadLat"])
+        stop["_roadLon"] = float(snapped["_roadLon"])
+        stop["_roadBearing"] = float(snapped.get("_roadBearing", snapped.get("bearing") or 0.0))
+        stop["_oneway"] = bool(snapped.get("_oneway", snapped.get("oneway")))
     loc_clean = _clean(locality)
     if loc_clean:
         stop["locality"] = loc_clean
@@ -1662,6 +1717,45 @@ def _make_stop(idx, kind, name, snapped, address="", zone_radius=12.0, stop_type
     if sec_clean:
         stop["sectorLabel"] = sec_clean
     return stop
+
+
+def _align_route_curbs(md, stops, start_lat, start_lon, deadline, left_hand=None):
+    """Align every kerbside stop's bearing and curb offset with the incoming travel direction (prev_stop -> stop)."""
+    if not stops:
+        return stops
+    lht = _is_left_hand_traffic(start_lat, start_lon) if left_hand is None else bool(left_hand)
+    prev_lat, prev_lon = float(start_lat), float(start_lon)
+    for stop in stops:
+        road_lat = stop.pop("_roadLat", None)
+        road_lon = stop.pop("_roadLon", None)
+        road_brg = stop.pop("_roadBearing", None)
+        oneway = stop.pop("_oneway", False)
+        if stop.get("stopType") == "kerbside" and road_lat is not None and road_lon is not None:
+            d = dist_m(prev_lat, prev_lon, road_lat, road_lon)
+            if d >= 25.0:
+                travel_brg = bearing_deg(prev_lat, prev_lon, road_lat, road_lon)
+                bld_polys = _building_polys(md, road_lat, road_lon, radius_m=90.0, deadline=deadline) if md is not None else []
+                curb = _apply_curb_offset(
+                    {
+                        "lat": road_lat,
+                        "lon": road_lon,
+                        "bearing": road_brg if road_brg is not None else stop.get("bearing", 0.0),
+                        "roadClass": stop.get("roadClass", ""),
+                        "oneway": oneway,
+                        "stopType": "kerbside",
+                    },
+                    ref_lat=road_lat,
+                    ref_lon=road_lon,
+                    bld_polys=bld_polys,
+                    travel_bearing=travel_brg,
+                    left_hand=lht,
+                )
+                if curb:
+                    stop["lat"] = curb["lat"]
+                    stop["lon"] = curb["lon"]
+                    stop["bearing"] = curb["bearing"]
+        prev_lat, prev_lon = float(stop["lat"]), float(stop["lon"])
+    return stops
 
 
 def _route_estimate_km(lat0, lon0, stops):
@@ -1701,7 +1795,7 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
         pool = candidates[:min(8, len(candidates))]
         for attempt in range(len(pool)):
             pick = pool[(_stable_index(seed, tag, len(pool)) + attempt) % len(pool)]
-            snapped = snap_to_road(md, pick[3], pick[4], radius_m=280.0, deadline=deadline, road_cells=road_cells)
+            snapped = snap_to_road(md, pick[3], pick[4], radius_m=280.0, classes=TAXI_ROAD_CLASSES, deadline=deadline, road_cells=road_cells)
             if snapped and min_m <= dist_m(ref_lat, ref_lon, snapped["lat"], snapped["lon"]) <= max_m * 1.25:
                 bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
                 curb = _apply_curb_offset(snapped, pick[3], pick[4], snapped["lat"], snapped["lon"], bld_polys)
@@ -1709,13 +1803,13 @@ def _pick_taxi_spot(md, anchor_lat, anchor_lon, min_m, max_m, ref_lat, ref_lon, 
                     curb["_sector"] = pick[6]
                 return pick[5], curb
 
-    # Fallback directly onto drivable ground roads inside the target box
-    rc = _road_candidates(md, ref_lat, ref_lon, min_m, max_m, deadline=deadline) if anchor_lat == ref_lat and anchor_lon == ref_lon else []
+    # Fallback directly onto drivable non-highway ground roads inside the target box
+    rc = _road_candidates(md, ref_lat, ref_lon, min_m, max_m, classes=TAXI_ROAD_CLASSES, deadline=deadline) if anchor_lat == ref_lat and anchor_lon == ref_lon else []
     if rc:
         pick = rc[_stable_index(seed, tag + ":rc", len(rc))]
         bld_polys = _building_polys(md, pick["lat"], pick["lon"], radius_m=100.0, deadline=deadline, bld_cells=bld_cells)
         return pick["name"], _apply_curb_offset(pick, ref_lat, ref_lon, pick["lat"], pick["lon"], bld_polys)
-    snapped = snap_to_road(md, anchor_lat, anchor_lon, radius_m=1500.0, deadline=deadline, road_cells=road_cells)
+    snapped = snap_to_road(md, anchor_lat, anchor_lon, radius_m=1500.0, classes=TAXI_ROAD_CLASSES, deadline=deadline, road_cells=road_cells)
     if snapped:
         d = dist_m(ref_lat, ref_lon, snapped["lat"], snapped["lon"])
         if d >= max(150.0, min_m * 0.6):
@@ -1790,10 +1884,10 @@ def _generate_taxi(md, req, deadline):
     spec = TIERS["taxi"][tier]
     min_km, max_km = spec["min_km"], spec["max_km"]
 
-    # 1. Pickup within 250 m - 1100 m (or fallback within 1500 m)
+    # 1. Pickup within 250 m - 1100 m (or fallback within 1500 m, never motorway/trunk)
     pickup = _pick_taxi_spot(md, lat, lon, 250.0, 1100.0, lat, lon, seed, "taxi_pu", deadline, "Street Pickup")
     if not pickup:
-        snapped = snap_to_road(md, lat, lon, radius_m=1500.0, deadline=deadline)
+        snapped = snap_to_road(md, lat, lon, radius_m=1500.0, classes=TAXI_ROAD_CLASSES, deadline=deadline)
         if not snapped:
             return {"ok": False, "error": "No drivable roads found near your location"}
         bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
@@ -2752,18 +2846,27 @@ def _derive_housenumber(street, bld_lat, bld_lon, snap_lat, snap_lon, bearing, s
     return f"{num}{suf}"
 
 
-def _pick_parcel_recipient(is_business, poi_name, seed, key):
-    """Deterministically pick a German household or business recipient name."""
-    if is_business:
+def _pick_parcel_recipient(is_business, poi_name, seed, key, house_addr="", domain="residential"):
+    """Deterministically pick a real business/farm name or household recipient name."""
+    if is_business or domain in ("commercial", "industrial"):
         nm = _clean(poi_name)
-        if nm and len(nm) <= 32:
+        if nm and len(nm) <= 48:
             return nm
+        if house_addr:
+            return f"Gewerbebetrieb · {house_addr}"
         return PARCEL_BUSINESS_RECIPIENTS[_stable_index(seed, f"pbiz:{key}", len(PARCEL_BUSINESS_RECIPIENTS))]
     return PARCEL_HOUSEHOLD_RECIPIENTS[_stable_index(seed, f"phhs:{key}", len(PARCEL_HOUSEHOLD_RECIPIENTS))]
 
 
+def _parcel_place_domain(cat, tax, name):
+    combined = f"{cat} {tax} {name}".lower()
+    if any(kw in combined for kw in _PARCEL_INDUSTRIAL_KEYWORDS):
+        return "industrial"
+    return "commercial"
+
+
 def _collect_parcel_candidates(md, keys, deadline):
-    """Gather residential address points, residential buildings, and small local businesses in keys."""
+    """Gather real residential address points, residential/commercial/industrial/farm buildings, and business POIs."""
     out = []
     seen = set()
     for key in keys:
@@ -2788,11 +2891,11 @@ def _collect_parcel_candidates(md, keys, deadline):
                         "prio": 3 if (hn and st) else 2,
                         "lat": pt[0], "lon": pt[1],
                         "housenumber": hn, "street": st, "locality": loc,
-                        "poiName": "", "isBusiness": False,
+                        "poiName": "", "isBusiness": False, "domain": "residential",
                         "fid": str(f.ids[i]),
                     })
 
-        # 2. Buildings layer (residential + small commercial/office)
+        # 2. Buildings layer (residential + commercial/retail/office/workshop + industrial/farm)
         f = _cell_layer(md, key, "buildings", deadline)
         if f is not None and len(f.ids):
             attrs = getattr(f, "attrs", {}) or {}
@@ -2806,35 +2909,48 @@ def _collect_parcel_candidates(md, keys, deadline):
                     continue
                 cls = str(classes[i] or "").strip().lower()
                 sub = str(subtypes[i] or "").strip().lower()
-                if cls in LOGISTICS_HUB_CLASSES:
-                    continue
+                nm = _clean(names[i])
                 tags = _tags_dict(attrs, i)
+                if not nm:
+                    nm = _clean(tags.get("name") or tags.get("operator") or "")
                 hn, st, loc = _extract_addr_fields(attrs, i, tags)
-                is_res = (sub == "residential") or (cls in RESIDENTIAL_BUILDING_CLASSES) or (cls == "" and sub == "")
-                is_biz = cls in LOGISTICS_COMMERCIAL_CLASSES
-                if not (is_res or is_biz or hn):
+                is_ind = (cls in PARCEL_INDUSTRIAL_BLD_CLASSES) or (sub in ("industrial", "agricultural"))
+                is_com = (cls in PARCEL_COMMERCIAL_BLD_CLASSES) or (sub in ("commercial", "retail", "office"))
+                is_res = (not is_ind and not is_com) and (
+                    (sub == "residential") or (cls in RESIDENTIAL_BUILDING_CLASSES) or (cls == "" and sub == "")
+                )
+                if not (is_res or is_com or is_ind or hn or nm):
                     continue
                 pt = _feature_center(f, i)
                 if not pt:
                     continue
                 seen.add(bid)
-                prio = 3 if hn else (2 if is_res else 1)
+                if is_ind:
+                    is_biz, dom = True, "industrial"
+                elif is_com or (nm and not is_res):
+                    is_biz, dom = True, "commercial"
+                else:
+                    is_biz, dom = False, "residential"
+                prio = 3 if (hn or (is_biz and nm)) else (2 if (is_res or is_biz) else 1)
                 out.append({
                     "prio": prio,
                     "lat": pt[0], "lon": pt[1],
                     "housenumber": hn, "street": st, "locality": loc,
-                    "poiName": _clean(names[i]),
-                    "isBusiness": bool(is_biz and not is_res),
+                    "poiName": nm,
+                    "isBusiness": bool(is_biz),
+                    "domain": dom,
                     "fid": str(f.ids[i]),
                 })
 
-        # 3. Places layer (small clinics/offices/shops as occasional business recipients)
+        # 3. Places layer (commercial, retail, office, workshop, industrial & farm POIs)
         f = _cell_layer(md, key, "places", deadline)
         if f is not None and len(f.ids):
             attrs = getattr(f, "attrs", {}) or {}
             n = len(f.ids)
             names = _col(attrs, "name", n)
             cats = _col(attrs, "basic_category", n)
+            cats2 = _col(attrs, "category", n)
+            taxes = _col(attrs, "taxonomy", n)
             status = _col(attrs, "operating_status", n)
             for i in range(n):
                 pid = ("p", str(f.ids[i]))
@@ -2851,21 +2967,25 @@ def _collect_parcel_candidates(md, keys, deadline):
                     continue
                 tags = _tags_dict(attrs, i)
                 hn, st, loc = _extract_addr_fields(attrs, i, tags)
+                cat_v = str(cats[i] or cats2[i] or "").strip().lower()
+                tax_v = str(taxes[i] or "").strip().lower()
+                dom = _parcel_place_domain(cat_v, tax_v, nm)
                 seen.add(pid)
                 out.append({
-                    "prio": 2 if hn else 0,
+                    "prio": 3 if hn else 2,
                     "lat": pt[0], "lon": pt[1],
                     "housenumber": hn, "street": st, "locality": loc,
                     "poiName": nm,
                     "isBusiness": True,
-                    "cat": str(cats[i] or "").strip().lower(),
+                    "domain": dom,
+                    "cat": cat_v,
                     "fid": str(f.ids[i]),
                 })
     return out
 
 
 def _generate_parcel(md, req, deadline):
-    """Generate a Parcel Courier route with real house addresses, recipients, deliveries and return pickups."""
+    """Generate a Parcel Courier route with real buildings/business POIs (never motorway/trunk or empty rural fields)."""
     lat, lon, heading, seed, tier = req["lat"], req["lon"], req["heading"], req["seed"], req["tier"]
     spec = TIERS["parcel"][tier]
     target_km = spec["target_km"]
@@ -2908,8 +3028,25 @@ def _generate_parcel(md, req, deadline):
     bld_cache = {k: _cell_layer(md, k, "buildings", deadline) for k in keys}
     candidates = _collect_parcel_candidates(md, keys, deadline)
 
-    # Filter & rank candidates within tier reach
-    max_r_m = max(2500.0, target_km * 1350.0)
+    # If the immediate rural stretch has few real buildings/POIs, extend to the next nearby village/town
+    # rather than fabricating synthetic family stops on empty roads ("longer drive, real destination").
+    if len(candidates) < want and time.monotonic() <= deadline:
+        extra_towns = _towns_in_band(lat, lon, 1.5, max(target_km * 1.6, 18.0), heading, seed, f"parcel_ext:{tier}")
+        extra_keys = []
+        for _, tlat, tlon, tname in extra_towns[:3]:
+            for k in _cells_around(tlat, tlon, 1100.0, max_cells=3):
+                if k not in road_cache and k not in extra_keys:
+                    extra_keys.append(k)
+                    town_hints[k] = tname
+        extra_keys = extra_keys[:6]
+        if extra_keys:
+            for k in extra_keys:
+                road_cache[k] = _cell_layer(md, k, "roads", deadline)
+                bld_cache[k] = _cell_layer(md, k, "buildings", deadline)
+            candidates.extend(_collect_parcel_candidates(md, extra_keys, deadline))
+
+    # Filter & rank real building/POI candidates within tier reach
+    max_r_m = max(2500.0, target_km * 1600.0)
     min_r_m = 80.0
     scored_pool = []
     for c in candidates:
@@ -2939,12 +3076,13 @@ def _generate_parcel(md, req, deadline):
         if not rcells:
             rcells = [_cell_layer(md, ck, "roads", deadline) for ck in ckeys]
         bcells = [bld_cache[ck] for ck in ckeys if ck in bld_cache and bld_cache[ck] is not None]
-        snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=180.0, classes=PARCEL_ROAD_CLASSES,
-                               deadline=deadline, road_cells=rcells)
+        # Strict: building/POI must be within 45 m of a non-motorway/non-trunk drivable road
+        snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=PARCEL_MAX_SNAP_DIST_M,
+                               classes=PARCEL_ROAD_CLASSES, deadline=deadline, road_cells=rcells)
         if not snapped:
-            snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=240.0, classes=DRIVABLE_CLASSES,
-                                   deadline=deadline, road_cells=rcells)
-        if not snapped:
+            snapped = snap_to_road(md, cand["lat"], cand["lon"], radius_m=PARCEL_MAX_SNAP_DIST_M,
+                                   classes=PARCEL_FALLBACK_ROAD_CLASSES, deadline=deadline, road_cells=rcells)
+        if not snapped or float(snapped.get("snapDistM", 999.0)) > PARCEL_MAX_SNAP_DIST_M:
             continue
         bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline, bld_cells=bcells)
         curb = _apply_curb_offset(snapped, cand["lat"], cand["lon"], snapped["lat"], snapped["lon"], bld_polys)
@@ -2959,52 +3097,23 @@ def _generate_parcel(md, req, deadline):
         used_addrs.add(addr_key)
         stop_idx = len(picked) + 1
         house_addr = f"{street} {hn}".strip()
-        recipient = _pick_parcel_recipient(cand["isBusiness"], cand["poiName"], seed, f"{stop_idx}:{cand['fid']}")
+        dom = cand.get("domain") or ("commercial" if cand["isBusiness"] else "residential")
+        recipient = _pick_parcel_recipient(cand["isBusiness"], cand["poiName"], seed, f"{stop_idx}:{cand['fid']}", house_addr=house_addr, domain=dom)
         ck_home = mapcells.cell_of(curb["lat"], curb["lon"])
         loc_hint = cand["locality"] or town_hints.get(ck_home, "")
-        sec = "Business / Practice" if cand["isBusiness"] else "Residential"
+        sec = "Industrial / Farm" if dom == "industrial" else ("Commercial / Business" if dom == "commercial" else "Residential")
         stop = _make_stop(
             stop_idx, "delivery", house_addr, curb,
             address=f"{recipient} · {house_addr}", zone_radius=11.0,
             stop_type="kerbside", dwell_target_s=2.5,
-            locality=loc_hint, sector_label=sec,
+            locality=loc_hint, sector_label=sec, domain=dom,
         )
         stop["recipient"] = recipient
         picked.append(stop)
         cur_lat, cur_lon = curb["lat"], curb["lon"]
 
-    # Road-chain fallback if building density is sparse
-    if len(picked) < min_stops:
-        step_m = max(140.0, (target_km * 1000.0) / max(1, want))
-        for k in range(len(picked) + 1, want + 8):
-            if time.monotonic() > deadline or len(picked) >= want:
-                break
-            alat, alon = offset_latlon(cur_lat, cur_lon, step_m, (base_brg + ((k % 5) - 2) * 22.0) % 360.0)
-            snapped = snap_to_road(md, alat, alon, radius_m=420.0, classes=DRIVABLE_CLASSES, deadline=deadline)
-            if snapped and all(dist_m(snapped["lat"], snapped["lon"], prev["lat"], prev["lon"]) >= min_gap for prev in picked):
-                bld_polys = _building_polys(md, snapped["lat"], snapped["lon"], radius_m=100.0, deadline=deadline)
-                curb = _apply_curb_offset(snapped, None, None, snapped["lat"], snapped["lon"], bld_polys)
-                street = curb.get("road") or "Ringstraße"
-                stop_idx = len(picked) + 1
-                hn = _derive_housenumber(street, None, None, curb["lat"], curb["lon"], curb.get("bearing", 0.0), seed, f"fb:{k}")
-                addr_key = (street.lower(), hn.lower())
-                if addr_key in used_addrs:
-                    hn = f"{int(''.join(ch for ch in hn if ch.isdigit()) or 2) + 2 * stop_idx}"
-                    addr_key = (street.lower(), hn.lower())
-                used_addrs.add(addr_key)
-                house_addr = f"{street} {hn}".strip()
-                recipient = _pick_parcel_recipient(False, "", seed, f"fb:{stop_idx}")
-                stop = _make_stop(
-                    stop_idx, "delivery", house_addr, curb,
-                    address=f"{recipient} · {house_addr}", zone_radius=11.0,
-                    stop_type="kerbside", dwell_target_s=2.5, sector_label="Residential",
-                )
-                stop["recipient"] = recipient
-                picked.append(stop)
-                cur_lat, cur_lon = curb["lat"], curb["lon"]
-
     if len(picked) < 2:
-        return {"ok": False, "error": "No drivable residential streets found nearby for a parcel route"}
+        return {"ok": False, "error": "No real buildings or businesses found within 45 m of drivable roads"}
 
     # Assign parcelCount (1-3), parcelAction ('deliver' | occasional 'pickup_return'), and cargoDeltaKg
     n = len(picked)
@@ -3364,6 +3473,7 @@ def generate_job(md, net=None, *, mode, tier, lat, lon, heading=None, seed=0, ve
             res = _apply_logistics_cargo_and_dwell(res, req)
         if res.get("ok") and res.get("stops"):
             res = _maybe_insert_rest_stop(md, res, req, deadline)
+            _align_route_curbs(md, res["stops"], req["lat"], req["lon"], deadline)
             _enrich_stops_locality(md, res["stops"], deadline)
     except Exception as e:
         log.warning("transport job %s/%s failed: %s: %s", req["mode"], req["tier"], type(e).__name__, e)

@@ -93,7 +93,7 @@ def _seed_corridor_md(base_lat=39.285, base_lon=-76.610):
         la2, lo2 = tm.offset_latlon(la, lo, 250.0, 90.0)
         k = mapcells.cell_of(la, lo)
         road_buckets.setdefault(k, []).append(
-            _make_road(f"r_{km}", la - 0.001, lo - 0.001, la2, lo2, cls="secondary", name=f"Corridor Rd {km}")
+            _make_road(f"r_{km}", la, lo - 0.001, la2, lo2, cls="secondary", name=f"Corridor Rd {km}")
         )
         place_buckets.setdefault(k, []).append(
             _make_place(f"p_{km}", la + 0.0002, lo + 0.0002, f"Market Square {km}", cat="supermarket" if km % 2 else "hotel")
@@ -636,7 +636,7 @@ class Phase6ParcelCourierTest(unittest.TestCase):
             k = mapcells.cell_of(la, lo)
             st_name = streets[i % len(streets)]
             road_buckets.setdefault(k, []).append(
-                _make_road(f"pr_{i}", la - 0.0004, lo - 0.0004, la2, lo2, cls="residential", name=st_name)
+                _make_road(f"pr_{i}", la, lo - 0.0004, la2, lo2, cls="residential", name=st_name)
             )
             if i < 4:
                 # Explicit real address points with housenumber + street + locality
@@ -734,6 +734,124 @@ class Phase6ParcelCourierTest(unittest.TestCase):
                 saw_return = True
                 break
         self.assertTrue(saw_return, "expected at least one pickup_return stop across seeds")
+
+    def test_no_motorway_or_trunk_stops_for_parcel_and_taxi(self):
+        base_lat, base_lon = 48.10, 11.55
+        md = FakeMapData()
+        k = mapcells.cell_of(base_lat, base_lon)
+        # Only motorway, motorway_link, trunk, trunk_link roads near buildings/POIs -> must NOT snap/generate stops
+        roads = [
+            _make_road("r_mw", base_lat, base_lon - 0.01, base_lat, base_lon + 0.01, cls="motorway", name="A95"),
+            _make_road("r_mwl", base_lat + 0.001, base_lon - 0.01, base_lat + 0.001, base_lon + 0.01, cls="motorway_link", name="A95 Exit"),
+            _make_road("r_tr", base_lat + 0.002, base_lon - 0.01, base_lat + 0.002, base_lon + 0.01, cls="trunk", name="B2"),
+            _make_road("r_trl", base_lat + 0.003, base_lon - 0.01, base_lat + 0.003, base_lon + 0.01, cls="trunk_link", name="B2 Ramp"),
+        ]
+        blds = [
+            _make_building(f"b_{i}", base_lat + i * 0.001, base_lon + 0.002, f"House {i}", cls="house")
+            for i in range(4)
+        ]
+        places = [
+            _make_place(f"p_{i}", base_lat + i * 0.001, base_lon + 0.003, f"Shop {i}", cat="shop")
+            for i in range(4)
+        ]
+        md.put(k, "roads", FakeFeatures(roads))
+        md.put(k, "buildings", FakeFeatures(blds))
+        md.put(k, "places", FakeFeatures(places))
+
+        res_p = tm.generate_job(md, mode="parcel", tier="local", lat=base_lat, lon=base_lon, heading=90.0, seed=1)
+        self.assertFalse(res_p["ok"], "parcel must reject motorway/trunk-only roads")
+        res_t = tm.generate_job(md, mode="taxi", tier="short", lat=base_lat, lon=base_lon, heading=90.0, seed=1)
+        self.assertFalse(res_t["ok"], "taxi must reject motorway/trunk-only roads")
+
+    def test_no_synthetic_empty_field_rural_parcel_stops(self):
+        # Empty rural road with zero buildings/POIs within 45 m (and one barn 85 m off the road) -> zero fake Fam. stops
+        base_lat, base_lon = 47.80, 11.20
+        md = FakeMapData()
+        k = mapcells.cell_of(base_lat, base_lon)
+        md.put(k, "roads", FakeFeatures([
+            _make_road("r_rural", base_lat, base_lon - 0.01, base_lat, base_lon + 0.02, cls="unclassified", name="Landstraße"),
+        ]))
+        far_lat, far_lon = tm.offset_latlon(base_lat, base_lon + 0.004, 85.0, 0.0)
+        md.put(k, "buildings", FakeFeatures([
+            _make_building("b_far", far_lat, far_lon, "", cls="house"),
+        ]))
+        res = tm.generate_job(md, mode="parcel", tier="local", lat=base_lat, lon=base_lon, heading=90.0, seed=7)
+        self.assertFalse(res["ok"], f"empty rural road must not synthesize fake family stops: {res}")
+
+    def test_commercial_and_farm_business_recipients_and_domains(self):
+        base_lat, base_lon = 47.75, 11.40
+        md = FakeMapData()
+        road_buckets, place_buckets, bld_buckets = {}, {}, {}
+        entries = [
+            ("Autohaus Huber", "car_dealer", "place", None),
+            ("Landmaschinen Meier", "agricultural_service", "place", None),
+            ("Bäckerei Schmid", "bakery", "place", None),
+            ("", "commercial", "building", "Gewerbestraße"),
+        ]
+        for idx, (nm, cat_or_cls, kind, st_name) in enumerate(entries):
+            la, lo = tm.offset_latlon(base_lat, base_lon, 150.0 + idx * 180.0, 0.0)
+            k = mapcells.cell_of(la, lo)
+            road_buckets.setdefault(k, []).append(
+                _make_road(f"cr_{idx}", la - 0.0005, lo, la + 0.0005, lo, cls="secondary", name=st_name or f"Hauptstraße {idx + 1}")
+            )
+            pla, plo = tm.offset_latlon(la, lo, 14.0, 90.0)
+            if kind == "place":
+                place_buckets.setdefault(k, []).append(_make_place(f"cp_{idx}", pla, plo, nm, cat=cat_or_cls))
+            else:
+                bld_buckets.setdefault(k, []).append(_make_building(f"cb_{idx}", pla, plo, nm, cls=cat_or_cls))
+        for k, v in road_buckets.items():
+            md.put(k, "roads", FakeFeatures(v))
+        for k, v in place_buckets.items():
+            md.put(k, "places", FakeFeatures(v))
+        for k, v in bld_buckets.items():
+            md.put(k, "buildings", FakeFeatures(v))
+
+        res = tm.generate_job(md, mode="parcel", tier="local", lat=base_lat, lon=base_lon, heading=0.0, seed=3)
+        self.assertTrue(res["ok"], res.get("error"))
+        recipients = {s["recipient"] for s in res["stops"]}
+        self.assertIn("Autohaus Huber", recipients)
+        self.assertIn("Landmaschinen Meier", recipients)
+        self.assertIn("Bäckerei Schmid", recipients)
+        self.assertTrue(any(r.startswith("Gewerbebetrieb · ") for r in recipients), f"expected unnamed commercial building fallback in {recipients}")
+        for s in res["stops"]:
+            self.assertIn(s.get("domain"), ("commercial", "industrial"), f"expected business domain on {s}")
+            self.assertFalse(s["recipient"].startswith("Fam. "), f"business stop must not get family name: {s}")
+
+    def test_travel_direction_curb_alignment_rht_and_lht(self):
+        # Straight north-south road along lon = base_lon; test southbound RHT (curb West) and northbound LHT (curb West)
+        # 1. RHT (Germany): travel south from base_lat + 0.004 -> base_lat -> bearing ~180 deg, right-hand curb is West (< base_lon)
+        rht_lat, rht_lon = 48.14, 11.58
+        md_rht = FakeMapData()
+        k1 = mapcells.cell_of(rht_lat, rht_lon)
+        md_rht.put(k1, "roads", FakeFeatures([
+            _make_road("r_ns", rht_lat - 0.005, rht_lon, rht_lat + 0.005, rht_lon, cls="secondary", name="Nord-Süd-Allee"),
+        ]))
+        s_rht = [
+            tm._make_stop(1, "delivery", "Stop 1", {
+                "lat": rht_lat, "lon": rht_lon, "bearing": 0.0, "roadClass": "secondary", "stopType": "kerbside",
+                "_roadLat": rht_lat, "_roadLon": rht_lon, "_roadBearing": 0.0, "_oneway": False,
+            }),
+        ]
+        tm._align_route_curbs(md_rht, s_rht, rht_lat + 0.004, rht_lon, 1e12)
+        self.assertAlmostEqual(s_rht[0]["bearing"], 180.0, delta=2.0)
+        self.assertLess(s_rht[0]["lon"], rht_lon, "southbound RHT stop must sit on west (driver's right) curb")
+
+        # 2. LHT (UK London): travel north from lht_lat - 0.004 -> lht_lat -> bearing ~0 deg, left-hand curb is West (< lht_lon)
+        lht_lat, lht_lon = 51.50, -0.10
+        md_lht = FakeMapData()
+        k2 = mapcells.cell_of(lht_lat, lht_lon)
+        md_lht.put(k2, "roads", FakeFeatures([
+            _make_road("r_uk", lht_lat - 0.005, lht_lon, lht_lat + 0.005, lht_lon, cls="secondary", name="High St"),
+        ]))
+        s_lht = [
+            tm._make_stop(1, "delivery", "Stop UK", {
+                "lat": lht_lat, "lon": lht_lon, "bearing": 180.0, "roadClass": "secondary", "stopType": "kerbside",
+                "_roadLat": lht_lat, "_roadLon": lht_lon, "_roadBearing": 180.0, "_oneway": False,
+            }),
+        ]
+        tm._align_route_curbs(md_lht, s_lht, lht_lat - 0.004, lht_lon, 1e12)
+        self.assertAlmostEqual(s_lht[0]["bearing"], 0.0, delta=2.0)
+        self.assertLess(s_lht[0]["lon"], lht_lon, "northbound LHT (UK) stop must sit on west (driver's left) curb")
 
 
 class CachingAndPerformanceTest(unittest.TestCase):
