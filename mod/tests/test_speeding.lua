@@ -76,6 +76,18 @@ do
   veh.role.actionName = 'none'
   S.update(1.0, { rules = { country = 'DE' } })
   T.check(#sent == 0, 'bus dwelling at stop: speeding.lua does not override smooth-stop command')
+
+  -- AI courier dwelling at a curbside delivery point is bypassed by speeding.lua (no speed command sent)
+  sent = {}
+  package.loaded['beamngEarth/navgraph'] = {
+    isBusDwelling = function() return false end,
+    isCourierDwelling = function(id) return id == 5 end,
+    getVehiclePersona = function() return { persona = 'courier', highwayCruiseMs = 100 / 3.6 } end,
+    speedProfileAt = function() return { target = 13.89, rough = false } end,
+  }
+  veh.role.actionName = 'none'
+  S.update(1.0, { rules = { country = 'DE' } })
+  T.check(#sent == 0, 'courier dwelling at curbside delivery stop: speeding.lua does not override stop command')
   package.loaded['beamngEarth/navgraph'] = nil
   S.reset()
 end

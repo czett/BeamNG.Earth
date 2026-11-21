@@ -614,7 +614,7 @@ do
   for _, e in ipairs(rEuMod) do
     if e.archetype == 'courier' then euCouriers[#euCouriers + 1] = e end
   end
-  T.check(#euCouriers == 3, 'Tier 1 (EU mods): fills courier quota from mod delivery pool')
+  T.check(#euCouriers == 2, 'Tier 1 (EU mods): fills courier quota (max 2 at size >= 14) from mod delivery pool')
   local euAllModPreserved = true
   local euSawScoutOrEvvan = false
   for _, e in ipairs(euCouriers) do
@@ -654,7 +654,7 @@ do
   for _, e in ipairs(rVanilla) do
     if e.archetype == 'courier' then vCouriers[#vCouriers + 1] = e end
   end
-  T.check(#vCouriers == 3, 'Tier 2 (vanilla-only): populates courier quota from vanilla delivery liveries')
+  T.check(#vCouriers == 2, 'Tier 2 (vanilla-only): populates courier quota (max 2 at size >= 14) from vanilla delivery liveries')
   local allVanillaLiveryPreserved = true
   for _, e in ipairs(vCouriers) do
     if e.deliveryTier ~= 2 or e.hasDeliveryLivery ~= true or e.paint ~= nil or e.liveryTag ~= 'vanilla_delivery' then
@@ -680,7 +680,7 @@ do
   for _, e in ipairs(rPlainEu) do
     if e.archetype == 'courier' then plainCouriers[#plainCouriers + 1] = e end
   end
-  T.check(#plainCouriers == 3, 'Tier 3 (plain fallback): fills courier quota from plain vans')
+  T.check(#plainCouriers == 2, 'Tier 3 (plain fallback): fills courier quota (max 2 at size >= 14) from plain vans')
   local allPlainPainted = true
   for _, e in ipairs(plainCouriers) do
     if e.deliveryTier ~= 3 or e.hasDeliveryLivery ~= false or type(e.paint) ~= 'table' or e.paintName == nil then
@@ -936,6 +936,221 @@ do
   os.clock = clock0
   core_environment, beamngEarth_weather = env0, weather0
   for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 7. Natural Traffic Proportions, Simple-Traffic Roster Inclusion & AI Courier Curbside Delivery Stops
+do
+  -- Build a realistic large vehicle pool with ~40 everyday commuters + buses, mod couriers, trucks, speeders, police
+  local bigPool = {
+    { model = 'citybus', config = 'city', name = 'City Transit Bus' },
+    { model = 'wentward', config = 'metro_shuttle', name = 'Metro Shuttle' },
+    { model = 'scout', config = 'scout_hhl', name = 'Gavril Scout HHL' },
+    { model = 'evvan', config = 'ecv_nile', name = 'Bruckell ECV Nile' },
+    { model = 'van', config = 'h25_delivery', name = 'H25 Delivery' },
+    { model = 'semi', config = 't75_hauler', name = 'T75 Hauler' },
+    { model = 'md_series', config = 'md70_flatbed', name = 'MD70 Flatbed' },
+    { model = 'etk800', config = '856_ttsport', name = 'ETK 856 ttSport' },
+    { model = 'etkc', config = 'kc6t_sport', name = 'ETK K Sport' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+  }
+  for i = 1, 36 do
+    bigPool[#bigPool + 1] = { model = 'vivace', config = 'commuter_' .. tostring(i), name = 'Vivace ' .. tostring(i) }
+  end
+
+  -- Standard 8-vehicle and 10-vehicle urban pools: 1 bus, 1 courier, >= 75% commuters, strict Police == 0
+  local r8 = N.buildTrafficRoster('DE', bigPool, false, { size = 8, urban = true })
+  T.check(r8.counts.bus == 1 and r8.counts.courier == 1 and r8.counts.police == 0
+    and r8.counts.commuter == 6,
+    'natural mix (size 8): 1 bus, 1 courier, 6 commuters (75%), 0 police')
+
+  local r10 = N.buildTrafficRoster('DE', bigPool, false, { size = 10, urban = true })
+  T.check(r10.counts.bus == 1 and r10.counts.courier == 1 and r10.counts.police == 0
+    and r10.counts.commuter == 8,
+    'natural mix (size 10): 1 bus, 1 courier, 8 commuters (80%), 0 police')
+
+  -- Larger 14-vehicle and 40-vehicle pools: still 1 bus, at most 2 couriers, ~75-85% commuters
+  local r14 = N.buildTrafficRoster('DE', bigPool, false, { size = 14, urban = true })
+  T.check(r14.counts.bus == 1 and r14.counts.courier == 2 and r14.counts.police == 0,
+    'natural mix (size 14): 1 bus and at most 2 couriers when size >= 14')
+
+  local r40 = N.buildTrafficRoster('DE', bigPool, false, { size = 40, urban = true })
+  T.check(r40.counts.bus == 1 and r40.counts.courier == 2 and r40.counts.police == 0
+    and r40.counts.commuter >= 30 and r40.counts.commuter <= 35,
+    'natural mix (size 40): 1 bus, 2 couriers, ~75-85% commuters, 0 police')
+
+  -- Rural >= 10 pool still gets 1 bus; small rural < 10 gets 0 buses
+  local rRural8 = N.buildTrafficRoster('DE', bigPool, false, { size = 8, urban = false })
+  local rRural10 = N.buildTrafficRoster('DE', bigPool, false, { size = 10, urban = false })
+  T.check(rRural8.counts.bus == 0 and rRural10.counts.bus == 1,
+    'natural mix (rural): 0 buses on <10 rural pool, 1 bus on >=10 pool')
+
+  -- Simple-traffic bypass prevention: regionalGroup() runs buildTrafficRoster even when trafficSimpleVehicles == true
+  -- and falls back to simple createGroup only if core_vehicles.getConfigList() returns empty.
+  N.reset()
+  local sg = {
+    settings = rawget(_G, 'settings'),
+    core_multiSpawn = rawget(_G, 'core_multiSpawn'),
+    core_vehicles = rawget(_G, 'core_vehicles'),
+    readFile = rawget(_G, 'readFile'),
+    jsonDecode = rawget(_G, 'jsonDecode'),
+    log = rawget(_G, 'log'),
+  }
+  log = function() end
+  readFile = function() return '{}' end
+  jsonDecode = function()
+    return { nodes = { a = { 0, 0, 0, 4 } }, edges = {}, rules = { country = 'DE' }, trafficProfile = { band = 'urban' } }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  local cfgMap = {
+    trafficSmartSelections = true,
+    trafficSimpleVehicles = true,
+    trafficAllowMods = true,
+  }
+  settings = { getValue = function(k) return cfgMap[k] end }
+  local simpleGroup = {}
+  for i = 1, 20 do
+    simpleGroup[i] = { model = 'simple_traffic', config = 'eu_sedan_' .. tostring(i), name = 'Simple EU ' .. tostring(i) }
+  end
+  core_multiSpawn = { createGroup = function() return simpleGroup end }
+  core_vehicles = {
+    getConfigList = function()
+      return {
+        { model_key = 'citybus', key = 'city', Name = 'City Transit Bus' },
+        { model_key = 'scout', key = 'scout_hhl', Name = 'Gavril Scout HHL' },
+        { model_key = 'evvan', key = 'ecv_nile', Name = 'Bruckell ECV Nile' },
+        { model_key = 'etk800', key = 'polizei', Name = 'ETK 800 Polizei' },
+      }
+    end,
+  }
+  local gSimpleRoster = N._regionalGroup()
+  local sawBus, sawModCourier, sawPol = false, false, false
+  for _, e in ipairs(gSimpleRoster or {}) do
+    if e.archetype == 'bus' then sawBus = true end
+    if e.archetype == 'courier' and (e.model == 'scout' or e.model == 'evvan') then sawModCourier = true end
+    if e.archetype == 'police' or tostring(e.config):find('poliz') then sawPol = true end
+  end
+  T.check(sawBus and sawModCourier and not sawPol,
+    'regionalGroup: buildTrafficRoster active with trafficSimpleVehicles=true (includes bus + mod courier, 0 police)')
+
+  -- Fallback when core_vehicles.getConfigList() returns empty under trafficSimpleVehicles == true
+  core_vehicles = { getConfigList = function() return {} end }
+  local gFallback = N._regionalGroup()
+  T.check(gFallback == simpleGroup,
+    'regionalGroup: falls back to simple traffic group when core_vehicles.getConfigList() is empty')
+
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+
+  -- roads.extractDeliveryPoints: building footprints, addresses, well-spaced deduplication, 20-point cap
+  local R = require('beamngEarth/roads')
+  local denseBld = {}
+  for i = 1, 30 do
+    -- Space 40 m apart so each is eligible, verify cap at 20
+    local bx = i * 40
+    denseBld[i] = { bx - 5, 10, 0, bx + 5, 20, 8 }
+  end
+  -- Add a clustered duplicate right next to building 1 (within 35 m -> must be skipped)
+  denseBld[31] = { 38, 12, 0, 44, 18, 8 }
+  local pts = R.extractDeliveryPoints('tile_deliv', { colliders = { bld = denseBld } }, nil)
+  T.check(#pts == 20, 'extractDeliveryPoints: caps at 20 well-spaced building points per tile')
+  local allSpaced = true
+  for i = 1, #pts do
+    for j = i + 1, #pts do
+      local dx, dy = pts[i].x - pts[j].x, pts[i].y - pts[j].y
+      if dx * dx + dy * dy < 35.0 * 35.0 - 1e-6 then allSpaced = false end
+    end
+  end
+  T.check(allSpaced, 'extractDeliveryPoints: enforces >= 35 m spacing between delivery points')
+
+  -- AI Courier curbside delivery stop lifecycle: pull-over, hazard lights, 4-6 s dwell, release & 45 s cooldown
+  N.reset()
+  local dCount = N.onDeliveryPoints('tile_deliv', { { id = 'drop_1', x = 100, y = 4, z = 0, yaw = 0 } })
+  T.check(dCount == 1 and N.status().deliveryPointsLoaded == 1, 'onDeliveryPoints registers tile drop points')
+  local cCmds = {}
+  local cObj = { queueLuaCommand = function(_, c) cCmds[#cCmds + 1] = c end }
+
+  -- Too fast (>= 15 m/s): must not trigger stop
+  local stFast = N.stepCourierStop(60, 90, 0, 1, 0, 15.0, 100, cObj)
+  T.check(stFast == 'none' and not N.isCourierDwelling(60) and #cCmds == 0,
+    'courier stop: ignored at >= 15 m/s')
+
+  -- Out of range (> 16 m): must not trigger stop
+  local stFar = N.stepCourierStop(60, 80, 0, 1, 0, 8.0, 100, cObj)
+  T.check(stFar == 'none' and not N.isCourierDwelling(60) and #cCmds == 0,
+    'courier stop: ignored when > 16 m away')
+
+  -- Approaching within <= 16 m at 8 m/s: triggers right-curb pull-over (0.85 m) + hazards + 0 m/s dwell
+  local stStop = N.stepCourierStop(60, 90, 0, 1, 0, 8.0, 100, cObj)
+  T.check(stStop == 'stopped' and N.isCourierDwelling(60),
+    'courier stop: triggers dwell within <= 16 m at < 15 m/s')
+  T.check(#cCmds == 1
+    and cCmds[1]:find('electrics.set_warn_signal(1)', 1, true)
+    and cCmds[1]:find('ai.setSpeed(0)', 1, true)
+    and cCmds[1]:find('ai.driveInLane("off")', 1, true)
+    and cCmds[1]:find('ai.laneChange(nil, 10.0, 0.85)', 1, true),
+    'courier stop: activates hazards, 0.85 m right curb pull-over, and holds at 0 m/s')
+
+  -- Still dwelling at +3.5 s (< 4.0 s minimum dwell)
+  local stHold = N.stepCourierStop(60, 95, 0, 1, 0, 0.0, 103.5, cObj)
+  T.check(stHold == 'dwelling' and N.isCourierDwelling(60) and #cCmds == 1,
+    'courier stop: holds dwell during 4.0-6.0 s package delivery window')
+
+  -- Released after 6.1 s (> 6.0 s maximum dwell)
+  local stRel = N.stepCourierStop(60, 95, 0, 1, 0, 0.0, 106.1, cObj)
+  T.check(stRel == 'released' and not N.isCourierDwelling(60),
+    'courier stop: releases smoothly after dwell completes')
+  T.check(#cCmds == 2
+    and cCmds[2]:find('electrics.set_warn_signal(0)', 1, true)
+    and cCmds[2]:find('ai.setMode("traffic")', 1, true)
+    and cCmds[2]:find('ai.driveInLane("on")', 1, true)
+    and cCmds[2]:find('ai.laneChange(nil, 12.0, -0.85)', 1, true),
+    'courier stop: clears hazards, resets curb offset, and resumes traffic')
+
+  -- 45 s per-point cooldown blocks re-trigger at +30 s, allows again after +45 s (106.1 + 45 = 151.1)
+  local stCd = N.stepCourierStop(61, 90, 0, 1, 0, 6.0, 136.0, cObj)
+  T.check(stCd == 'none' and not N.isCourierDwelling(61),
+    'courier stop: 45 s per-point cooldown blocks immediate re-trigger')
+  local stAfter = N.stepCourierStop(61, 90, 0, 1, 0, 6.0, 152.0, cObj)
+  T.check(stAfter == 'stopped' and N.isCourierDwelling(61),
+    'courier stop: triggers again after 45 s cooldown expires')
+
+  -- Dwelling courier is excluded from behind-player horizon recycling in updateTrafficDirector
+  N.enabled = true
+  local sg2 = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+                be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
+  local clock0 = os.clock
+  os.clock = function() return 153.0 end
+  local function v(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  local recycles = {}
+  local dwellingCourierObj = {
+    getActive = function() return true end,
+    getPosition = function() return v(-500, 0, 0) end,
+    getVelocity = function() return v(0, 0, 0) end,
+    getDirectionVector = function() return v(1, 0, 0) end,
+    queueLuaCommand = function() end,
+  }
+  getObjectByID = function(id) return id == 61 and dwellingCourierObj or nil end
+  be = { getPlayerVehicleID = function() return 1 end }
+  core_camera = { getPosition = function() return v(0, 0, 0) end }
+  map = nil
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      return { [61] = { isAi = true, model = 'scout', config = 'scout_hhl', respawnCount = 0 } }
+    end,
+    forceTeleport = function(id) recycles[#recycles + 1] = id end,
+  }
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 25, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(#recycles == 0 and N.isCourierDwelling(61),
+    'director: excludes dwelling courier from behind-player recycling while stopped')
+
+  os.clock = clock0
+  for k, val in pairs(sg2) do _G[k] = val end
+  N.dropDeliveryPoints('tile_deliv')
+  T.check(N.status().deliveryPointsLoaded == 0, 'dropDeliveryPoints clears tile drop points')
   N.reset()
 end
 

@@ -1049,6 +1049,14 @@ M.BUS_STOP_DWELL_MAX_S = 4.5
 M.BUS_STOP_LATERAL_MAX_M = 12.0
 M.BUS_STOP_CURB_OFFSET_M = 0.85
 
+M.COURIER_STOP_RANGE_M = 16.0
+M.COURIER_STOP_MAX_SPEED_MS = 15.0
+M.COURIER_STOP_COOLDOWN_S = 45.0
+M.COURIER_STOP_DWELL_MIN_S = 4.0
+M.COURIER_STOP_DWELL_MAX_S = 6.0
+M.COURIER_STOP_LATERAL_MAX_M = 16.0
+M.COURIER_STOP_CURB_OFFSET_M = 0.85
+
 M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
 M.MOD_COURIER_MODELS = { scout = true, evvan = true, ecv = true }
 M.COURIER_MODELS = {
@@ -1090,6 +1098,10 @@ local director = {
   busStopCount = 0,
   busDwell = {},
   busStopCooldowns = {},
+  deliveryPoints = {},
+  deliveryPointCount = 0,
+  courierDwell = {},
+  deliveryCooldowns = {},
   recentSpawns = {
     { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
     { x = 0, y = 0, at = -1e9 }, { x = 0, y = 0, at = -1e9 },
@@ -1359,13 +1371,15 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
     end
   end
 
-  -- Quotas: urban favors 1-2 city buses and 2-4 couriers; rural/highway favors more trucks
-  local busQuota = urban and (targetSize >= 12 and 2 or 1) or 0
-  local courierQuota = math.max(1, math.min(4, math.floor(targetSize * 0.18 + 0.5)))
-  local truckQuota = urban and math.max(1, math.min(3, math.floor(targetSize * 0.12 + 0.5)))
-    or math.max(2, math.min(5, math.floor(targetSize * 0.25 + 0.5)))
-  local speederQuota = targetSize >= 8 and 2 or 1
-  local policeQuota = allowPolice and (targetSize >= 16 and 2 or 1) or 0
+  -- Natural traffic proportions: everyday commuter cars make up ~75-85% of the pool.
+  -- City Bus: 1 in urban/town pools (and 1 on larger >= 10-car pools), never flooding with multiple buses.
+  -- Courier: 1 per standard 6-10 vehicle pool; at most 2 only if pool size >= 14.
+  local busQuota = (urban or targetSize >= 10) and 1 or 0
+  local courierQuota = targetSize >= 14 and 2 or 1
+  local truckQuota = urban and (targetSize >= 24 and 2 or (targetSize >= 12 and 1 or 0))
+    or (targetSize >= 14 and 2 or (targetSize >= 8 and 1 or 0))
+  local speederQuota = targetSize >= 24 and 2 or (targetSize >= 12 and 1 or 0)
+  local policeQuota = allowPolice and (targetSize >= 24 and 2 or 1) or 0
 
   local courierPal = M.COURIER_PAINTS[reg] or M.COURIER_PAINTS.europe
   local plainCourierPaintIdx = 0
@@ -1399,6 +1413,36 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
   -- Fill remaining slots with everyday commuters
   local rem = targetSize - #roster
   if rem > 0 then take('commuter', rem) end
+
+  -- Interleave commuters first with evenly spaced specialty vehicles so any spawned prefix
+  -- (e.g. 6-10 active traffic vehicles) preserves the natural commuter-majority mix.
+  local specials, commuters = {}, {}
+  for i = 1, #roster do
+    local e = roster[i]
+    if e.archetype == 'commuter' then
+      commuters[#commuters + 1] = e
+    else
+      specials[#specials + 1] = e
+    end
+  end
+  if #commuters > 0 and #specials > 0 then
+    local ordered = {}
+    local ci, si = 1, 1
+    local stride = math.max(2, math.floor(#commuters / (#specials + 1)))
+    while ci <= #commuters or si <= #specials do
+      for _ = 1, stride do
+        if ci <= #commuters then
+          ordered[#ordered + 1] = commuters[ci]
+          ci = ci + 1
+        end
+      end
+      if si <= #specials then
+        ordered[#ordered + 1] = specials[si]
+        si = si + 1
+      end
+    end
+    roster = ordered
+  end
 
   roster.counts = counts
   roster.region = reg
@@ -1655,6 +1699,118 @@ function M.stepBusStop(vehId, px, py, dx, dy, speed, now, obj)
   return 'stopped', bestStop
 end
 
+-- Roadside building/delivery drop point ingestion & AI courier curbside dwell state machine (roads.lua -> navgraph.onDeliveryPoints).
+local function recountDeliveryPoints()
+  local n = 0
+  for _, list in pairs(director.deliveryPoints) do n = n + #list end
+  director.deliveryPointCount = n
+end
+
+function M.onDeliveryPoints(key, pts)
+  if key == nil then return 0 end
+  if type(pts) ~= 'table' or #pts == 0 then
+    director.deliveryPoints[key] = nil
+    recountDeliveryPoints()
+    return 0
+  end
+  local clean = {}
+  for i, s in ipairs(pts) do
+    if type(s) == 'table' then
+      local x, y = tonumber(s.x or s[1]), tonumber(s.y or s[2])
+      if x and y then
+        clean[#clean + 1] = {
+          id = s.id or (tostring(key) .. ':d' .. tostring(i)),
+          x = x, y = y, z = tonumber(s.z or s[3]) or 0,
+          yaw = tonumber(s.yaw or s[4]) or 0,
+        }
+      end
+    end
+  end
+  director.deliveryPoints[key] = #clean > 0 and clean or nil
+  recountDeliveryPoints()
+  return #clean
+end
+
+function M.dropDeliveryPoints(key)
+  if key ~= nil and director.deliveryPoints[key] then
+    director.deliveryPoints[key] = nil
+    recountDeliveryPoints()
+  end
+end
+
+function M.deliveryPoints()
+  return director.deliveryPoints
+end
+
+function M.isCourierDwelling(vehId)
+  return director.courierDwell[vehId] ~= nil
+end
+
+-- Step the AI courier curbside delivery stop state machine for one courier vehicle (zero table allocations on idle ticks).
+function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj)
+  local dwell = director.courierDwell[vehId]
+  if dwell then
+    if now >= dwell.releaseAt then
+      director.courierDwell[vehId] = nil
+      director.deliveryCooldowns[dwell.pointId] = now + M.COURIER_STOP_COOLDOWN_S
+      stats.courierStopsServed = (stats.courierStopsServed or 0) + 1
+      if obj and obj.queueLuaCommand then
+        local resetOff = -(tonumber(dwell.curbOffset) or 0)
+        obj:queueLuaCommand(string.format(
+          'electrics.set_warn_signal(0) ai.driveInLane("on") ai.laneChange(nil, 12.0, %.2f) ai.setSpeedMode("legal") ai.setMode("traffic")',
+          resetOff))
+      end
+      return 'released', dwell.pointId
+    end
+    return 'dwelling', dwell.pointId
+  end
+  if not speed or speed >= M.COURIER_STOP_MAX_SPEED_MS then return 'none' end
+  if director.deliveryPointCount <= 0 then return 'none' end
+
+  local range2 = M.COURIER_STOP_RANGE_M * M.COURIER_STOP_RANGE_M
+  local latMax = M.COURIER_STOP_LATERAL_MAX_M
+  local bestPt, bestD2 = nil, range2 + 1
+  for _, list in pairs(director.deliveryPoints) do
+    for i = 1, #list do
+      local s = list[i]
+      local cd = director.deliveryCooldowns[s.id]
+      if not cd or now >= cd then
+        local vx, vy = s.x - px, s.y - py
+        local d2 = vx * vx + vy * vy
+        if d2 <= range2 and d2 < bestD2 then
+          local along = vx * dx + vy * dy
+          if along >= -2.0 and along <= M.COURIER_STOP_RANGE_M then
+            local lat = math.abs(vx * dy - vy * dx)
+            if lat <= latMax then
+              bestPt, bestD2 = s, d2
+            end
+          end
+        end
+      end
+    end
+  end
+  if not bestPt then return 'none' end
+
+  local frac = (((math.abs(math.floor(tonumber(vehId) or 0)) * 131 + math.floor(now * 10)) % 101) / 100)
+  local dwellS = M.COURIER_STOP_DWELL_MIN_S + frac * (M.COURIER_STOP_DWELL_MAX_S - M.COURIER_STOP_DWELL_MIN_S)
+  local curbSign = (M.rules and M.rules.rightHandDrive) and -1 or 1
+  local curbOff = curbSign * M.COURIER_STOP_CURB_OFFSET_M
+  director.courierDwell[vehId] = {
+    pointId = bestPt.id,
+    startedAt = now,
+    releaseAt = now + dwellS,
+    dwellS = dwellS,
+    curbOffset = curbOff,
+  }
+  director.deliveryCooldowns[bestPt.id] = now + dwellS + M.COURIER_STOP_COOLDOWN_S
+  if obj and obj.queueLuaCommand then
+    obj:queueLuaCommand(string.format(
+      'electrics.set_warn_signal(1) ai.driveInLane("off") ai.laneChange(nil, 10.0, %.2f) ai.setSpeedMode("set") ai.setSpeed(0)',
+      curbOff))
+  end
+  return 'stopped', bestPt
+end
+
 -- Pure zero-alloc: true when candidate horizon spawn point (sx, sy) is >= minSpacingM from all recent horizon spawns.
 function M.horizonSpawnClear(sx, sy, recentSpawns, now, minSpacingM)
   local minD = minSpacingM or M.HORIZON_SPAWN_SPACING_M
@@ -1769,6 +1925,9 @@ function M.updateTrafficDirector(dtReal, player, box)
   for id in pairs(director.busDwell) do
     if data[id] == nil then director.busDwell[id] = nil end
   end
+  for id in pairs(director.courierDwell) do
+    if data[id] == nil then director.courierDwell[id] = nil end
+  end
 
   localplayers.snapshot(controlled)
   for id, t in pairs(data) do
@@ -1805,13 +1964,15 @@ function M.updateTrafficDirector(dtReal, player, box)
           if cmd and o.queueLuaCommand then o:queueLuaCommand(cmd) end
         end
 
-        -- 2. City bus OSM bus stop dwell state machine
+        -- 2. City bus OSM bus stop & AI courier curbside delivery dwell state machines
         if curP.persona == 'bus' and (dx ~= 0 or dy ~= 0) then
           M.stepBusStop(id, p.x, p.y, dx, dy, sp, now, o)
+        elseif curP.persona == 'courier' and (dx ~= 0 or dy ~= 0) then
+          M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o)
         end
 
         -- 3. Behind-player horizon recycling into forward cone [160, 340] m (never < 95 m, >= 140 m spacing)
-        if hasHeading and not director.busDwell[id]
+        if hasHeading and not director.busDwell[id] and not director.courierDwell[id]
             and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
             and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
           local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY)
@@ -1851,20 +2012,35 @@ local function regionalGroup()
   if not (core_multiSpawn and core_multiSpawn.createGroup) then return nil end
   local ok, g = pcall(core_multiSpawn.createGroup, M.GROUP_SIZE, params)
   if not ok or type(g) ~= 'table' or not g[1] then return nil end
-  if not (st and st.getValue and st.getValue('trafficSimpleVehicles')) then
-    local candidates = {}
-    for i = 1, #g do candidates[i] = g[i] end
-    local cv = rawget(_G, 'core_vehicles')
-    if cv and cv.getConfigList then
-      local okC, list = pcall(cv.getConfigList)
-      if okC and type(list) == 'table' then
-        for _, v in pairs(list) do
-          if type(v) == 'table' and type(v.model_key) == 'string' and type(v.key) == 'string' then
-            candidates[#candidates + 1] = { model = v.model_key, config = v.key, name = v.Name or v.Configuration }
-          end
+  local simpleTraffic = st and st.getValue and st.getValue('trafficSimpleVehicles') and true or false
+  local candidates = {}
+  for i = 1, #g do
+    local src = g[i]
+    if type(src) == 'table' then
+      candidates[#candidates + 1] = {
+        model = src.model,
+        config = src.config,
+        name = src.name,
+        region = src.region or region,
+        paint = src.paint,
+        paintName = src.paintName,
+      }
+    end
+  end
+  local configListCount = 0
+  local cv = rawget(_G, 'core_vehicles')
+  if cv and cv.getConfigList then
+    local okC, list = pcall(cv.getConfigList)
+    if okC and type(list) == 'table' then
+      for _, v in pairs(list) do
+        if type(v) == 'table' and type(v.model_key) == 'string' and type(v.key) == 'string' then
+          candidates[#candidates + 1] = { model = v.model_key, config = v.key, name = v.Name or v.Configuration }
+          configListCount = configListCount + 1
         end
       end
     end
+  end
+  if not simpleTraffic or configListCount > 0 then
     local prof = graph and graph.trafficProfile
     local isUrban = not (type(prof) == 'table' and (prof.band == 'rural' or prof.band == 'highway'))
     local roster = M.buildTrafficRoster(region, candidates, euPolice, {
@@ -1886,6 +2062,7 @@ local function regionalGroup()
   log('I', 'beamngEarth', string.format('traffic: %s vehicles (%s)', region, tostring(cc)))
   return g
 end
+M._regionalGroup = regionalGroup
 
 local function setupTraffic(gt, c)
   local okG, group = pcall(regionalGroup)
@@ -2354,6 +2531,7 @@ function M.status()
            cuts = stats.cuts, cutRespawns = stats.cutRespawns, cutStopRespawns = stats.cutStopRespawns,
            aheadRespawns = stats.aheadRespawns, horizonRespawns = stats.horizonRespawns,
            busStopsLoaded = director.busStopCount, busStopsServed = stats.busStopsServed,
+           deliveryPointsLoaded = director.deliveryPointCount, courierStopsServed = stats.courierStopsServed,
            launches = stats.launches, oncomingRespawns = stats.oncomingRespawns, overtake = overtake.status(),
            resetMs = stats.resetMs, signalsMs = stats.signalsMs, nodesMs = stats.nodesMs, gpsMs = stats.gpsMs,
            applyMs = stats.applyMs, guardMs = stats.guardMs, guardMaxMs = stats.guardMaxMs,
@@ -2394,6 +2572,10 @@ function M.reset()
   director.busStopCount = 0
   director.busDwell = {}
   director.busStopCooldowns = {}
+  director.deliveryPoints = {}
+  director.deliveryPointCount = 0
+  director.courierDwell = {}
+  director.deliveryCooldowns = {}
   director.recentSpawnIdx = 0
   for i = 1, #director.recentSpawns do director.recentSpawns[i].at = -1e9 end
   M.restoreChoice()
