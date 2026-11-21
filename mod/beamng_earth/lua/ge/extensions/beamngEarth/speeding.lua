@@ -144,11 +144,13 @@ function M.update(dt, graph)
   for id, v in pairs(data) do
     local role = v.role
     local busDwelling = ng and ng.isBusDwelling and ng.isBusDwelling(id) == true or false
-    local free = v.isAi and id ~= player and not busDwelling and role and role.name == 'standard' and role.state == 'none'
+    local courierDwelling = ng and ng.isCourierDwelling and ng.isCourierDwelling(id) == true or false
+    local dwelling = busDwelling or courierDwelling
+    local free = v.isAi and id ~= player and not dwelling and role and role.name == 'standard' and role.state == 'none'
       and role.actionName == 'none' and v.state == 'active'
     local c = cars[id]
-    if busDwelling then
-      -- Do not overwrite the bus stop smooth-stop command while dwelling; resume cap updates once released.
+    if dwelling then
+      -- Do not overwrite bus/courier curbside stop commands while dwelling; resume cap updates once released.
       if c then c.sent = nil end
     elseif not free then
       if c then release(id, c) end

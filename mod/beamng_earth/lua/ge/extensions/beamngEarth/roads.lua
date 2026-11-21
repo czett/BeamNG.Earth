@@ -494,6 +494,7 @@ local function dropTile(key)
   if t.wells then require('beamngEarth/pumpjacks').dropKey(key) end
   if t.turbines then require('beamngEarth/windturbines').dropKey(key) end
   if t.busStops then require('beamngEarth/navgraph').dropBusStops(key) end
+  if t.deliveryPoints then require('beamngEarth/navgraph').dropDeliveryPoints(key) end
   sea.release(t.waterguard)
   tiles[key] = nil
 end
@@ -980,6 +981,81 @@ function M.extractBusStops(key, data, pl)
   return out
 end
 
+-- Extract roadside building/delivery drop points from tile building footprints, addresses, and curbside rows.
+-- Capped to ~20 well-spaced points per tile (>= 35 m apart) so couriers stop occasionally along realistic fronts.
+function M.extractDeliveryPoints(key, data, pl)
+  local out = {}
+  if type(data) ~= 'table' then return out end
+  local dyaw = pl and geotile.yawOf(pl) or 0
+  local maxPts = 20
+  local minSep2 = 35.0 * 35.0
+  local function addPt(x, y, z, yaw, id)
+    if #out >= maxPts or type(x) ~= 'number' or type(y) ~= 'number' then return end
+    z = tonumber(z) or 0
+    if pl then x, y, z = geotile.apply(pl, x, y, z) end
+    for j = 1, #out do
+      local dx, dy = x - out[j].x, y - out[j].y
+      if dx * dx + dy * dy < minSep2 then return end
+    end
+    out[#out + 1] = {
+      id = id or (tostring(key) .. ':d' .. tostring(#out + 1)),
+      x = x, y = y, z = z,
+      yaw = (tonumber(yaw) or 0) + dyaw,
+    }
+  end
+  for _, field in ipairs({ 'deliveryPoints', 'addresses' }) do
+    local src = data[field]
+    if type(src) == 'table' then
+      for i, s in ipairs(src) do
+        if #out >= maxPts then break end
+        if type(s) == 'table' then
+          local x, y = tonumber(s.x or s[1]), tonumber(s.y or s[2])
+          if x and y then
+            addPt(x, y, s.z or s[3], s.yaw or s[4], s.id or (tostring(key) .. ':a' .. tostring(i)))
+          end
+        end
+      end
+    end
+  end
+  if #out < maxPts and type(data.buildings) == 'table' then
+    for i, b in ipairs(data.buildings) do
+      if #out >= maxPts then break end
+      if type(b) == 'table' then
+        if type(b[1]) == 'number' and type(b[2]) == 'number' and type(b[4]) == 'number' and type(b[5]) == 'number' then
+          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bf' .. tostring(i))
+        else
+          local x, y = tonumber(b.x or b.cx or b[1]), tonumber(b.y or b.cy or b[2])
+          if x and y then
+            addPt(x, y, b.z or b[3], b.yaw or b[4], b.id or (tostring(key) .. ':b' .. tostring(i)))
+          end
+        end
+      end
+    end
+  end
+  if #out < maxPts and type(data.colliders) == 'table' then
+    local boxes = type(data.colliders.bld) == 'table' and data.colliders.bld
+      or (type(data.colliders.bldcol) == 'table' and data.colliders.bldcol or nil)
+    if boxes then
+      for i, b in ipairs(boxes) do
+        if #out >= maxPts then break end
+        if type(b) == 'table' and type(b[1]) == 'number' and type(b[2]) == 'number'
+            and type(b[4]) == 'number' and type(b[5]) == 'number' then
+          addPt((b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5, b[3], 0, tostring(key) .. ':bc' .. tostring(i))
+        end
+      end
+    end
+  end
+  if #out < maxPts and type(data.park) == 'table' then
+    for i, r in ipairs(data.park) do
+      if #out >= maxPts then break end
+      if type(r) == 'table' and type(r[1]) == 'number' and type(r[2]) == 'number' then
+        addPt(r[1], r[2], r[3], r[4], tostring(key) .. ':pk' .. tostring(i))
+      end
+    end
+  end
+  return out
+end
+
 -- The rows of tile t (key) handed to their modules, mapped into its current placement (made: replaced in place).
 local function geoRows(key, t, data, replacing)
   local pl = t.rowPl.pl
@@ -1004,6 +1080,16 @@ local function geoRows(key, t, data, replacing)
     elseif t.busStops then
       require('beamngEarth/navgraph').dropBusStops(key)
       t.busStops = nil
+    end
+  end
+  do
+    local pts = M.extractDeliveryPoints(key, data, pl)
+    if #pts > 0 then
+      require('beamngEarth/navgraph').onDeliveryPoints(key, pts)
+      t.deliveryPoints = true
+    elseif t.deliveryPoints then
+      require('beamngEarth/navgraph').dropDeliveryPoints(key)
+      t.deliveryPoints = nil
     end
   end
   if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0 then
@@ -1666,6 +1752,13 @@ function M.onTile(msg, currentAnchor, a)
     if #stops > 0 then
       require('beamngEarth/navgraph').onBusStops(key, stops)
       tiles[key].busStops = true
+    end
+  end
+  do
+    local pts = M.extractDeliveryPoints(key, data, nil)
+    if #pts > 0 then
+      require('beamngEarth/navgraph').onDeliveryPoints(key, pts)
+      tiles[key].deliveryPoints = true
     end
   end
   if type(data.guardrails) == 'table' and type(data.guardrails.items) == 'table' and #data.guardrails.items > 0 then
