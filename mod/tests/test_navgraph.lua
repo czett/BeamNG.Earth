@@ -561,21 +561,142 @@ do
   T.check(rOff.counts.truck >= 1, 'buildTrafficRoster: commercial trucks populated')
   T.check(rOff.counts.speeder >= 1 and rOff.counts.speeder <= 2, 'buildTrafficRoster: 1-2 speeders assigned')
   T.check(rOff.counts.commuter >= 2, 'buildTrafficRoster: commuters fill remaining pool')
-  local sawHero, sawTransitBus, sawCourierPaint, sawPolice = false, false, false, false
+  local sawHero, sawTransitBus, sawCourierLivery, sawPolice = false, false, false, false
   for _, e in ipairs(rOff) do
     if e.config == 'hero' then sawHero = true end
     if e.archetype == 'bus' and (e.config == 'city' or e.config == 'metro_shuttle') then sawTransitBus = true end
-    if e.archetype == 'courier' and e.paint ~= nil and e.liveryTag ~= nil then sawCourierPaint = true end
+    if e.archetype == 'courier' and e.liveryTag ~= nil and e.hasDeliveryLivery == true and e.paint == nil then
+      sawCourierLivery = true
+    end
     if e.archetype == 'police' or tostring(e.config):find('poliz') or tostring(e.config):find('police') then
       sawPolice = true
     end
   end
   T.check(not sawHero and sawTransitBus, 'buildTrafficRoster: prefers transit/city bus liveries and excludes hero/jato')
-  T.check(sawCourierPaint, 'buildTrafficRoster: assigns realistic courier paint/livery tags to delivery vans')
+  T.check(sawCourierLivery, 'buildTrafficRoster: preserves vanilla delivery liveries (paint == nil) on delivery vans')
   T.check(not sawPolice, 'buildTrafficRoster: zero police entries leak when deEnabled == false')
 
   local rOn = N.buildTrafficRoster('europe', pool, true, { size = 16, urban = true })
   T.check(rOn.counts.police >= 1, 'buildTrafficRoster: includes EU police patrols when deEnabled == true')
+end
+
+-- 2b. Mod-Aware Delivery Vehicles & 3-Tier Vanilla Livery Fallbacks
+do
+  -- Tier 1: Full mod environment (scout, evvan/ecv, hhl/bps/rrt/nile/postit/fdc skins)
+  local modPool = {
+    { model = 'scout', config = 'scout_hhl', name = 'Gavril Scout HHL Delivery' },
+    { model = 'scout', config = 'scout_postit', name = 'Gavril Scout Post-It' },
+    { model = 'evvan', config = 'ecv_nile', name = 'Bruckell ECV Nile Delivery' },
+    { model = 'ecv', config = 'ecv_bps', name = 'Bruckell ECV BPS' },
+    { model = 'van', config = 'h25_rrt', name = 'H25 RRT Parcel' },
+    { model = 'pickup', config = 'd45_fdc_delivery', name = 'D45 FDC Delivery' },
+    { model = 't_series', config = 't75_hhl_freight', name = 'T75 HHL Freight' },
+    { model = 'van', config = 'deliverytruck', name = 'H45 Delivery Truck' },
+    { model = 'van', config = 'h15_cargo', name = 'H15 Cargo Van' },
+    { model = 't_series', config = 't75_hauler', name = 'T75 Hauler' },
+    { model = 'pickup', config = 'd15_v8_4wd', name = 'D15 V8 4WD' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+    { model = 'etk800', config = '854d_wagon', name = 'ETK 854d' },
+  }
+  T.check(N.classifyVehicle('scout', 'scout_base') == 'courier', 'classifyVehicle: Gavril Scout -> courier')
+  T.check(N.classifyVehicle('evvan', 'ecv_base') == 'courier', 'classifyVehicle: Bruckell ECV (evvan) -> courier')
+  T.check(N.classifyVehicle('ecv', 'ecv_base') == 'courier', 'classifyVehicle: Bruckell ECV (ecv) -> courier')
+  T.check(N.classifyVehicle('pickup', 'd45_fdc_delivery') == 'courier', 'classifyVehicle: delivery-skinned pickup -> courier')
+  T.check(N.classifyVehicle('pickup', 'd15_v8_4wd') == 'commuter', 'classifyVehicle: plain pickup -> commuter')
+  T.check(N.classifyVehicle('t_series', 't75_hhl_freight') == 'courier', 'classifyVehicle: delivery-skinned t_series -> courier')
+  T.check(N.classifyVehicle('t_series', 't75_hauler') == 'truck', 'classifyVehicle: plain t_series -> truck')
+  T.check(N.classifyVehicle('pickup', 'd15_pickups_base') == 'commuter', 'classifyVehicle: token boundary avoids ups false positive')
+
+  local rEuMod = N.buildTrafficRoster('DE', modPool, false, { size = 16, urban = true })
+  T.check(rEuMod.counts.police == 0, 'Tier 1 (EU mods): strict Police == 0 when deEnabled == false')
+  local euCouriers = {}
+  for _, e in ipairs(rEuMod) do
+    if e.archetype == 'courier' then euCouriers[#euCouriers + 1] = e end
+  end
+  T.check(#euCouriers == 3, 'Tier 1 (EU mods): fills courier quota from mod delivery pool')
+  local euAllModPreserved = true
+  local euSawScoutOrEvvan = false
+  for _, e in ipairs(euCouriers) do
+    if e.deliveryTier ~= 1 or e.hasDeliveryLivery ~= true or e.paint ~= nil then euAllModPreserved = false end
+    if e.model == 'scout' or e.model == 'evvan' or e.model == 'ecv' then euSawScoutOrEvvan = true end
+  end
+  T.check(euAllModPreserved and euSawScoutOrEvvan,
+    'Tier 1 (EU mods): scout/evvan + hhl/postit/nile selected first with paint == nil')
+
+  local rNaMod = N.buildTrafficRoster('US', modPool, false, { size = 16, urban = true })
+  T.check(rNaMod.counts.police == 0, 'Tier 1 (NA mods): strict Police == 0')
+  local naTopCourier = nil
+  for _, e in ipairs(rNaMod) do
+    if e.archetype == 'courier' then naTopCourier = e; break end
+  end
+  T.check(naTopCourier ~= nil and (naTopCourier.model == 'evvan' or naTopCourier.model == 'ecv')
+    and naTopCourier.hasDeliveryLivery == true and naTopCourier.paint == nil,
+    'Tier 1 (NA mods): prioritizes regional NA evvan/ecv + bps/nile/hhl with paint == nil')
+
+  -- Tier 2: Vanilla-only environment (zero mods -> built-in vanilla delivery/commercial/cargobox liveries with paint == nil)
+  local vanillaPool = {
+    { model = 'van', config = 'h15_vanster', name = 'H15 Vanster' },
+    { model = 'van', config = 'h15_cargo', name = 'H15 Cargo Van' },
+    { model = 'van', config = 'deliverytruck', name = 'H45 Delivery Truck' },
+    { model = 'van', config = 'h25_commercial', name = 'H25 Commercial Fleet' },
+    { model = 'md_series', config = 'md_60_cargobox', name = 'MD60 CargoBox' },
+    { model = 't_series', config = 't83s_cargobox', name = 'T83s CargoBox' },
+    { model = 'md_series', config = 'md70_flatbed', name = 'MD70 Flatbed' },
+    { model = 't_series', config = 't83_longhaul', name = 'T83 Longhaul' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+    { model = 'etk800', config = '854d_wagon', name = 'ETK 854d' },
+  }
+  local rVanilla = N.buildTrafficRoster('europe', vanillaPool, false, { size = 16, urban = true })
+  T.check(rVanilla.counts.police == 0, 'Tier 2 (vanilla-only): strict Police == 0 when deEnabled == false')
+  local vCouriers = {}
+  for _, e in ipairs(rVanilla) do
+    if e.archetype == 'courier' then vCouriers[#vCouriers + 1] = e end
+  end
+  T.check(#vCouriers == 3, 'Tier 2 (vanilla-only): populates courier quota from vanilla delivery liveries')
+  local allVanillaLiveryPreserved = true
+  for _, e in ipairs(vCouriers) do
+    if e.deliveryTier ~= 2 or e.hasDeliveryLivery ~= true or e.paint ~= nil or e.liveryTag ~= 'vanilla_delivery' then
+      allVanillaLiveryPreserved = false
+    end
+  end
+  T.check(allVanillaLiveryPreserved,
+    'Tier 2 (vanilla-only): prioritizes vanilla delivery/commercial/cargobox liveries with paint == nil')
+
+  -- Tier 3: Bare/plain fallback environment (only unskinned cargo/panel vans -> receive regional M.COURIER_PAINTS)
+  local plainPool = {
+    { model = 'van', config = 'h15_cargo', name = 'H15 Cargo Van' },
+    { model = 'van', config = 'h15_vanster', name = 'H15 Vanster' },
+    { model = 'van', config = 'h25_panel', name = 'H25 Panel Van' },
+    { model = 't_series', config = 't83_longhaul', name = 'T83 Longhaul' },
+    { model = 'etk800', config = 'polizei', name = 'ETK 800 Polizei' },
+    { model = 'vivace', config = '160_diesel', name = 'Vivace 160d' },
+    { model = 'etk800', config = '854d_wagon', name = 'ETK 854d' },
+  }
+  local rPlainEu = N.buildTrafficRoster('europe', plainPool, false, { size = 16, urban = true })
+  T.check(rPlainEu.counts.police == 0, 'Tier 3 (plain fallback): strict Police == 0 when deEnabled == false')
+  local plainCouriers = {}
+  for _, e in ipairs(rPlainEu) do
+    if e.archetype == 'courier' then plainCouriers[#plainCouriers + 1] = e end
+  end
+  T.check(#plainCouriers == 3, 'Tier 3 (plain fallback): fills courier quota from plain vans')
+  local allPlainPainted = true
+  for _, e in ipairs(plainCouriers) do
+    if e.deliveryTier ~= 3 or e.hasDeliveryLivery ~= false or type(e.paint) ~= 'table' or e.paintName == nil then
+      allPlainPainted = false
+    end
+  end
+  T.check(allPlainPainted and plainCouriers[1].liveryTag == 'dhl_amber',
+    'Tier 3 (plain fallback EU): unskinned cargo vans receive regional M.COURIER_PAINTS starting with dhl_amber')
+
+  local rPlainNa = N.buildTrafficRoster('US', plainPool, false, { size = 16, urban = true })
+  local firstNaPlain = nil
+  for _, e in ipairs(rPlainNa) do
+    if e.archetype == 'courier' then firstNaPlain = e; break end
+  end
+  T.check(firstNaPlain ~= nil and firstNaPlain.liveryTag == 'commercial_white' and type(firstNaPlain.paint) == 'table',
+    'Tier 3 (plain fallback NA): unskinned cargo vans receive NA regional M.COURIER_PAINTS')
 end
 
 -- 3. AI Driving Personas (risk, highway cruise speeds, Autobahn speeders, Rechtsfahrgebot lane bias)
@@ -595,6 +716,29 @@ do
   T.check(pCourier.persona == 'courier' and pCourier.risk >= 0.40 and pCourier.risk <= 0.45
     and pCourier.highwayCruiseKph >= 95 and pCourier.highwayCruiseKph <= 110
     and pCourier.laneBias == 'right_or_middle', 'persona courier: ~0.42 risk, 95-110 km/h, right/middle lanes')
+
+  local pScout = N.assignVehiclePersona(20, 'scout', 'scout_hhl', true)
+  T.check(pScout.persona == 'courier' and pScout.risk >= 0.40 and pScout.risk <= 0.45
+    and pScout.highwayCruiseKph >= 95 and pScout.highwayCruiseKph <= 110
+    and pScout.laneBias == 'right_or_middle', 'persona courier: Gavril Scout gets courier persona')
+
+  local pEvvan = N.assignVehiclePersona(21, 'evvan', 'ecv_nile', true)
+  local pEcv = N.assignVehiclePersona(22, 'ecv', 'ecv_base', true)
+  T.check(pEvvan.persona == 'courier' and pEcv.persona == 'courier'
+    and pEvvan.highwayCruiseKph >= 95 and pEvvan.highwayCruiseKph <= 110,
+    'persona courier: Bruckell ECV (evvan/ecv) gets courier persona')
+
+  local pDeliveryPickup = N.assignVehiclePersona(23, 'pickup', 'd45_bps_delivery', true)
+  T.check(pDeliveryPickup.persona == 'courier' and pDeliveryPickup.laneBias == 'right_or_middle',
+    'persona courier: delivery-skinned pickup gets courier persona')
+
+  local pDeliverySemi = N.assignVehiclePersona(24, 't_series', 't75_hhl_freight', true)
+  local pDeliverySemiRoster = N.assignVehiclePersona(25, 'us_semi', 't83s_cargobox', true, 'courier')
+  T.check(pDeliverySemi.persona == 'truck' and pDeliverySemi.laneBias == 'right'
+    and pDeliverySemi.overtakeAllowed == false and pDeliverySemi.highwayCruiseKph <= 92,
+    'persona truck: heavy delivery-skinned t_series keeps truck persona')
+  T.check(pDeliverySemiRoster.persona == 'truck' and pDeliverySemiRoster.laneBias == 'right',
+    'persona truck: heavy delivery-skinned us_semi keeps truck persona even with courier rosterArchetype')
 
   local pComm = N.assignVehiclePersona(13, 'vivace', '160_diesel', false)
   T.check(pComm.persona == 'commuter' and pComm.risk >= 0.38 and pComm.risk <= 0.52

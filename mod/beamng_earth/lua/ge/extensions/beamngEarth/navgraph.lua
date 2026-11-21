@@ -1050,8 +1050,14 @@ M.BUS_STOP_LATERAL_MAX_M = 12.0
 M.BUS_STOP_CURB_OFFSET_M = 0.85
 
 M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
-M.COURIER_MODELS = { van = true, boxtruck = true, h_series = true, gavril_h = true }
+M.MOD_COURIER_MODELS = { scout = true, evvan = true, ecv = true }
+M.COURIER_MODELS = {
+  scout = true, evvan = true, ecv = true,
+  van = true, boxtruck = true, h_series = true, gavril_h = true,
+}
+M.HEAVY_SEMI_MODELS = { semi = true, us_semi = true, t_series = true }
 M.TRUCK_MODELS = { semi = true, us_semi = true, t_series = true, md_series = true }
+M.PICKUP_MODELS = { pickup = true, d_series = true }
 M.SPEEDER_MODELS = { etk800 = true, etkc = true, vivace = true, sbr = true, scintilla = true, bastion = true,
                      sunburst = true, bolide = true }
 
@@ -1100,16 +1106,53 @@ local function hasAnyKeyword(str, list)
   return false
 end
 
+local function normalizeTokens(str)
+  return ' ' .. tostring(str or ''):lower():gsub('[^%w]+', ' ') .. ' '
+end
+
+local function hasAnyToken(tokStr, list)
+  for i = 1, #list do
+    if tokStr:find(' ' .. list[i] .. ' ', 1, true) then return true end
+  end
+  return false
+end
+
 local EXCLUDED_KEYWORDS = {
   'hero', 'jato', 'ramplow', 'destructor', 'derby', 'drag', 'drift', 'monster',
   'stunt', 'crawler', 'capsule', 'demolition', 'ambulance', 'fire', 'swat', 'rally',
 }
 local POLICE_KEYWORDS = { 'police', 'polizei', 'interceptor', 'sheriff', 'patrol', 'carabinieri', 'gendarmerie' }
 local BUS_LIVERY_KEYWORDS = { 'city', 'transit', 'metro', 'shuttle', 'municipal', 'express', 'local', 'coach' }
-local COURIER_KEYWORDS = {
-  'cargo', 'delivery', 'courier', 'parcel', 'box', 'upfit', 'panel', 'commercial',
-  'fleet', 'dhl', 'dpd', 'hermes', 'ups', 'fedex', 'post', 'mail', 'freight', 'van',
+
+-- Tier 1: Installed delivery company skin packs (short acronyms token-matched to avoid false positives)
+local TIER1_COMPANY_TOKENS = { 'hhl', 'bps', 'rrt', 'fdc', 'dhl', 'ups', 'dpd' }
+local TIER1_COMPANY_SUBSTR = { 'nile', 'postit', 'post-it', 'post_it', 'hermes', 'fedex' }
+local REGION_TIER1_TOKENS = {
+  europe = { 'hhl', 'dhl', 'dpd' },
+  northAmerica = { 'hhl', 'bps', 'rrt', 'fdc', 'ups' },
+  asiaPacific = { 'dhl' },
 }
+local REGION_TIER1_SUBSTR = {
+  europe = { 'postit', 'post-it', 'post_it', 'nile', 'hermes' },
+  northAmerica = { 'nile', 'fedex' },
+  asiaPacific = { 'nile', 'fedex', 'postit', 'post-it', 'post_it' },
+}
+local REGION_MOD_COURIER_BONUS = {
+  europe = { scout = 45, evvan = 40, ecv = 40 },
+  northAmerica = { evvan = 45, ecv = 45, scout = 25 },
+  asiaPacific = { evvan = 35, ecv = 35, scout = 30 },
+}
+
+-- Tier 2: Built-in vanilla delivery/commercial livery configs (preserved untouched with paint = nil)
+local TIER2_LIVERY_KEYWORDS = {
+  'delivery', 'courier', 'parcel', 'postal', 'commercial', 'fleet', 'service',
+  'livery', 'cargobox', 'beamcom',
+}
+-- Tier 3 / plain cargo keywords (qualifies van/md_series as courier; receives regional COURIER_PAINTS if unskinned)
+local COURIER_PLAIN_KEYWORDS = {
+  'cargo', 'box', 'upfit', 'panel', 'freight', 'worker', 'post', 'mail', 'van',
+}
+
 local SPEEDER_KEYWORDS = {
   'ttsport', 'sport', 'gt4', 'gt3', 'gt2', 'gt', 'rs', 'redtail', 'battlehawk',
   'arsenal', 'sv', 'track', '340', '410', 'v10', 'v8', 'em', '_s', ' s ',
@@ -1120,12 +1163,37 @@ local REGION_SPEEDER_PREF = {
   asiaPacific = { sunburst = 30, sbr = 28, vivace = 20, etk800 = 15, etkc = 14, scintilla = 12, bastion = 6 },
 }
 
+local function hasTier1CompanySkin(rawLower, tokStr)
+  return hasAnyToken(tokStr, TIER1_COMPANY_TOKENS) or hasAnyKeyword(rawLower, TIER1_COMPANY_SUBSTR)
+end
+
+local function hasTier2VanillaLivery(rawLower)
+  return hasAnyKeyword(rawLower, TIER2_LIVERY_KEYWORDS)
+end
+
+local function tier1LiveryTag(rawLower, tokStr)
+  if hasAnyToken(tokStr, { 'hhl' }) then return 'mod_hhl' end
+  if hasAnyToken(tokStr, { 'bps' }) then return 'mod_bps' end
+  if hasAnyToken(tokStr, { 'rrt' }) then return 'mod_rrt' end
+  if rawLower:find('nile', 1, true) then return 'mod_nile' end
+  if rawLower:find('postit', 1, true) or rawLower:find('post-it', 1, true) or rawLower:find('post_it', 1, true) then
+    return 'mod_postit'
+  end
+  if hasAnyToken(tokStr, { 'fdc' }) then return 'mod_fdc' end
+  if hasAnyToken(tokStr, { 'dhl' }) then return 'dhl_amber' end
+  if hasAnyToken(tokStr, { 'ups' }) then return 'ups_brown' end
+  if hasAnyToken(tokStr, { 'dpd' }) or rawLower:find('hermes', 1, true) then return 'courier_slate' end
+  if rawLower:find('fedex', 1, true) then return 'mod_fedex' end
+  return 'mod_delivery'
+end
+
 -- Pure: classify a vehicle (model, config, optional entry metadata) into an archetype or 'excluded'.
 function M.classifyVehicle(model, config, entry)
   local m = tostring(model or ''):lower()
   local c = tostring(config or ''):lower()
   local nm = type(entry) == 'table' and tostring(entry.name or ''):lower() or ''
   local combined = m .. ' ' .. c .. ' ' .. nm
+  local tok = normalizeTokens(combined)
   if type(entry) == 'table' and entry.isPolice == true then return 'police' end
   if hasAnyKeyword(combined, POLICE_KEYWORDS) then return 'police' end
   if hasAnyKeyword(combined, EXCLUDED_KEYWORDS) then return 'excluded' end
@@ -1136,11 +1204,28 @@ function M.classifyVehicle(model, config, entry)
     return 'courier'
   end
   if m == 'md_series' then
-    if hasAnyKeyword(combined, COURIER_KEYWORDS) then return 'courier' end
+    if hasTier1CompanySkin(combined, tok) or hasTier2VanillaLivery(combined) or hasAnyKeyword(combined, COURIER_PLAIN_KEYWORDS) then
+      return 'courier'
+    end
+    return 'truck'
+  end
+  if M.HEAVY_SEMI_MODELS[m] then
+    if hasTier1CompanySkin(combined, tok) or hasTier2VanillaLivery(combined) then
+      return 'courier'
+    end
     return 'truck'
   end
   if M.TRUCK_MODELS[m] then
     return 'truck'
+  end
+  if M.PICKUP_MODELS[m] then
+    if hasTier1CompanySkin(combined, tok) or hasTier2VanillaLivery(combined) then
+      return 'courier'
+    end
+    return 'commuter'
+  end
+  if hasTier1CompanySkin(combined, tok) then
+    return 'courier'
   end
   if M.SPEEDER_MODELS[m] and (m == 'scintilla' or m == 'bolide' or hasAnyKeyword(combined, SPEEDER_KEYWORDS)) then
     return 'speeder'
@@ -1148,7 +1233,7 @@ function M.classifyVehicle(model, config, entry)
   return 'commuter'
 end
 
-local function cloneEntry(src, archetype, liveryTag, paint, paintName)
+local function cloneEntry(src, archetype, liveryTag, paint, paintName, hasDeliveryLivery, deliveryTier)
   local out = {
     model = src.model,
     config = src.config,
@@ -1156,8 +1241,15 @@ local function cloneEntry(src, archetype, liveryTag, paint, paintName)
   }
   if src.name then out.name = src.name end
   if liveryTag then out.liveryTag = liveryTag end
-  if paint then out.paint = paint elseif src.paint then out.paint = src.paint end
-  if paintName then out.paintName = paintName elseif src.paintName then out.paintName = src.paintName end
+  if hasDeliveryLivery ~= nil then out.hasDeliveryLivery = hasDeliveryLivery end
+  if deliveryTier ~= nil then out.deliveryTier = deliveryTier end
+  if hasDeliveryLivery == true then
+    out.paint = nil
+    out.paintName = nil
+  else
+    if paint then out.paint = paint elseif src.paint then out.paint = src.paint end
+    if paintName then out.paintName = paintName elseif src.paintName then out.paintName = src.paintName end
+  end
   return out
 end
 
@@ -1187,12 +1279,44 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
           local score = 0
           local cl = (cfg .. ' ' .. tostring(item.name or '')):lower()
           local ml = item.model:lower()
+          local clTok = normalizeTokens(ml .. ' ' .. cl)
           if item.region == reg then score = score + 25 end
           if arch == 'bus' then
             if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then score = score + 100 end
           elseif arch == 'courier' then
-            if hasAnyKeyword(cl, COURIER_KEYWORDS) then score = score + 100 end
-            if ml == 'van' or ml == 'boxtruck' then score = score + 20 end
+            local isModModel = M.MOD_COURIER_MODELS[ml] == true
+            local isTier1Skin = hasTier1CompanySkin(cl, clTok)
+            local isTier2Livery = hasTier2VanillaLivery(cl)
+            -- Tier 1: Installed delivery mod vehicles (scout, evvan/ecv) & delivery company skin packs
+            if isTier1Skin then
+              score = score + 300
+              local rt = REGION_TIER1_TOKENS[reg]
+              local rs = REGION_TIER1_SUBSTR[reg]
+              if (rt and hasAnyToken(clTok, rt)) or (rs and hasAnyKeyword(cl, rs)) then
+                score = score + 40
+              end
+            end
+            if isModModel then
+              local bonus = REGION_MOD_COURIER_BONUS[reg]
+              score = score + 220 + (bonus and bonus[ml] or 30)
+            end
+            -- Tier 2: Vanilla in-game delivery/commercial liveries (zero-mod fallback)
+            if not isTier1Skin and isTier2Livery then
+              score = score + 150
+            end
+            -- Tier 3: Plain/unskinned cargo & van configs
+            if not isTier1Skin and not isTier2Livery and hasAnyKeyword(cl, COURIER_PLAIN_KEYWORDS) then
+              score = score + 30
+            end
+            if ml == 'van' or ml == 'boxtruck' then
+              score = score + 20
+            elseif ml == 'md_series' then
+              score = score + 15
+            elseif M.HEAVY_SEMI_MODELS[ml] then
+              score = score + 10
+            elseif M.PICKUP_MODELS[ml] then
+              score = score + 8
+            end
           elseif arch == 'truck' then
             if ml == 'semi' or ml == 'us_semi' or ml == 't_series' then score = score + 30 end
             if cl:find('hauler', 1, true) or cl:find('cargo', 1, true) or cl:find('sleeper', 1, true)
@@ -1228,9 +1352,9 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
     for i = 1, n do
       if #roster >= targetSize then break end
       local e = src[i].item
-      local tag, paint, paintName = nil, nil, nil
-      if decorateFn then tag, paint, paintName = decorateFn(e, i) end
-      roster[#roster + 1] = cloneEntry(e, arch, tag, paint, paintName)
+      local tag, paint, paintName, hasDeliveryLivery, deliveryTier = nil, nil, nil, nil, nil
+      if decorateFn then tag, paint, paintName, hasDeliveryLivery, deliveryTier = decorateFn(e, i) end
+      roster[#roster + 1] = cloneEntry(e, arch, tag, paint, paintName, hasDeliveryLivery, deliveryTier)
       counts[arch] = counts[arch] + 1
     end
   end
@@ -1244,18 +1368,29 @@ function M.buildTrafficRoster(region, allConfigs, deEnabled, opts)
   local policeQuota = allowPolice and (targetSize >= 16 and 2 or 1) or 0
 
   local courierPal = M.COURIER_PAINTS[reg] or M.COURIER_PAINTS.europe
+  local plainCourierPaintIdx = 0
   take('bus', busQuota, function(e)
     local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
     if hasAnyKeyword(cl, BUS_LIVERY_KEYWORDS) then return 'transit_bus', nil, nil end
     return 'city_bus', nil, nil
   end)
-  take('courier', courierQuota, function(e, idx)
+  take('courier', courierQuota, function(e)
+    local ml = tostring(e.model or ''):lower()
     local cl = (tostring(e.config or '') .. ' ' .. tostring(e.name or '')):lower()
-    if cl:find('dhl', 1, true) then return 'dhl_amber', nil, nil end
-    if cl:find('ups', 1, true) then return 'ups_brown', nil, nil end
-    if cl:find('dpd', 1, true) or cl:find('hermes', 1, true) then return 'courier_slate', nil, nil end
-    local swatch = courierPal[((idx - 1) % #courierPal) + 1]
-    return swatch.tag, swatch.paint, swatch.paintName
+    local clTok = normalizeTokens(ml .. ' ' .. cl)
+    local isModModel = M.MOD_COURIER_MODELS[ml] == true
+    -- Tier 1: custom delivery company skin -> preserve livery (paint = nil)
+    if hasTier1CompanySkin(cl, clTok) then
+      return tier1LiveryTag(cl, clTok), nil, nil, true, 1
+    end
+    -- Tier 2: vanilla in-game delivery/commercial livery -> preserve livery (paint = nil)
+    if e.hasDeliveryLivery == true or hasTier2VanillaLivery(cl) then
+      return 'vanilla_delivery', nil, nil, true, isModModel and 1 or 2
+    end
+    -- Tier 3: plain unpainted/solid-color cargo/van -> apply regional M.COURIER_PAINTS
+    plainCourierPaintIdx = plainCourierPaintIdx + 1
+    local swatch = courierPal[((plainCourierPaintIdx - 1) % #courierPal) + 1]
+    return swatch.tag, swatch.paint, swatch.paintName, false, isModModel and 1 or 3
   end)
   take('truck', truckQuota)
   take('speeder', speederQuota)
@@ -1272,10 +1407,14 @@ end
 
 -- Pure deterministic AI driving persona assignment.
 function M.assignVehiclePersona(vehId, model, config, isAutobahn, rosterArchetype)
+  local ml = tostring(model or ''):lower()
   local arch = rosterArchetype
   if arch ~= 'bus' and arch ~= 'truck' and arch ~= 'courier' and arch ~= 'speeder' and arch ~= 'commuter' then
     local cls = M.classifyVehicle(model, config)
     arch = (cls == 'bus' or cls == 'truck' or cls == 'courier' or cls == 'speeder') and cls or 'commuter'
+  end
+  if M.HEAVY_SEMI_MODELS[ml] and arch == 'courier' then
+    arch = 'truck'
   end
   local idNum = math.abs(math.floor(tonumber(vehId) or 0))
   local u1 = ((idNum * 2654435761 + 17) % 1000) / 1000
