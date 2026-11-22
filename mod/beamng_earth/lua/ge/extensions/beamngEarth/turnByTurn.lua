@@ -10,6 +10,9 @@ M.PREFS_FILE = '/settings/beamngEarth_nav.json'
 M.DESIGNS = { 'gmaps_card', 'round_minimap', 'ets_advisor' }
 M.VALID_DESIGNS = { gmaps_card = true, round_minimap = true, ets_advisor = true }
 M.VALID_UNITS = { metric = true, imperial = true }
+M.MINIMAP_SIZE_MIN = 180
+M.MINIMAP_SIZE_MAX = 320
+M.MINIMAP_SIZE_DEFAULT = 236
 
 -- Maneuver extraction thresholds
 M.MIN_TURN_DEG = 22.0           -- micro-kinks < 22 deg on same street are suppressed
@@ -47,6 +50,7 @@ local state = {
   units = 'metric',
   hideWorldMarkers = false,
   northUp = false,
+  minimapSize = 236,
   prefsLoaded = false,
 
   -- Cached route & maneuvers
@@ -651,6 +655,12 @@ end
 ------------------------------------------------------------------------------------------
 -- Persistence & Multi-Design Settings API
 
+local function clampMinimapSize(v)
+  local n = tonumber(v)
+  if not n or n ~= n then return M.MINIMAP_SIZE_DEFAULT end
+  return math.max(M.MINIMAP_SIZE_MIN, math.min(M.MINIMAP_SIZE_MAX, math.floor(n + 0.5)))
+end
+
 function M.savePrefs(path)
   local write = rawget(_G, 'jsonWriteFile')
   if not write then return false end
@@ -662,6 +672,7 @@ function M.savePrefs(path)
     units = state.units,
     hideWorldMarkers = state.hideWorldMarkers,
     northUp = state.northUp,
+    minimapSize = state.minimapSize,
   }
   local ok, res = pcall(write, path or M.PREFS_FILE, out, true)
   return ok and res ~= false
@@ -686,6 +697,7 @@ function M.loadPrefs(path)
   end
   if data.hideWorldMarkers ~= nil then state.hideWorldMarkers = data.hideWorldMarkers == true end
   if data.northUp ~= nil then state.northUp = data.northUp == true end
+  if data.minimapSize ~= nil then state.minimapSize = clampMinimapSize(data.minimapSize) end
   -- Apply world marker preference to gps.lua if loaded
   local okG, gps = pcall(require, 'beamngEarth/gps')
   if okG and gps and gps.setWorldArrows then
@@ -760,6 +772,13 @@ function M.setNorthUp(flag)
   state.northUp = flag == true
   M.savePrefs()
   return state.northUp
+end
+
+function M.setMinimapSize(size)
+  ensurePrefs()
+  state.minimapSize = clampMinimapSize(size)
+  M.savePrefs()
+  return state.minimapSize
 end
 
 ------------------------------------------------------------------------------------------
@@ -1203,6 +1222,7 @@ function M.hudPayload()
     units = state.units,
     hideWorldMarkers = state.hideWorldMarkers,
     northUp = state.northUp,
+    minimapSize = state.minimapSize,
     maneuver = state.maneuver,
     streetName = state.streetName,
     roadRef = state.roadRef,
@@ -1263,6 +1283,7 @@ function M._resetForTest()
   state.units = 'metric'
   state.hideWorldMarkers = false
   state.northUp = false
+  state.minimapSize = M.MINIMAP_SIZE_DEFAULT
   state.prefsLoaded = true
   state.chimeSeq = 0
   state.chimeKind = nil

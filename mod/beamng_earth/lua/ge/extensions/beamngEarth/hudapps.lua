@@ -146,7 +146,7 @@ local function navKey(n)
   local roadSegs = type(n.miniRoads) == 'table' and #n.miniRoads or 0
   return tostring(n.enabled) .. '\4' .. tostring(n.active) .. '\4' .. tostring(n.navDesign or '') .. '\4'
     .. tostring(n.chimeEnabled) .. '\4' .. tostring(n.units or '') .. '\4' .. tostring(n.hideWorldMarkers) .. '\4'
-    .. tostring(n.northUp) .. '\4' .. tostring(n.maneuver or '') .. '\4' .. tostring(n.streetName or '') .. '\4'
+    .. tostring(n.northUp) .. '\4' .. tostring(n.minimapSize or '') .. '\4' .. tostring(n.maneuver or '') .. '\4' .. tostring(n.streetName or '') .. '\4'
     .. tostring(n.isHighwayExit) .. '\4' .. tostring(n.exitNum or '') .. '\4'
     .. tostring(n.distToTurnM or '') .. '\4'
     .. tostring(math.floor((tonumber(n.approachProgress) or 0) * 100 + 0.5)) .. '\4'

@@ -75,3 +75,8 @@ export function setHideWorldMarkers(flag) {
 export function setNorthUp(flag) {
   runAction(`beamngEarth_settings and beamngEarth_settings.uiNavSetNorthUp and beamngEarth_settings.uiNavSetNorthUp(${flag ? "true" : "false"}) or nil`)
 }
+
+export function setMinimapSize(size) {
+  const n = Math.max(180, Math.min(320, Math.round(Number(size) || 236)))
+  runAction(`beamngEarth_settings and beamngEarth_settings.uiNavSetMinimapSize and beamngEarth_settings.uiNavSetMinimapSize(${n}) or nil`)
+}

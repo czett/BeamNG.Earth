@@ -166,12 +166,19 @@ do
   N.setHideWorldMarkers(true)
   T.check(G.worldArrowsEnabled() == false, 'hideWorldMarkers disables gps 3D world arrows')
 
+  -- minimapSize bounds clamping (180..320) & persistence
+  T.check(N.uiState().minimapSize == 236, 'default minimapSize is 236')
+  T.check(N.setMinimapSize(120) == 180, 'minimapSize clamps low values to 180')
+  T.check(N.setMinimapSize(480) == 320, 'minimapSize clamps high values to 320')
+  T.check(N.setMinimapSize(264) == 264 and saved and saved.tbl.minimapSize == 264, 'minimapSize persisted at 264')
+
   -- Reload from saved prefs into fresh state
   N._resetForTest()
   T.check(N.loadPrefs() == true, 'loadPrefs succeeds')
   local st = N.uiState()
-  T.check(st.navDesign == 'ets_advisor' and st.chimeEnabled == false and st.units == 'imperial' and st.hideWorldMarkers == true,
-    'prefs round-trip preserved')
+  T.check(st.navDesign == 'ets_advisor' and st.chimeEnabled == false and st.units == 'imperial'
+    and st.hideWorldMarkers == true and st.minimapSize == 264,
+    'prefs round-trip preserved including minimapSize')
   N.setHideWorldMarkers(false)
   T.check(G.worldArrowsEnabled() == true, 'disabling hideWorldMarkers restores gps 3D world arrows')
 

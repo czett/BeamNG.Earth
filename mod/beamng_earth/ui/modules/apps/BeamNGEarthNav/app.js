@@ -151,22 +151,22 @@ angular.module('beamng.apps')
         '</div>' +
 
         // ============================================================
-        // DESIGN 2: round_minimap (Pure Vector <svg>, 60 FPS, Compact <= 250x275, Zero Shadow/Clipping)
+        // DESIGN 2: round_minimap (Pure Vector <svg>, 1:1 Minimap Palette, ResizeObserver + minimapSize)
         // ============================================================
         '<div ng-if="nav && nav.enabled && !hidden && nav.navDesign === \'round_minimap\'" ' +
-          'style="display:flex;flex-direction:column;align-items:center;width:246px;margin:0 auto;overflow:visible;">' +
+          'style="display:flex;flex-direction:column;align-items:center;width:100%;margin:0 auto;overflow:visible;">' +
 
           // Compact top control strip (24px) — outside circle, always clickable
-          '<div style="width:236px;display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
-            '<div style="padding:2px 7px;border-radius:var(--bng-corners-1,4px);background:rgba(15,18,22,0.78);border:1px solid rgba(255,255,255,0.16);color:#e4e8ef;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:148px;' + NUM + '">' +
+          '<div ng-style="{width: headerWidth + \'px\'}" style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
+            '<div style="padding:2px 7px;border-radius:var(--bng-corners-1,4px);background:rgba(8,10,14,0.76);border:1px solid rgba(255,255,255,0.12);color:#e4e8ef;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;' + NUM + '">' +
               '{{ nav.active ? (nav.isHighwayExit ? "AUTOBAHN EXIT" : "NAVIGATION") : (cardinalText + " " + headingText + " · " + speedText) }}' +
             '</div>' +
             CTRL_BAR +
           '</div>' +
 
           // Docked compact turn-by-turn banner (52px, only when active)
-          '<div ng-if="nav.active" ng-style="bannerStyle" ' +
-            'style="position:relative;width:236px;border-radius:var(--bng-corners-2,7px);padding:5px 9px 7px;color:#ffffff;border:1px solid rgba(255,255,255,0.18);margin-bottom:5px;overflow:hidden;box-sizing:border-box;">' +
+          '<div ng-if="nav.active" ng-style="dockBannerStyle" ' +
+            'style="position:relative;border-radius:var(--bng-corners-2,7px);padding:5px 9px 7px;color:#ffffff;border:1px solid rgba(255,255,255,0.16);margin-bottom:5px;overflow:hidden;box-sizing:border-box;">' +
             '<div style="display:flex;align-items:center;gap:8px;">' +
               svgPaths('nav.maneuver', 22) +
               '<div style="min-width:0;flex:1;">' +
@@ -182,33 +182,33 @@ angular.module('beamng.apps')
             '</div>' +
           '</div>' +
 
-          // Pure Vector <svg> circular minimap (172px when active, 192px when idle — fits cleanly within 250x275!)
+          // Pure Vector <svg> circular minimap (scales dynamically from 160px..360px, default 236px)
           '<div ng-style="{width: mapDiameter + \'px\', height: mapDiameter + \'px\'}" ' +
             'style="position:relative;overflow:visible;flex-shrink:0;">' +
             '<svg class="bng-nav-minimap-svg" viewBox="0 0 200 200" ' +
               'ng-attr-width="{{ mapDiameter }}" ng-attr-height="{{ mapDiameter }}" ' +
               'style="display:block;overflow:visible;">' +
               '<defs>' +
-                '<clipPath id="bngNavCircleClip"><circle cx="100" cy="100" r="98"/></clipPath>' +
+                '<clipPath id="bngNavCircleClip"><circle cx="100" cy="100" r="98.5"/></clipPath>' +
               '</defs>' +
-              // Translucent dark glass circle (no box-shadow, no filter)
-              '<circle cx="100" cy="100" r="98" fill="rgba(15,18,22,0.56)" stroke="rgba(255,255,255,0.18)" stroke-width="1.5"/>' +
+              // Deep translucent black glass circle + ultra-subtle hairline border (exact native minimap look)
+              '<circle cx="100" cy="100" r="98.5" fill="rgba(8,10,14,0.52)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>' +
               // Clipped vector map group
               '<g clip-path="url(#bngNavCircleClip)">' +
                 '<g class="bng-nav-world" transform="translate(100,108)">' +
                   // Road casings by class (world-space paths, non-scaling-stroke)
-                  '<path class="bng-nav-rc3" fill="none" stroke="rgba(0,0,0,0.68)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-rc2" fill="none" stroke="rgba(0,0,0,0.72)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc3" fill="none" stroke="rgba(0,0,0,0.68)" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc2" fill="none" stroke="rgba(0,0,0,0.72)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
                   '<path class="bng-nav-rc1" fill="none" stroke="rgba(0,0,0,0.76)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-rc0" fill="none" stroke="rgba(0,0,0,0.8)" stroke-width="7.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  // Road fills by class
-                  '<path class="bng-nav-rf3" fill="none" stroke="rgba(132,122,108,0.68)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-rf2" fill="none" stroke="rgba(162,172,186,0.78)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-rf1" fill="none" stroke="rgba(212,220,230,0.9)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-rf0" fill="none" stroke="rgba(236,241,248,0.96)" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  // Zero-lag active route: crisp white outer casing + BeamNG.Earth blue core
-                  '<path class="bng-nav-route-bg" fill="none" stroke="#ffffff" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
-                  '<path class="bng-nav-route-fg" fill="none" stroke="#1a8cff" stroke-width="5.0" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc0" fill="none" stroke="rgba(0,0,0,0.80)" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  // Distinct road-class fills: crisp off-white primary/highway, warm sand/taupe minor/service roads
+                  '<path class="bng-nav-rf3" fill="none" stroke="#8e8878" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf2" fill="none" stroke="#a8a292" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf1" fill="none" stroke="#e4e6eb" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf0" fill="none" stroke="#e4e6eb" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  // Exact royal blue route (#1664f6, 4.2px) over crisp white casing (#ffffff, 6.2px)
+                  '<path class="bng-nav-route-bg" fill="none" stroke="#ffffff" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-route-fg" fill="none" stroke="#1664f6" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
                 '</g>' +
                 // Sleek rounded orange-with-white-border player chevron (rotated by vehHeading - camHeading)
                 '<g class="bng-nav-arrow" transform="translate(100,108) rotate(0)">' +
@@ -217,7 +217,7 @@ angular.module('beamng.apps')
                 '</g>' +
                 // North compass marker on inner rim (moves with camera rotation)
                 '<g class="bng-nav-north" transform="translate(100,14)">' +
-                  '<circle cx="0" cy="0" r="8.5" fill="rgba(15,18,22,0.82)"/>' +
+                  '<circle cx="0" cy="0" r="8.5" fill="rgba(8,10,14,0.78)"/>' +
                   '<text x="0" y="0.6" text-anchor="middle" dominant-baseline="central" fill="#ff6600" ' +
                     'font-family="Overpass, sans-serif" font-size="10" font-weight="800">N</text>' +
                 '</g>' +
@@ -225,13 +225,13 @@ angular.module('beamng.apps')
             '</svg>' +
 
             // Crisp vector 32px speed-limit badge tucked cleanly at bottom-left rim (never clipped)
-            '<div ng-if="limitBadgeText" style="position:absolute;bottom:6px;left:0;z-index:4;">' +
+            '<div ng-if="limitBadgeText" style="position:absolute;bottom:6px;left:2px;z-index:4;">' +
               speedSignSvg(32) +
             '</div>' +
 
             // Bottom distance / street pill overlapping lower rim inside bounding box (bottom: 4px)
             '<div style="position:absolute;left:0;right:0;bottom:4px;display:flex;justify-content:center;pointer-events:none;z-index:4;">' +
-              '<div style="max-width:138px;padding:2px 8px;border-radius:10px;background:rgba(15,18,22,0.88);border:1px solid rgba(255,255,255,0.18);color:#f4f6f8;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' + NUM + '">' +
+              '<div style="max-width:74%;padding:2px 9px;border-radius:10px;background:rgba(8,10,14,0.84);border:1px solid rgba(255,255,255,0.14);color:#f4f6f8;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' + NUM + '">' +
                 '{{ nav.active ? (remText + " · " + etaText) : cruiseTitle }}' +
               '</div>' +
             '</div>' +
@@ -303,16 +303,23 @@ angular.module('beamng.apps')
       scope.cardinalText = 'N'
       scope.headingText = '000°'
       scope.speedText = '0 km/h'
-      scope.mapDiameter = 192
+      scope.mapDiameter = 236
+      scope.headerWidth = 236
       scope.limitBadgeText = ''
       scope.limitSvgFill = '#262b33'
       scope.limitSvgStroke = '#48515e'
       scope.limitSvgText = '#9aa2b0'
       scope.bannerStyle = { background: '#14532d' }
+      scope.dockBannerStyle = { background: '#14532d', width: '236px' }
       scope.subBannerStyle = { background: '#0e3c20' }
 
       var lastChimeSeq = -1
       var audioCtx = null
+
+      // ResizeObserver state for UI Apps editor drag-resizing (160px..360px)
+      var boxW = 0
+      var boxH = 0
+      var resizeObs = null
 
       // High-FPS pose & smooth interpolation state for 60-FPS requestAnimationFrame loop
       var poseInitialized = false
@@ -607,6 +614,27 @@ angular.module('beamng.apps')
         }
       }
 
+      function recomputeMapSize () {
+        var nav = scope.nav
+        var pref = Math.max(180, Math.min(320, Math.round(Number(nav && nav.minimapSize) || 236)))
+        var overhead = (nav && nav.active) ? 86 : 30
+        var diam = pref
+        if (boxW > 80 && boxH > 80) {
+          var avail = Math.floor(Math.min(boxW - 6, boxH - overhead))
+          if (avail > pref + 12) {
+            // Dragged larger in UI Apps editor: scale smoothly up to 360px
+            diam = Math.min(360, avail)
+          } else if (avail < pref) {
+            // Container is smaller than preference: fit cleanly without clipping
+            diam = Math.max(160, avail)
+          }
+        }
+        scope.mapDiameter = Math.max(160, Math.min(360, diam))
+        scope.headerWidth = Math.max(216, Math.min(340, scope.mapDiameter))
+        var bg = (nav && nav.isHighwayExit) ? '#0b4f8c' : '#14532d'
+        scope.dockBannerStyle = { background: bg, width: scope.headerWidth + 'px' }
+      }
+
       function applyNav (nav) {
         scope.nav = nav || null
         if (!nav) {
@@ -616,7 +644,6 @@ angular.module('beamng.apps')
 
         var design = nav.navDesign || 'gmaps_card'
         scope.designBadge = design === 'gmaps_card' ? '1/3' : (design === 'round_minimap' ? '2/3' : '3/3')
-        scope.mapDiameter = nav.active ? 172 : 192
 
         if (nav.isHighwayExit) {
           scope.bannerStyle = { background: '#0b4f8c' }
@@ -625,6 +652,7 @@ angular.module('beamng.apps')
           scope.bannerStyle = { background: '#14532d' }
           scope.subBannerStyle = { background: '#0d3b20' }
         }
+        recomputeMapSize()
 
         scope.distText = formatDist(nav.distToTurnM, nav.units)
         scope.remText = formatDist(nav.remainingM, nav.units)
@@ -702,6 +730,23 @@ angular.module('beamng.apps')
       }
 
       unclip()
+      if (typeof window.ResizeObserver === 'function' && element && element[0]) {
+        try {
+          resizeObs = new window.ResizeObserver(function (entries) {
+            if (!entries || !entries.length) return
+            var cr = entries[0].contentRect
+            if (!cr) return
+            var nw = Math.round(cr.width)
+            var nh = Math.round(cr.height)
+            if (nw !== boxW || nh !== boxH) {
+              boxW = nw
+              boxH = nh
+              scope.$evalAsync(function () { recomputeMapSize() })
+            }
+          })
+          resizeObs.observe(element[0])
+        } catch (e) {}
+      }
       bngApi.engineLua('if beamngEarth_core then beamngEarth_core.hudApp("nav", true) end')
       bngApi.engineLua('if beamngEarth_turnByTurn and beamngEarth_turnByTurn.uiState then return beamngEarth_turnByTurn.uiState() end', function (st) {
         if (st && typeof st === 'object') {
@@ -745,6 +790,10 @@ angular.module('beamng.apps')
       })
 
       scope.$on('$destroy', function () {
+        if (resizeObs) {
+          try { resizeObs.disconnect() } catch (e) {}
+          resizeObs = null
+        }
         if (rafId) {
           window.cancelAnimationFrame(rafId)
           rafId = null

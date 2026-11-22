@@ -80,6 +80,20 @@
             <template #label>North-Up Round Minimap</template>
             <BngSwitch :modelValue="st.northUp === true" @update:modelValue="val => setNorthUp(val)" />
           </BngRow>
+
+          <BngRow class="nv-row">
+            <template #label>
+              <span>Round Minimap Size <span class="nv-num">({{ st.minimapSize ?? 236 }} px)</span></span>
+            </template>
+            <BngSlider
+              :min="180"
+              :max="320"
+              :step="8"
+              :modelValue="Number(st.minimapSize ?? 236)"
+              @update:modelValue="val => setMinimapSize(val)"
+              :with-input="true"
+            />
+          </BngRow>
         </div>
       </div>
     </BngCard>
@@ -94,11 +108,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted } from "vue"
 import {
-  BngCard, BngCardHeading, BngButton, BngSwitch, BngSelect, BngRow, BngPill, ACCENTS,
+  BngCard, BngCardHeading, BngButton, BngSwitch, BngSelect, BngSlider, BngRow, BngPill, ACCENTS,
 } from "@/common/components/base"
 import {
   navState, navError, start, stop,
-  setEnabled, setDesign, cycleDesign, setChimeEnabled, setUnits, setHideWorldMarkers, setNorthUp,
+  setEnabled, setDesign, cycleDesign, setChimeEnabled, setUnits, setHideWorldMarkers, setNorthUp, setMinimapSize,
 } from "./earthNavStore.js"
 
 onMounted(start)
