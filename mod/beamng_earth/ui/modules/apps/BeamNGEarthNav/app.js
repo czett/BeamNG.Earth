@@ -182,20 +182,20 @@ angular.module('beamng.apps')
           '</div>' +
 
           // Circular map container: outer wrapper is overflow:visible so speed sign & bottom pill are NEVER clipped
-          '<div style="position:relative;width:204px;height:204px;overflow:visible;">' +
-            // Circular clipping applies ONLY to the canvas shell
-            '<div style="width:204px;height:204px;border-radius:50%;overflow:hidden;background:#151921;border:2px solid rgba(255,255,255,0.24);box-shadow:0 6px 20px rgba(0,0,0,0.58);box-sizing:border-box;">' +
-              '<canvas class="bng-nav-minimap-canvas" width="204" height="204" style="width:204px;height:204px;display:block;"></canvas>' +
+          '<div style="position:relative;width:196px;height:196px;overflow:visible;flex-shrink:0;">' +
+            // Circular clipping applies ONLY to the translucent canvas shell (no opaque fill)
+            '<div style="width:196px;height:196px;border-radius:50%;overflow:hidden;background:transparent;border:2px solid rgba(255,255,255,0.22);box-shadow:0 4px 18px rgba(0,0,0,0.45);box-sizing:border-box;">' +
+              '<canvas class="bng-nav-minimap-canvas" width="196" height="196" style="width:196px;height:196px;display:block;"></canvas>' +
             '</div>' +
 
             // 36px speed limit sign positioned cleanly on the lower-left rim (unclipped!)
-            '<div ng-if="limitBadgeText" style="position:absolute;bottom:10px;left:-8px;z-index:4;">' +
+            '<div ng-if="limitBadgeText" style="position:absolute;bottom:8px;left:-8px;z-index:4;">' +
               SPEED_SIGN +
             '</div>' +
 
             // Bottom distance / street pill (flex-centered without subpixel transform blur)
-            '<div style="position:absolute;left:0;right:0;bottom:-8px;display:flex;justify-content:center;pointer-events:none;z-index:4;">' +
-              '<div style="max-width:176px;padding:3px 10px;border-radius:11px;background:rgba(15,18,24,0.92);border:1px solid rgba(255,255,255,0.2);color:#f4f6f8;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 8px rgba(0,0,0,0.5);' + NUM + '">' +
+            '<div style="position:absolute;left:0;right:0;bottom:-6px;display:flex;justify-content:center;pointer-events:none;z-index:4;">' +
+              '<div style="max-width:170px;padding:3px 10px;border-radius:11px;background:rgba(15,18,24,0.88);border:1px solid rgba(255,255,255,0.2);color:#f4f6f8;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 8px rgba(0,0,0,0.45);' + NUM + '">' +
                 '{{ nav.active ? (remText + " · " + etaText) : cruiseTitle }}' +
               '</div>' +
             '</div>' +
@@ -278,8 +278,8 @@ angular.module('beamng.apps')
 
       // High-FPS pose & smooth interpolation state for 60-FPS requestAnimationFrame loop
       var poseInitialized = false
-      var targetPose = { x: 0, y: 0, headingRad: 0, speedKph: 0 }
-      var renderPose = { x: 0, y: 0, headingRad: 0, speedKph: 0 }
+      var targetPose = { x: 0, y: 0, vehHeadingRad: 0, camHeadingRad: 0, speedKph: 0 }
+      var renderPose = { x: 0, y: 0, vehHeadingRad: 0, camHeadingRad: 0, speedKph: 0 }
       var rafId = null
       var lastRafMs = 0
       var cachedCanvas = null
@@ -394,7 +394,7 @@ angular.module('beamng.apps')
         } catch (e) {}
       }
 
-      // 60-FPS HiDPI Canvas renderer for 'round_minimap'
+      // 60-FPS HiDPI Canvas renderer for 'round_minimap' (native glass backdrop, camera-pan rotation, zero-lag route)
       function drawRoundMinimap () {
         var nav = scope.nav
         if (!nav || !nav.enabled || scope.hidden || nav.navDesign !== 'round_minimap') return
@@ -407,7 +407,7 @@ angular.module('beamng.apps')
         var canvas = cachedCanvas
         if (!canvas || !canvas.getContext) return
 
-        var cssSize = 204
+        var cssSize = 196
         var dpr = Math.min(3, window.devicePixelRatio || 1)
         if (cachedDpr !== dpr) {
           canvas.width = Math.round(cssSize * dpr)
@@ -421,16 +421,18 @@ angular.module('beamng.apps')
         var w = cssSize
         var h = cssSize
         var cx = w * 0.5
-        var cy = h * 0.55
+        var cy = h * 0.54
         var radius = w * 0.5
 
         var spd = renderPose.speedKph
         var viewM = Math.max(155, Math.min(380, 155 + spd * 1.7))
         var pxPerM = (w * 0.46) / viewM
-        var hdgRad = renderPose.headingRad
-        var rot = nav.northUp ? 0 : -hdgRad
-        var cosR = Math.cos(rot)
-        var sinR = Math.sin(rot)
+        var mapRot = nav.northUp ? 0 : -renderPose.camHeadingRad
+        var arrowRot = nav.northUp
+          ? renderPose.vehHeadingRad
+          : (renderPose.vehHeadingRad - renderPose.camHeadingRad)
+        var cosR = Math.cos(mapRot)
+        var sinR = Math.sin(mapRot)
         var px = renderPose.x
         var py = renderPose.y
 
@@ -440,28 +442,18 @@ angular.module('beamng.apps')
         ctx.arc(w * 0.5, h * 0.5, radius, 0, Math.PI * 2)
         ctx.clip()
 
-        // Crisp dark slate map ground
-        ctx.fillStyle = '#151921'
+        // Semi-transparent dark glass backdrop matching native BeamNG minimap
+        ctx.fillStyle = 'rgba(16, 19, 24, 0.58)'
         ctx.fillRect(0, 0, w, h)
 
-        // Subtle radar range rings
-        ctx.strokeStyle = 'rgba(255,255,255,0.055)'
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.arc(cx, cy, w * 0.22, 0, Math.PI * 2)
-        ctx.stroke()
-        ctx.beginPath()
-        ctx.arc(cx, cy, w * 0.41, 0, Math.PI * 2)
-        ctx.stroke()
-
-        // Full road network (two-pass: dark casings, then road fills by class)
+        // Full road network (two-pass: dark casings, then native road fills by class)
         var roads = nav.miniRoads
         if (Array.isArray(roads) && roads.length >= 5) {
           ctx.lineCap = 'round'
           ctx.lineJoin = 'round'
 
-          // Pass 1: dark road casings
-          ctx.strokeStyle = 'rgba(7,9,13,0.88)'
+          // Pass 1: dark translucent road casings
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)'
           for (var i = 0; i < roads.length; i += 5) {
             var dx1 = roads[i] - px
             var dy1 = roads[i + 1] - py
@@ -472,7 +464,7 @@ angular.module('beamng.apps')
             var sy1 = cy - (dx1 * sinR + dy1 * cosR) * pxPerM
             var sx2 = cx + (dx2 * cosR - dy2 * sinR) * pxPerM
             var sy2 = cy - (dx2 * sinR + dy2 * cosR) * pxPerM
-            ctx.lineWidth = cls === 0 ? 7.0 : (cls === 1 ? 5.6 : (cls === 2 ? 4.0 : 2.8))
+            ctx.lineWidth = cls === 0 ? 7.2 : (cls === 1 ? 5.6 : (cls === 2 ? 4.0 : 2.8))
             ctx.beginPath()
             ctx.moveTo(sx1, sy1)
             ctx.lineTo(sx2, sy2)
@@ -491,16 +483,16 @@ angular.module('beamng.apps')
             var rsx2 = cx + (rdx2 * cosR - rdy2 * sinR) * pxPerM
             var rsy2 = cy - (rdx2 * sinR + rdy2 * cosR) * pxPerM
             if (rcls === 0) {
-              ctx.strokeStyle = '#dce3ee'
-              ctx.lineWidth = 4.6
+              ctx.strokeStyle = 'rgba(232, 237, 245, 0.92)'
+              ctx.lineWidth = 4.8
             } else if (rcls === 1) {
-              ctx.strokeStyle = '#b9c4d4'
+              ctx.strokeStyle = 'rgba(206, 214, 226, 0.86)'
               ctx.lineWidth = 3.5
             } else if (rcls === 2) {
-              ctx.strokeStyle = '#8b96a8'
+              ctx.strokeStyle = 'rgba(154, 164, 178, 0.72)'
               ctx.lineWidth = 2.2
             } else {
-              ctx.strokeStyle = '#70685c'
+              ctx.strokeStyle = 'rgba(128, 118, 104, 0.62)'
               ctx.lineWidth = 1.4
             }
             ctx.beginPath()
@@ -510,25 +502,56 @@ angular.module('beamng.apps')
           }
         }
 
-        // Signature BeamNG.Earth Blue Route Line with Crisp White Casing
+        // Zero-Lag Signature BeamNG.Earth Blue Route Line with Crisp White Casing:
+        // Project (px, py) onto closest route segment and trim passed vertices at 60 FPS.
         var rpts = nav.miniRoute
         if (Array.isArray(rpts) && rpts.length >= 4) {
+          var bestSeg = 0
+          var bestDistSq = Infinity
+          var projX = rpts[0]
+          var projY = rpts[1]
+          for (var s = 0; s < rpts.length - 2; s += 2) {
+            var ax = rpts[s]
+            var ay = rpts[s + 1]
+            var bx = rpts[s + 2]
+            var by = rpts[s + 3]
+            var abx = bx - ax
+            var aby = by - ay
+            var l2 = abx * abx + aby * aby
+            var t = l2 > 1e-6 ? Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / l2)) : 0
+            var qx = ax + t * abx
+            var qy = ay + t * aby
+            var d2 = (qx - px) * (qx - px) + (qy - py) * (qy - py)
+            if (d2 < bestDistSq) {
+              bestDistSq = d2
+              bestSeg = s
+              projX = qx
+              projY = qy
+            }
+          }
+
+          // Start directly at player position when within 14 m of route so line never lags behind chevron
+          var startX = bestDistSq <= 196 ? px : projX
+          var startY = bestDistSq <= 196 ? py : projY
+
           ctx.lineCap = 'round'
           ctx.lineJoin = 'round'
           ctx.beginPath()
-          for (var k = 0; k < rpts.length; k += 2) {
+          var srx = startX - px
+          var sry = startY - py
+          ctx.moveTo(cx + (srx * cosR - sry * sinR) * pxPerM, cy - (srx * sinR + sry * cosR) * pxPerM)
+          for (var k = bestSeg + 2; k < rpts.length; k += 2) {
             var rrx = rpts[k] - px
             var rry = rpts[k + 1] - py
             var psx = cx + (rrx * cosR - rry * sinR) * pxPerM
             var psy = cy - (rrx * sinR + rry * cosR) * pxPerM
-            if (k === 0) ctx.moveTo(psx, psy)
-            else ctx.lineTo(psx, psy)
+            ctx.lineTo(psx, psy)
           }
           // Outer dark shadow for contrast
-          ctx.strokeStyle = 'rgba(0,0,0,0.45)'
-          ctx.lineWidth = 11.2
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.42)'
+          ctx.lineWidth = 11.0
           ctx.stroke()
-          // Crisp white casing border
+          // Crisp white border casing
           ctx.strokeStyle = '#ffffff'
           ctx.lineWidth = 8.4
           ctx.stroke()
@@ -538,36 +561,35 @@ angular.module('beamng.apps')
           ctx.stroke()
         }
 
-        // Crisp HiDPI player arrow chevron
+        // Sleek rounded orange-with-crisp-white-border player chevron (rotated relative to camera!)
         ctx.save()
         ctx.translate(cx, cy)
-        if (nav.northUp) ctx.rotate(hdgRad)
-        ctx.fillStyle = '#ffffff'
-        ctx.strokeStyle = '#0c1017'
-        ctx.lineWidth = 2.0
+        ctx.rotate(arrowRot)
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
+        ctx.shadowBlur = 4
+        ctx.shadowOffsetY = 1
+        ctx.fillStyle = '#ff6600'
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 2.2
+        ctx.lineJoin = 'round'
         ctx.beginPath()
-        ctx.moveTo(0, -10)
-        ctx.lineTo(7, 7.5)
-        ctx.lineTo(0, 4)
-        ctx.lineTo(-7, 7.5)
+        ctx.moveTo(0, -10.5)
+        ctx.quadraticCurveTo(2.4, -5.0, 7.6, 6.2)
+        ctx.quadraticCurveTo(8.2, 8.2, 6.2, 7.4)
+        ctx.quadraticCurveTo(1.6, 4.6, 0, 4.4)
+        ctx.quadraticCurveTo(-1.6, 4.6, -6.2, 7.4)
+        ctx.quadraticCurveTo(-8.2, 8.2, -7.6, 6.2)
+        ctx.quadraticCurveTo(-2.4, -5.0, 0, -10.5)
         ctx.closePath()
         ctx.fill()
+        ctx.shadowColor = 'transparent'
         ctx.stroke()
-        // Blue center nose accent
-        ctx.fillStyle = '#1a8cff'
-        ctx.beginPath()
-        ctx.moveTo(0, -6.5)
-        ctx.lineTo(3, 2.5)
-        ctx.lineTo(0, 1)
-        ctx.lineTo(-3, 2.5)
-        ctx.closePath()
-        ctx.fill()
         ctx.restore()
 
-        // North compass marker on inner rim
-        var nx = w * 0.5 + Math.sin(rot) * (radius - 13)
-        var ny = h * 0.5 - Math.cos(rot) * (radius - 13)
-        ctx.fillStyle = 'rgba(15,18,24,0.82)'
+        // North compass marker on inner rim (rotates with camera pan)
+        var nx = w * 0.5 + Math.sin(mapRot) * (radius - 13)
+        var ny = h * 0.5 - Math.cos(mapRot) * (radius - 13)
+        ctx.fillStyle = 'rgba(15, 18, 24, 0.78)'
         ctx.beginPath()
         ctx.arc(nx, ny, 8.5, 0, Math.PI * 2)
         ctx.fill()
@@ -591,16 +613,17 @@ angular.module('beamng.apps')
         var dx = targetPose.x - renderPose.x
         var dy = targetPose.y - renderPose.y
         if (dx * dx + dy * dy > 14400) {
-          // Teleport / rebase snap
           renderPose.x = targetPose.x
           renderPose.y = targetPose.y
-          renderPose.headingRad = targetPose.headingRad
+          renderPose.vehHeadingRad = targetPose.vehHeadingRad
+          renderPose.camHeadingRad = targetPose.camHeadingRad
           renderPose.speedKph = targetPose.speedKph
         } else {
-          var alpha = 1 - Math.exp(-dt * 18)
+          var alpha = 1 - Math.exp(-dt * 20)
           renderPose.x += dx * alpha
           renderPose.y += dy * alpha
-          renderPose.headingRad += shortestAngleDiff(renderPose.headingRad, targetPose.headingRad) * alpha
+          renderPose.vehHeadingRad += shortestAngleDiff(renderPose.vehHeadingRad, targetPose.vehHeadingRad) * alpha
+          renderPose.camHeadingRad += shortestAngleDiff(renderPose.camHeadingRad, targetPose.camHeadingRad) * alpha
           renderPose.speedKph += (targetPose.speedKph - renderPose.speedKph) * alpha
         }
 
@@ -662,9 +685,12 @@ angular.module('beamng.apps')
           poseInitialized = true
           targetPose.x = renderPose.x = Number(nav.playerX) || 0
           targetPose.y = renderPose.y = Number(nav.playerY) || 0
-          var hr = Number(nav.headingRad)
-          if (isNaN(hr)) hr = ((Number(nav.headingDeg) || 0) * Math.PI) / 180
-          targetPose.headingRad = renderPose.headingRad = hr
+          var vr = Number(nav.vehHeadingRad != null ? nav.vehHeadingRad : nav.headingRad)
+          if (isNaN(vr)) vr = ((Number(nav.headingDeg) || 0) * Math.PI) / 180
+          var cr = Number(nav.camHeadingRad != null ? nav.camHeadingRad : vr)
+          if (isNaN(cr)) cr = vr
+          targetPose.vehHeadingRad = renderPose.vehHeadingRad = vr
+          targetPose.camHeadingRad = renderPose.camHeadingRad = cr
           targetPose.speedKph = renderPose.speedKph = Number(nav.speedKph) || 0
         }
 
@@ -728,13 +754,18 @@ angular.module('beamng.apps')
         if (!pose) return
         targetPose.x = Number(pose.x) || 0
         targetPose.y = Number(pose.y) || 0
-        targetPose.headingRad = Number(pose.headingRad) || 0
+        var vr = Number(pose.vehHeadingRad != null ? pose.vehHeadingRad : pose.headingRad) || 0
+        var cr = Number(pose.camHeadingRad != null ? pose.camHeadingRad : vr)
+        if (isNaN(cr)) cr = vr
+        targetPose.vehHeadingRad = vr
+        targetPose.camHeadingRad = cr
         targetPose.speedKph = Number(pose.speedKph) || 0
         if (!poseInitialized) {
           poseInitialized = true
           renderPose.x = targetPose.x
           renderPose.y = targetPose.y
-          renderPose.headingRad = targetPose.headingRad
+          renderPose.vehHeadingRad = targetPose.vehHeadingRad
+          renderPose.camHeadingRad = targetPose.camHeadingRad
           renderPose.speedKph = targetPose.speedKph
         }
         // Keep text compass/speed crisp at ~12 Hz without overloading Angular $digest

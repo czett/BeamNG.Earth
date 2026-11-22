@@ -84,6 +84,8 @@ local state = {
   playerX = 0,
   playerY = 0,
   headingRad = 0,
+  vehHeadingRad = 0,
+  camHeadingRad = 0,
   headingDeg = 0,
   speedMs = 0,
   speedKph = 0,
@@ -874,6 +876,39 @@ function M.computeHeading(veh, player, prevHeadingRad)
   return rad, deg
 end
 
+-- Pure: active camera horizontal look heading (radians clockwise from North +y).
+-- Reads core_camera.getForwardXYZ() / getForward() so right-click camera orbit/pan rotates the minimap live.
+function M.computeCameraHeading(cam, fallbackRad)
+  local fx, fy = nil, nil
+  if type(cam) == 'table' then
+    if type(cam.getForwardXYZ) == 'function' then
+      local ok, x, y = pcall(cam.getForwardXYZ)
+      if ok and isFinite(x) and isFinite(y) and (x * x + y * y) > 1e-4 then
+        fx, fy = x, y
+      end
+    end
+    if not fx and type(cam.getForward) == 'function' then
+      local ok, d = pcall(cam.getForward)
+      if ok and d and isFinite(d.x) and isFinite(d.y) and (d.x * d.x + d.y * d.y) > 1e-4 then
+        fx, fy = d.x, d.y
+      end
+    end
+    if not fx and type(cam.getCameraDataById) == 'function' then
+      local ok, data = pcall(cam.getCameraDataById)
+      local d = ok and type(data) == 'table' and (data.forward or data.dir)
+      if d and isFinite(d.x) and isFinite(d.y) and (d.x * d.x + d.y * d.y) > 1e-4 then
+        fx, fy = d.x, d.y
+      end
+    end
+  end
+  if fx and fy then
+    local rad = math.atan2(fx, fy)
+    if rad < 0 then rad = rad + math.pi * 2 end
+    return rad
+  end
+  return isFinite(fallbackRad) and fallbackRad or 0
+end
+
 -- High-rate (60 Hz) pose emitter called every frame from core.lua while BeamNGEarthNav is mounted.
 function M.onFrame(player, clock)
   if not state.enabled or not player then return false end
@@ -887,10 +922,12 @@ function M.onFrame(player, clock)
   local vy = tonumber(player.vy) or 0
   local speedMs = tonumber(player.speed) or math.sqrt(vx * vx + vy * vy)
   local veh = rawget(_G, 'getPlayerVehicle') and getPlayerVehicle(0) or nil
-  local hRad, hDeg = M.computeHeading(veh, player, state.headingRad)
+  local vehRad, hDeg = M.computeHeading(veh, player, state.vehHeadingRad or state.headingRad)
+  local camRad = state.northUp and 0 or M.computeCameraHeading(rawget(_G, 'core_camera'), vehRad)
 
   state.playerX, state.playerY = px, py
-  state.headingRad, state.headingDeg = hRad, hDeg
+  state.vehHeadingRad, state.camHeadingRad = vehRad, camRad
+  state.headingRad, state.headingDeg = vehRad, hDeg
   state.speedMs = speedMs
   state.speedKph = math.floor(speedMs * 3.6 + 0.5)
 
@@ -899,7 +936,9 @@ function M.onFrame(player, clock)
     gh.trigger('BeamNGEarthNavPose', {
       x = px,
       y = py,
-      headingRad = hRad,
+      vehHeadingRad = vehRad,
+      camHeadingRad = camRad,
+      headingRad = vehRad,
       headingDeg = hDeg,
       speedMs = speedMs,
       speedKph = state.speedKph,
@@ -947,10 +986,13 @@ local function readTelemetry(player)
   state.speedMs = speedMs
   state.speedKph = math.floor(speedMs * 3.6 + 0.5)
 
-  -- True chassis forward heading (never flips on reverse or idle)
+  -- True chassis forward heading & active camera look heading
   local veh = rawget(_G, 'getPlayerVehicle') and getPlayerVehicle(0) or nil
-  local hRad, hDeg = M.computeHeading(veh, player, state.headingRad)
-  state.headingRad = hRad
+  local vehRad, hDeg = M.computeHeading(veh, player, state.vehHeadingRad or state.headingRad)
+  local camRad = state.northUp and 0 or M.computeCameraHeading(rawget(_G, 'core_camera'), vehRad)
+  state.vehHeadingRad = vehRad
+  state.camHeadingRad = camRad
+  state.headingRad = vehRad
   state.headingDeg = hDeg
 
   -- Current street, town & coordinates
@@ -1181,6 +1223,8 @@ function M.hudPayload()
     playerX = state.playerX,
     playerY = state.playerY,
     headingRad = state.headingRad,
+    vehHeadingRad = state.vehHeadingRad,
+    camHeadingRad = state.camHeadingRad,
     headingDeg = state.headingDeg,
     speedMs = state.speedMs,
     speedKph = state.speedKph,
@@ -1225,6 +1269,8 @@ function M._resetForTest()
   state.playerX = 0
   state.playerY = 0
   state.headingRad = 0
+  state.vehHeadingRad = 0
+  state.camHeadingRad = 0
   state.headingDeg = 0
   state.speedMs = 0
   state.speedKph = 0
