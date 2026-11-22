@@ -201,4 +201,66 @@ do
   jsonWriteFile, jsonReadFile = nil, nil
 end
 
+------------------------------------------------------------------------------------------
+-- 7. Always-visible idle state, true forward-vector heading (no reverse flip) & 60 Hz pose
+------------------------------------------------------------------------------------------
+do
+  N._resetForTest()
+  -- Idle payload is always enabled with cruise telemetry even when active == false
+  local idle = N.hudPayload()
+  T.check(idle.enabled == true and idle.active == false, 'always-visible idle state: enabled=true, active=false')
+  T.check(idle.playerX == 0 and idle.playerY == 0 and idle.headingRad == 0 and idle.roadsSeq == 0,
+    'idle payload exposes playerX, playerY, headingRad, roadsSeq')
+
+  -- Vehicle facing North (0, 1) while reversing South (vx=0, vy=-12) MUST keep heading 0 deg (North)
+  local revVeh = { getDirectionVector = function() return { x = 0, y = 1, z = 0 } end }
+  local rRad, rDeg = N.computeHeading(revVeh, { vx = 0, vy = -12, speed = 12 }, math.rad(180))
+  T.check(rDeg == 0 and math.abs(rRad) < 1e-4, 'reversing car keeps true chassis forward heading (0 deg, not 180)')
+
+  -- Vehicle facing East (1, 0) at 0 km/h produces 90 deg
+  local idleVeh = { getDirectionVector = function() return { x = 1, y = 0, z = 0 } end }
+  local eRad, eDeg = N.computeHeading(idleVeh, { vx = 0, vy = 0, speed = 0 }, 0)
+  T.check(eDeg == 90 and math.abs(eRad - math.pi * 0.5) < 1e-4, 'idle car facing East produces 90 deg')
+
+  -- Missing direction vector retains previous heading instead of flipping to reverse velocity
+  local keepRad, keepDeg = N.computeHeading(nil, { vx = 0, vy = -8, speed = 8 }, math.rad(45))
+  T.check(keepDeg == 45 and math.abs(keepRad - math.rad(45)) < 1e-4, 'no forward vector retains previous heading, never velocity')
+
+  -- 60-Hz pose hook (BeamNGEarthNavPose) emission & throttling
+  local poses = {}
+  guihooks = { trigger = function(name, p) if name == 'BeamNGEarthNavPose' then poses[#poses + 1] = p end end }
+  getPlayerVehicle = function() return revVeh end
+  T.check(N.onFrame({ x = 100.5, y = 200.25, vx = 0, vy = -10, speed = 10 }, 1.000) == true, 'onFrame emits first 60 Hz pose')
+  T.check(#poses == 1 and poses[1].x == 100.5 and poses[1].y == 200.25 and poses[1].headingDeg == 0 and poses[1].speedKph == 36,
+    'BeamNGEarthNavPose carries exact x, y, true forward headingDeg=0, speedKph=36')
+  T.check(N.onFrame({ x = 101, y = 200, vx = 0, vy = -10, speed = 10 }, 1.005) == false and #poses == 1,
+    'onFrame throttles within 1/60 s')
+  T.check(N.onFrame({ x = 101, y = 199, vx = 0, vy = -10, speed = 10 }, 1.020) == true and #poses == 2,
+    'onFrame emits again after 1/60 s')
+  getPlayerVehicle = nil
+
+  -- hudapps.lua re-emits when currentPlace or roadsSeq updates
+  local sent = {}
+  guihooks = { trigger = function(name, p) sent[#sent + 1] = { name = name, p = p } end }
+  H._reset()
+  H.setMounted('nav', true)
+  local seq = 0
+  local function getIdle()
+    seq = seq + 1
+    return {
+      status = '', credits = '', banner = { text = '', level = 'info', visible = false },
+      nav = {
+        enabled = true, active = false, navDesign = 'round_minimap',
+        currentStreet = 'Hauptstraße', currentPlace = seq == 1 and 'Sindelsdorf' or 'Penzberg',
+        roadsSeq = seq, playerX = 100, playerY = 200, headingRad = 0,
+      },
+    }
+  end
+  T.check(H.update(1.0, getIdle) and #sent == 1 and sent[1].p.nav.currentPlace == 'Sindelsdorf' and sent[1].p.nav.roadsSeq == 1,
+    'hudapps forwards idle cruise currentPlace and roadsSeq')
+  T.check(H.update(1.4, getIdle) and #sent == 2 and sent[2].p.nav.currentPlace == 'Penzberg' and sent[2].p.nav.roadsSeq == 2,
+    'hudapps re-emits when currentPlace or roadsSeq changes')
+  H.setMounted('nav', false)
+end
+
 T.done('test_turn_by_turn')
