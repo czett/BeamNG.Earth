@@ -1,15 +1,15 @@
 // BeamNG.Earth Turn-by-Turn Navigation & Multi-Design HUD App (turnByTurn.lua + hudapps.lua).
-// 3 switchable designs: 'gmaps_card', 'round_minimap' (60-FPS HiDPI vector minimap), and 'ets_advisor'.
-// Always visible (active route + idle cruise state), zero outer clipping, native BeamNG HUD tokens.
+// Pure vector <svg> 60-FPS round_minimap + gmaps_card + ets_advisor.
+// Zero box-shadow/text-shadow/filter (crisp CEF rendering, zero dark halo), always visible, zero clipping.
 angular.module('beamng.apps')
 .directive('beamngEarthNav', [function () {
   var FONT = 'font-family:"Overpass",var(--fnt-defs,sans-serif);'
   var NUM = 'font-variant-numeric:tabular-nums;'
-  var CARD_BG = 'rgba(var(--bng-off-black-rgb,26,26,26),0.88)'
-  var CTRL_BTN = 'background:rgba(16,20,27,0.88);color:var(--bng-off-white,#f4f6f8);' +
-    'border:1px solid rgba(255,255,255,0.26);border-radius:var(--bng-corners-1,4px);' +
-    'padding:3px 7px;font-size:10.5px;font-weight:700;cursor:pointer;line-height:1.15;' +
-    'display:inline-flex;align-items:center;justify-content:center;gap:4px;' + FONT + NUM
+  var CARD_BG = 'rgba(var(--bng-off-black-rgb,26,26,26),0.86)'
+  var CTRL_BTN = 'background:rgba(15,18,22,0.82);color:var(--bng-off-white,#f4f6f8);' +
+    'border:1px solid rgba(255,255,255,0.22);border-radius:var(--bng-corners-1,4px);' +
+    'padding:2px 6px;font-size:10px;font-weight:700;cursor:pointer;line-height:1.15;' +
+    'display:inline-flex;align-items:center;justify-content:center;gap:3px;' + FONT + NUM
 
   function svgPaths (varName, size) {
     return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" ' +
@@ -52,85 +52,86 @@ angular.module('beamng.apps')
     '</svg>'
   }
 
-  // Always-accessible, sharp control cluster (never vanishes on hover, never clipped)
+  // Crisp pure-vector circular German/EU speed-limit SVG sign
+  function speedSignSvg (sizePx) {
+    return '<svg ng-if="limitBadgeText" width="' + sizePx + '" height="' + sizePx + '" viewBox="0 0 36 36" style="display:block;flex-shrink:0;">' +
+      '<circle cx="18" cy="18" r="16" ng-attr-fill="{{ limitSvgFill }}" ng-attr-stroke="{{ limitSvgStroke }}" stroke-width="3.2"/>' +
+      '<text x="18" y="18.6" text-anchor="middle" dominant-baseline="central" ng-attr-fill="{{ limitSvgText }}" ' +
+        'font-family="Overpass, sans-serif" font-size="13.5" font-weight="800">{{ limitBadgeText }}</text>' +
+    '</svg>'
+  }
+
   var CTRL_BAR =
     '<div class="bng-nav-ctrls" style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">' +
       '<button type="button" ng-click="cycleDesign($event)" title="Switch navigation HUD design (Maps / Minimap / Advisor)" style="' + CTRL_BTN + '">' +
         '<span>{{ designBadge }}</span>' +
       '</button>' +
       '<button type="button" ng-click="toggleChime($event)" title="{{ nav.chimeEnabled ? \'Mute turn chimes\' : \'Enable turn chimes\' }}" style="' + CTRL_BTN + '">' +
-        '<svg ng-if="nav.chimeEnabled" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<svg ng-if="nav.chimeEnabled" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
           '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>' +
         '</svg>' +
-        '<svg ng-if="!nav.chimeEnabled" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+        '<svg ng-if="!nav.chimeEnabled" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
           '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/>' +
         '</svg>' +
       '</button>' +
     '</div>'
 
-  // Generous 36px circular German/EU speed-limit sign
-  var SPEED_SIGN =
-    '<div ng-if="limitBadgeText" ' +
-      'style="width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;' +
-      'font-size:13px;font-weight:800;line-height:1;flex-shrink:0;box-sizing:border-box;box-shadow:0 2px 6px rgba(0,0,0,0.45);' + NUM + '" ' +
-      'ng-style="limitBadgeStyle">{{ limitBadgeText }}</div>'
-
   return {
     template:
-      '<div class="bngApp" style="width:100%;height:100%;background:transparent;box-shadow:none;overflow:visible;' + FONT + '">' +
+      '<div class="bngApp" style="width:100%;height:100%;background:transparent;overflow:visible;' + FONT + '">' +
 
         // ============================================================
-        // DESIGN 1: gmaps_card (Google Maps / CarPlay Turn Card — Always Visible)
+        // DESIGN 1: gmaps_card (Google Maps / CarPlay Turn Card — Always Visible, Zero Shadow)
         // ============================================================
         '<div ng-if="nav && nav.enabled && !hidden && nav.navDesign === \'gmaps_card\'" ' +
-          'style="width:100%;border-radius:var(--bng-corners-2,8px);overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,0.48);border:1px solid rgba(255,255,255,0.14);">' +
+          'style="width:100%;border-radius:var(--bng-corners-2,8px);overflow:hidden;border:1px solid rgba(255,255,255,0.16);">' +
 
           // ACTIVE ROUTE: High-contrast maneuver banner
-          '<div ng-if="nav.active" ng-style="bannerStyle" style="position:relative;padding:10px 12px 12px;color:#ffffff;">' +
+          '<div ng-if="nav.active" ng-style="bannerStyle" style="position:relative;padding:9px 11px 11px;color:#ffffff;">' +
             '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">' +
-              '<div style="display:flex;align-items:center;gap:11px;min-width:0;flex:1;">' +
-                '<div style="width:42px;height:42px;border-radius:var(--bng-corners-1,6px);background:rgba(0,0,0,0.24);display:flex;align-items:center;justify-content:center;flex-shrink:0;">' +
-                  svgPaths('nav.maneuver', 30) +
+              '<div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">' +
+                '<div style="width:40px;height:40px;border-radius:var(--bng-corners-1,6px);background:rgba(0,0,0,0.22);display:flex;align-items:center;justify-content:center;flex-shrink:0;">' +
+                  svgPaths('nav.maneuver', 28) +
                 '</div>' +
                 '<div style="min-width:0;flex:1;">' +
                   '<div style="display:flex;align-items:baseline;gap:6px;">' +
-                    '<span style="font-size:24px;font-weight:800;line-height:1.05;letter-spacing:-0.01em;' + NUM + '">{{ distText }}</span>' +
+                    '<span style="font-size:23px;font-weight:800;line-height:1.05;letter-spacing:-0.01em;' + NUM + '">{{ distText }}</span>' +
                     '<span ng-if="nav.isHighwayExit" style="font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.22);">EXIT</span>' +
                     '<span ng-if="nav.exitNum && !nav.isHighwayExit" style="font-size:10px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.22);">EXIT {{ nav.exitNum }}</span>' +
                   '</div>' +
-                  '<div style="font-size:14px;font-weight:700;line-height:1.25;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ primaryTitle }}</div>' +
+                  '<div style="font-size:13.5px;font-weight:700;line-height:1.25;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ primaryTitle }}</div>' +
                 '</div>' +
               '</div>' +
               CTRL_BAR +
             '</div>' +
             '<div style="position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(0,0,0,0.28);">' +
-              '<div ng-style="{width: progressPct + \'%\'}" style="height:100%;background:var(--bng-orange-b400,#ff6600);transition:width 160ms linear;"></div>' +
+              '<div ng-style="{width: progressPct + \'%\'}" style="height:100%;background:var(--bng-orange-b400,#ff6600);"></div>' +
             '</div>' +
           '</div>' +
 
           // ACTIVE ROUTE: Compact "Then:" sub-bar
           '<div ng-if="nav.active && nav.nextManeuver" ng-style="subBannerStyle" ' +
-            'style="display:flex;align-items:center;gap:6px;padding:5px 12px;color:rgba(255,255,255,0.92);font-size:11.5px;font-weight:600;border-top:1px solid rgba(255,255,255,0.12);">' +
+            'style="display:flex;align-items:center;gap:6px;padding:5px 11px;color:rgba(255,255,255,0.92);font-size:11.5px;font-weight:600;border-top:1px solid rgba(255,255,255,0.12);">' +
             '<span style="opacity:0.78;text-transform:uppercase;font-size:10px;letter-spacing:0.05em;">Then</span>' +
             svgPaths('nav.nextManeuver', 15) +
             '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ nav.nextStreetName || nextActionLabel }}</span>' +
           '</div>' +
 
-          // ACTIVE ROUTE: Spacious bottom trip footer with 36px speed limit sign
+          // ACTIVE ROUTE: Spacious bottom trip footer with 36px crisp SVG speed sign
           '<div ng-if="nav.active" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;background:' + CARD_BG + ';color:var(--bng-off-white,#f0f0f0);font-size:12.5px;">' +
-            '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;' + NUM + '">' +
+            '<div style="display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap;' + NUM + '">' +
               '<span style="font-weight:800;color:var(--bng-orange-b400,#ff6600);">{{ etaText }}</span>' +
               '<span style="opacity:0.4;">&middot;</span>' +
               '<span style="font-weight:700;">{{ remText }}</span>' +
               '<span style="opacity:0.4;">&middot;</span>' +
               '<span style="color:var(--bng-cool-gray-300,#b4b8c2);">{{ arrivalClock }}</span>' +
             '</div>' +
-            SPEED_SIGN +
+            speedSignSvg(36) +
           '</div>' +
 
-          // IDLE CRUISE STATE (Always visible when no route is active)
+          // IDLE CRUISE STATE (Always visible)
           '<div ng-if="!nav.active" style="padding:10px 12px;background:' + CARD_BG + ';color:var(--bng-off-white,#f0f0f0);">' +
-            '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;">' +
               '<div style="display:flex;align-items:center;gap:6px;' + NUM + '">' +
                 '<span style="color:var(--bng-orange-b400,#ff6600);font-size:11px;font-weight:800;letter-spacing:0.05em;">{{ cardinalText }}</span>' +
                 '<span style="font-size:11px;color:var(--bng-cool-gray-300,#b4b8c2);">{{ headingText }}</span>' +
@@ -141,61 +142,96 @@ angular.module('beamng.apps')
             '</div>' +
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
               '<div style="min-width:0;flex:1;">' +
-                '<div style="font-size:14px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ cruiseTitle }}</div>' +
-                '<div style="font-size:11.5px;color:var(--bng-cool-gray-300,#b4b8c2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ cruiseSub }}</div>' +
+                '<div style="font-size:13.5px;font-weight:700;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ cruiseTitle }}</div>' +
+                '<div style="font-size:11px;color:var(--bng-cool-gray-300,#b4b8c2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ cruiseSub }}</div>' +
               '</div>' +
-              SPEED_SIGN +
+              speedSignSvg(36) +
             '</div>' +
           '</div>' +
         '</div>' +
 
         // ============================================================
-        // DESIGN 2: round_minimap (60-FPS HiDPI Circular Minimap + Docked Header, Zero Clipping)
+        // DESIGN 2: round_minimap (Pure Vector <svg>, 60 FPS, Compact <= 250x275, Zero Shadow/Clipping)
         // ============================================================
         '<div ng-if="nav && nav.enabled && !hidden && nav.navDesign === \'round_minimap\'" ' +
-          'style="display:flex;flex-direction:column;align-items:center;width:244px;margin:0 auto;overflow:visible;">' +
+          'style="display:flex;flex-direction:column;align-items:center;width:246px;margin:0 auto;overflow:visible;">' +
 
-          // Floating top control pill bar — OUTSIDE the circle, never clipped
-          '<div style="width:236px;display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:5px;">' +
-            '<div style="padding:2px 8px;border-radius:var(--bng-corners-1,4px);background:rgba(16,20,27,0.86);border:1px solid rgba(255,255,255,0.18);color:#e4e8ef;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:146px;' + NUM + '">' +
+          // Compact top control strip (24px) — outside circle, always clickable
+          '<div style="width:236px;display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">' +
+            '<div style="padding:2px 7px;border-radius:var(--bng-corners-1,4px);background:rgba(15,18,22,0.78);border:1px solid rgba(255,255,255,0.16);color:#e4e8ef;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:148px;' + NUM + '">' +
               '{{ nav.active ? (nav.isHighwayExit ? "AUTOBAHN EXIT" : "NAVIGATION") : (cardinalText + " " + headingText + " · " + speedText) }}' +
             '</div>' +
             CTRL_BAR +
           '</div>' +
 
-          // Docked compact turn-by-turn banner (when active) OR compact street pill (when idle)
+          // Docked compact turn-by-turn banner (52px, only when active)
           '<div ng-if="nav.active" ng-style="bannerStyle" ' +
-            'style="position:relative;width:236px;border-radius:var(--bng-corners-2,8px);padding:7px 10px 9px;color:#ffffff;box-shadow:0 3px 12px rgba(0,0,0,0.48);border:1px solid rgba(255,255,255,0.18);margin-bottom:6px;z-index:3;overflow:hidden;">' +
-            '<div style="display:flex;align-items:center;gap:9px;">' +
-              svgPaths('nav.maneuver', 24) +
+            'style="position:relative;width:236px;border-radius:var(--bng-corners-2,7px);padding:5px 9px 7px;color:#ffffff;border:1px solid rgba(255,255,255,0.18);margin-bottom:5px;overflow:hidden;box-sizing:border-box;">' +
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+              svgPaths('nav.maneuver', 22) +
               '<div style="min-width:0;flex:1;">' +
-                '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;">' +
-                  '<span style="font-size:17px;font-weight:800;line-height:1.05;' + NUM + '">{{ distText }}</span>' +
-                  '<span style="font-size:10.5px;font-weight:700;opacity:0.9;' + NUM + '">{{ etaText }}</span>' +
+                '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:5px;">' +
+                  '<span style="font-size:15.5px;font-weight:800;line-height:1.05;' + NUM + '">{{ distText }}</span>' +
+                  '<span style="font-size:10px;font-weight:700;opacity:0.9;' + NUM + '">{{ etaText }}</span>' +
                 '</div>' +
-                '<div style="font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;">{{ primaryTitle }}</div>' +
+                '<div style="font-size:11.5px;font-weight:700;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;">{{ primaryTitle }}</div>' +
               '</div>' +
             '</div>' +
-            '<div style="position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(0,0,0,0.3);">' +
+            '<div style="position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(0,0,0,0.28);">' +
               '<div ng-style="{width: progressPct + \'%\'}" style="height:100%;background:var(--bng-orange-b400,#ff6600);"></div>' +
             '</div>' +
           '</div>' +
 
-          // Circular map container: outer wrapper is overflow:visible so speed sign & bottom pill are NEVER clipped
-          '<div style="position:relative;width:196px;height:196px;overflow:visible;flex-shrink:0;">' +
-            // Circular clipping applies ONLY to the translucent canvas shell (no opaque fill)
-            '<div style="width:196px;height:196px;border-radius:50%;overflow:hidden;background:transparent;border:2px solid rgba(255,255,255,0.22);box-shadow:0 4px 18px rgba(0,0,0,0.45);box-sizing:border-box;">' +
-              '<canvas class="bng-nav-minimap-canvas" width="196" height="196" style="width:196px;height:196px;display:block;"></canvas>' +
+          // Pure Vector <svg> circular minimap (172px when active, 192px when idle — fits cleanly within 250x275!)
+          '<div ng-style="{width: mapDiameter + \'px\', height: mapDiameter + \'px\'}" ' +
+            'style="position:relative;overflow:visible;flex-shrink:0;">' +
+            '<svg class="bng-nav-minimap-svg" viewBox="0 0 200 200" ' +
+              'ng-attr-width="{{ mapDiameter }}" ng-attr-height="{{ mapDiameter }}" ' +
+              'style="display:block;overflow:visible;">' +
+              '<defs>' +
+                '<clipPath id="bngNavCircleClip"><circle cx="100" cy="100" r="98"/></clipPath>' +
+              '</defs>' +
+              // Translucent dark glass circle (no box-shadow, no filter)
+              '<circle cx="100" cy="100" r="98" fill="rgba(15,18,22,0.56)" stroke="rgba(255,255,255,0.18)" stroke-width="1.5"/>' +
+              // Clipped vector map group
+              '<g clip-path="url(#bngNavCircleClip)">' +
+                '<g class="bng-nav-world" transform="translate(100,108)">' +
+                  // Road casings by class (world-space paths, non-scaling-stroke)
+                  '<path class="bng-nav-rc3" fill="none" stroke="rgba(0,0,0,0.68)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc2" fill="none" stroke="rgba(0,0,0,0.72)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc1" fill="none" stroke="rgba(0,0,0,0.76)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rc0" fill="none" stroke="rgba(0,0,0,0.8)" stroke-width="7.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  // Road fills by class
+                  '<path class="bng-nav-rf3" fill="none" stroke="rgba(132,122,108,0.68)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf2" fill="none" stroke="rgba(162,172,186,0.78)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf1" fill="none" stroke="rgba(212,220,230,0.9)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-rf0" fill="none" stroke="rgba(236,241,248,0.96)" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  // Zero-lag active route: crisp white outer casing + BeamNG.Earth blue core
+                  '<path class="bng-nav-route-bg" fill="none" stroke="#ffffff" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                  '<path class="bng-nav-route-fg" fill="none" stroke="#1a8cff" stroke-width="5.0" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d=""/>' +
+                '</g>' +
+                // Sleek rounded orange-with-white-border player chevron (rotated by vehHeading - camHeading)
+                '<g class="bng-nav-arrow" transform="translate(100,108) rotate(0)">' +
+                  '<path d="M 0,-11 Q 2.4,-5.2 7.8,6.2 Q 8.4,8.2 6.3,7.3 Q 1.7,4.6 0,4.4 Q -1.7,4.6 -6.3,7.3 Q -8.4,8.2 -7.8,6.2 Q -2.4,-5.2 0,-11 Z" ' +
+                    'fill="#ff6600" stroke="#ffffff" stroke-width="2.1" stroke-linejoin="round"/>' +
+                '</g>' +
+                // North compass marker on inner rim (moves with camera rotation)
+                '<g class="bng-nav-north" transform="translate(100,14)">' +
+                  '<circle cx="0" cy="0" r="8.5" fill="rgba(15,18,22,0.82)"/>' +
+                  '<text x="0" y="0.6" text-anchor="middle" dominant-baseline="central" fill="#ff6600" ' +
+                    'font-family="Overpass, sans-serif" font-size="10" font-weight="800">N</text>' +
+                '</g>' +
+              '</g>' +
+            '</svg>' +
+
+            // Crisp vector 32px speed-limit badge tucked cleanly at bottom-left rim (never clipped)
+            '<div ng-if="limitBadgeText" style="position:absolute;bottom:6px;left:0;z-index:4;">' +
+              speedSignSvg(32) +
             '</div>' +
 
-            // 36px speed limit sign positioned cleanly on the lower-left rim (unclipped!)
-            '<div ng-if="limitBadgeText" style="position:absolute;bottom:8px;left:-8px;z-index:4;">' +
-              SPEED_SIGN +
-            '</div>' +
-
-            // Bottom distance / street pill (flex-centered without subpixel transform blur)
-            '<div style="position:absolute;left:0;right:0;bottom:-6px;display:flex;justify-content:center;pointer-events:none;z-index:4;">' +
-              '<div style="max-width:170px;padding:3px 10px;border-radius:11px;background:rgba(15,18,24,0.88);border:1px solid rgba(255,255,255,0.2);color:#f4f6f8;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 2px 8px rgba(0,0,0,0.45);' + NUM + '">' +
+            // Bottom distance / street pill overlapping lower rim inside bounding box (bottom: 4px)
+            '<div style="position:absolute;left:0;right:0;bottom:4px;display:flex;justify-content:center;pointer-events:none;z-index:4;">' +
+              '<div style="max-width:138px;padding:2px 8px;border-radius:10px;background:rgba(15,18,22,0.88);border:1px solid rgba(255,255,255,0.18);color:#f4f6f8;font-size:10.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' + NUM + '">' +
                 '{{ nav.active ? (remText + " · " + etaText) : cruiseTitle }}' +
               '</div>' +
             '</div>' +
@@ -203,48 +239,47 @@ angular.module('beamng.apps')
         '</div>' +
 
         // ============================================================
-        // DESIGN 3: ets_advisor (ETS2 / Truck Cockpit Route Advisor — Always Visible)
+        // DESIGN 3: ets_advisor (ETS2 / Truck Cockpit Route Advisor — Always Visible, Zero Shadow)
         // ============================================================
         '<div ng-if="nav && nav.enabled && !hidden && nav.navDesign === \'ets_advisor\'" ' +
-          'style="width:100%;min-width:316px;background:' + CARD_BG + ';color:var(--bng-off-white,#f0f0f0);border-radius:var(--bng-corners-1,4px);border:1px solid rgba(255,255,255,0.15);box-shadow:0 4px 16px rgba(0,0,0,0.5);overflow:hidden;">' +
-          // Top compass / heading strip
-          '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 10px;background:rgba(0,0,0,0.36);border-bottom:1px solid rgba(255,255,255,0.1);font-size:11px;">' +
-            '<div style="display:flex;align-items:center;gap:6px;min-width:0;' + NUM + '">' +
+          'style="width:100%;background:' + CARD_BG + ';color:var(--bng-off-white,#f0f0f0);border-radius:var(--bng-corners-1,4px);border:1px solid rgba(255,255,255,0.16);overflow:hidden;">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 9px;background:rgba(0,0,0,0.34);border-bottom:1px solid rgba(255,255,255,0.1);font-size:10.5px;">' +
+            '<div style="display:flex;align-items:center;gap:5px;min-width:0;' + NUM + '">' +
               '<span style="color:var(--bng-orange-b400,#ff6600);font-weight:800;letter-spacing:0.05em;">{{ cardinalText }}</span>' +
               '<span style="color:var(--bng-cool-gray-300,#b4b8c2);">{{ headingText }}</span>' +
               '<span style="opacity:0.35;">|</span>' +
-              '<span style="max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--bng-cool-gray-200,#d4d8e0);">{{ cruiseTitle }}</span>' +
+              '<span style="max-width:118px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--bng-cool-gray-200,#d4d8e0);">{{ cruiseTitle }}</span>' +
             '</div>' +
             CTRL_BAR +
           '</div>' +
 
-          // Main advisor telemetry row
-          '<div style="display:flex;align-items:center;gap:10px;padding:9px 11px;">' +
-            // Generous 36px speed limit sign (or neutral placeholder when unknown)
-            '<div style="width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;line-height:1;flex-shrink:0;box-sizing:border-box;' + NUM + '" ng-style="limitBadgeStyle">{{ limitBadgeText || "--" }}</div>' +
+          '<div style="display:flex;align-items:center;gap:9px;padding:8px 10px;">' +
+            '<svg width="36" height="36" viewBox="0 0 36 36" style="display:block;flex-shrink:0;">' +
+              '<circle cx="18" cy="18" r="16" ng-attr-fill="{{ limitSvgFill }}" ng-attr-stroke="{{ limitSvgStroke }}" stroke-width="3.2"/>' +
+              '<text x="18" y="18.6" text-anchor="middle" dominant-baseline="central" ng-attr-fill="{{ limitSvgText }}" ' +
+                'font-family="Overpass, sans-serif" font-size="13.5" font-weight="800">{{ limitBadgeText || "--" }}</text>' +
+            '</svg>' +
 
-            // Next maneuver + street name
-            '<div style="display:flex;align-items:center;gap:9px;flex:1;min-width:0;">' +
-              '<div ng-if="nav.active" ng-style="bannerStyle" style="width:36px;height:36px;border-radius:var(--bng-corners-1,4px);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;">' +
-                svgPaths('nav.maneuver', 23) +
+            '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">' +
+              '<div ng-if="nav.active" ng-style="bannerStyle" style="width:34px;height:34px;border-radius:var(--bng-corners-1,4px);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;">' +
+                svgPaths('nav.maneuver', 22) +
               '</div>' +
               '<div style="min-width:0;flex:1;">' +
-                '<div ng-if="nav.active" style="display:flex;align-items:baseline;gap:6px;">' +
-                  '<span style="font-size:18px;font-weight:800;line-height:1.05;' + NUM + '">{{ distText }}</span>' +
-                  '<span ng-if="nav.isHighwayExit" style="font-size:9.5px;font-weight:800;padding:1px 5px;border-radius:2px;background:#0b4f8c;color:#fff;letter-spacing:0.05em;">EXIT</span>' +
+                '<div ng-if="nav.active" style="display:flex;align-items:baseline;gap:5px;">' +
+                  '<span style="font-size:17px;font-weight:800;line-height:1.05;' + NUM + '">{{ distText }}</span>' +
+                  '<span ng-if="nav.isHighwayExit" style="font-size:9px;font-weight:800;padding:1px 4px;border-radius:2px;background:#0b4f8c;color:#fff;letter-spacing:0.05em;">EXIT</span>' +
                 '</div>' +
-                '<div ng-if="!nav.active" style="font-size:11.5px;font-weight:700;color:var(--bng-cool-gray-300,#b4b8c2);">Cruise · Free Drive</div>' +
-                '<div style="font-size:12.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#f4f6f8;">{{ nav.active ? primaryTitle : cruiseSub }}</div>' +
+                '<div ng-if="!nav.active" style="font-size:11px;font-weight:700;color:var(--bng-cool-gray-300,#b4b8c2);">Cruise · Free Drive</div>' +
+                '<div style="font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#f4f6f8;">{{ nav.active ? primaryTitle : cruiseSub }}</div>' +
                 '<div ng-if="nav.active" style="height:2.5px;background:rgba(255,255,255,0.14);border-radius:2px;margin-top:4px;overflow:hidden;">' +
                   '<div ng-style="{width: progressPct + \'%\'}" style="height:100%;background:var(--bng-orange-b400,#ff6600);"></div>' +
                 '</div>' +
               '</div>' +
             '</div>' +
 
-            // Right remaining distance / ETA column
-            '<div style="text-align:right;flex-shrink:0;padding-left:9px;border-left:1px solid rgba(255,255,255,0.12);' + NUM + '">' +
-              '<div style="font-size:13.5px;font-weight:800;color:var(--bng-orange-b400,#ff6600);">{{ nav.active ? etaText : speedText }}</div>' +
-              '<div style="font-size:11px;font-weight:600;color:var(--bng-cool-gray-300,#b4b8c2);">{{ nav.active ? remText : "CRUISE" }}</div>' +
+            '<div style="text-align:right;flex-shrink:0;padding-left:8px;border-left:1px solid rgba(255,255,255,0.12);' + NUM + '">' +
+              '<div style="font-size:13px;font-weight:800;color:var(--bng-orange-b400,#ff6600);">{{ nav.active ? etaText : speedText }}</div>' +
+              '<div style="font-size:10.5px;font-weight:600;color:var(--bng-cool-gray-300,#b4b8c2);">{{ nav.active ? remText : "CRUISE" }}</div>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -268,8 +303,11 @@ angular.module('beamng.apps')
       scope.cardinalText = 'N'
       scope.headingText = '000°'
       scope.speedText = '0 km/h'
+      scope.mapDiameter = 192
       scope.limitBadgeText = ''
-      scope.limitBadgeStyle = { background: '#262b33', color: '#9aa2b0', border: '2px solid #48515e' }
+      scope.limitSvgFill = '#262b33'
+      scope.limitSvgStroke = '#48515e'
+      scope.limitSvgText = '#9aa2b0'
       scope.bannerStyle = { background: '#14532d' }
       scope.subBannerStyle = { background: '#0e3c20' }
 
@@ -282,9 +320,9 @@ angular.module('beamng.apps')
       var renderPose = { x: 0, y: 0, vehHeadingRad: 0, camHeadingRad: 0, speedKph: 0 }
       var rafId = null
       var lastRafMs = 0
-      var cachedCanvas = null
-      var cachedDpr = 0
       var lastHudTextPoseMs = 0
+      var lastRoadsSeq = -1
+      var svgRefs = null
 
       var ACTION_LABELS = {
         turn_left: 'Turn left',
@@ -361,7 +399,6 @@ angular.module('beamng.apps')
         return diff
       }
 
-      // Lightweight WebAudio chime (no external audio files)
       function playChime (kind) {
         try {
           var Ctx = window.AudioContext || window.webkitAudioContext
@@ -394,212 +431,140 @@ angular.module('beamng.apps')
         } catch (e) {}
       }
 
-      // 60-FPS HiDPI Canvas renderer for 'round_minimap' (native glass backdrop, camera-pan rotation, zero-lag route)
-      function drawRoundMinimap () {
+      function ensureSvgRefs () {
+        if (svgRefs && svgRefs.svg && svgRefs.svg.isConnected) return svgRefs
+        var el = element && element[0]
+        if (!el) return null
+        var svg = el.querySelector('.bng-nav-minimap-svg')
+        if (!svg) return null
+        svgRefs = {
+          svg: svg,
+          world: svg.querySelector('.bng-nav-world'),
+          arrow: svg.querySelector('.bng-nav-arrow'),
+          north: svg.querySelector('.bng-nav-north'),
+          rc: [
+            svg.querySelector('.bng-nav-rc0'),
+            svg.querySelector('.bng-nav-rc1'),
+            svg.querySelector('.bng-nav-rc2'),
+            svg.querySelector('.bng-nav-rc3')
+          ],
+          rf: [
+            svg.querySelector('.bng-nav-rf0'),
+            svg.querySelector('.bng-nav-rf1'),
+            svg.querySelector('.bng-nav-rf2'),
+            svg.querySelector('.bng-nav-rf3')
+          ],
+          routeBg: svg.querySelector('.bng-nav-route-bg'),
+          routeFg: svg.querySelector('.bng-nav-route-fg')
+        }
+        lastRoadsSeq = -1
+        return svgRefs
+      }
+
+      // Rebuild world-space vector road <path> geometry ONLY when roadsSeq updates (every ~60 m)
+      function rebuildRoadPaths (refs, roads) {
+        var buckets = [[], [], [], []]
+        if (Array.isArray(roads) && roads.length >= 5) {
+          for (var i = 0; i < roads.length; i += 5) {
+            var cls = roads[i + 4]
+            var b = cls === 0 ? 0 : (cls === 1 ? 1 : (cls === 2 ? 2 : 3))
+            // World ENU (x East, y North) -> SVG (x, -y) so +Y North points UP
+            buckets[b].push('M' + roads[i] + ',' + (-roads[i + 1]) + 'L' + roads[i + 2] + ',' + (-roads[i + 3]))
+          }
+        }
+        for (var c = 0; c < 4; c++) {
+          var d = buckets[c].join('')
+          if (refs.rc[c]) refs.rc[c].setAttribute('d', d)
+          if (refs.rf[c]) refs.rf[c].setAttribute('d', d)
+        }
+      }
+
+      // 60-FPS Pure Vector SVG update (exact camera-pan rotation, relative chevron, zero-lag route)
+      function updateRoundMinimapSvg () {
         var nav = scope.nav
         if (!nav || !nav.enabled || scope.hidden || nav.navDesign !== 'round_minimap') return
-        var el = element && element[0]
-        if (!el) return
-        if (!cachedCanvas || !cachedCanvas.isConnected) {
-          cachedCanvas = el.querySelector('.bng-nav-minimap-canvas')
-          cachedDpr = 0
-        }
-        var canvas = cachedCanvas
-        if (!canvas || !canvas.getContext) return
+        var refs = ensureSvgRefs()
+        if (!refs || !refs.world) return
 
-        var cssSize = 196
-        var dpr = Math.min(3, window.devicePixelRatio || 1)
-        if (cachedDpr !== dpr) {
-          canvas.width = Math.round(cssSize * dpr)
-          canvas.height = Math.round(cssSize * dpr)
-          cachedDpr = dpr
+        // Update road geometry only when server/graph cell query refreshed
+        var rSeq = Number(nav.roadsSeq) || 0
+        if (rSeq !== lastRoadsSeq) {
+          lastRoadsSeq = rSeq
+          rebuildRoadPaths(refs, nav.miniRoads)
         }
 
-        var ctx = canvas.getContext('2d')
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-
-        var w = cssSize
-        var h = cssSize
-        var cx = w * 0.5
-        var cy = h * 0.54
-        var radius = w * 0.5
-
+        var cx = 100
+        var cy = 108
         var spd = renderPose.speedKph
         var viewM = Math.max(155, Math.min(380, 155 + spd * 1.7))
-        var pxPerM = (w * 0.46) / viewM
-        var mapRot = nav.northUp ? 0 : -renderPose.camHeadingRad
-        var arrowRot = nav.northUp
-          ? renderPose.vehHeadingRad
-          : (renderPose.vehHeadingRad - renderPose.camHeadingRad)
-        var cosR = Math.cos(mapRot)
-        var sinR = Math.sin(mapRot)
+        var pxPerM = 92 / viewM
         var px = renderPose.x
         var py = renderPose.y
 
-        ctx.clearRect(0, 0, w, h)
-        ctx.save()
-        ctx.beginPath()
-        ctx.arc(w * 0.5, h * 0.5, radius, 0, Math.PI * 2)
-        ctx.clip()
+        // Camera yaw (clockwise from North): rotate SVG world group COUNTER-CLOCKWISE (-camDeg)
+        // so camera look direction always points straight UP (-Y in SVG).
+        var camRad = nav.northUp ? 0 : renderPose.camHeadingRad
+        var camDeg = (camRad * 180) / Math.PI
+        var vehDeg = (renderPose.vehHeadingRad * 180) / Math.PI
+        var arrowDeg = nav.northUp ? vehDeg : (vehDeg - camDeg)
 
-        // Semi-transparent dark glass backdrop matching native BeamNG minimap
-        ctx.fillStyle = 'rgba(16, 19, 24, 0.58)'
-        ctx.fillRect(0, 0, w, h)
+        refs.world.setAttribute(
+          'transform',
+          'translate(' + cx + ',' + cy + ') rotate(' + (-camDeg).toFixed(2) + ') scale(' + pxPerM.toFixed(5) + ') translate(' + (-px).toFixed(2) + ',' + py.toFixed(2) + ')'
+        )
 
-        // Full road network (two-pass: dark casings, then native road fills by class)
-        var roads = nav.miniRoads
-        if (Array.isArray(roads) && roads.length >= 5) {
-          ctx.lineCap = 'round'
-          ctx.lineJoin = 'round'
-
-          // Pass 1: dark translucent road casings
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)'
-          for (var i = 0; i < roads.length; i += 5) {
-            var dx1 = roads[i] - px
-            var dy1 = roads[i + 1] - py
-            var dx2 = roads[i + 2] - px
-            var dy2 = roads[i + 3] - py
-            var cls = roads[i + 4]
-            var sx1 = cx + (dx1 * cosR - dy1 * sinR) * pxPerM
-            var sy1 = cy - (dx1 * sinR + dy1 * cosR) * pxPerM
-            var sx2 = cx + (dx2 * cosR - dy2 * sinR) * pxPerM
-            var sy2 = cy - (dx2 * sinR + dy2 * cosR) * pxPerM
-            ctx.lineWidth = cls === 0 ? 7.2 : (cls === 1 ? 5.6 : (cls === 2 ? 4.0 : 2.8))
-            ctx.beginPath()
-            ctx.moveTo(sx1, sy1)
-            ctx.lineTo(sx2, sy2)
-            ctx.stroke()
-          }
-
-          // Pass 2: road fills by drivability/highway class
-          for (var j = 0; j < roads.length; j += 5) {
-            var rdx1 = roads[j] - px
-            var rdy1 = roads[j + 1] - py
-            var rdx2 = roads[j + 2] - px
-            var rdy2 = roads[j + 3] - py
-            var rcls = roads[j + 4]
-            var rsx1 = cx + (rdx1 * cosR - rdy1 * sinR) * pxPerM
-            var rsy1 = cy - (rdx1 * sinR + rdy1 * cosR) * pxPerM
-            var rsx2 = cx + (rdx2 * cosR - rdy2 * sinR) * pxPerM
-            var rsy2 = cy - (rdx2 * sinR + rdy2 * cosR) * pxPerM
-            if (rcls === 0) {
-              ctx.strokeStyle = 'rgba(232, 237, 245, 0.92)'
-              ctx.lineWidth = 4.8
-            } else if (rcls === 1) {
-              ctx.strokeStyle = 'rgba(206, 214, 226, 0.86)'
-              ctx.lineWidth = 3.5
-            } else if (rcls === 2) {
-              ctx.strokeStyle = 'rgba(154, 164, 178, 0.72)'
-              ctx.lineWidth = 2.2
-            } else {
-              ctx.strokeStyle = 'rgba(128, 118, 104, 0.62)'
-              ctx.lineWidth = 1.4
-            }
-            ctx.beginPath()
-            ctx.moveTo(rsx1, rsy1)
-            ctx.lineTo(rsx2, rsy2)
-            ctx.stroke()
-          }
+        if (refs.arrow) {
+          refs.arrow.setAttribute('transform', 'translate(' + cx + ',' + cy + ') rotate(' + arrowDeg.toFixed(2) + ')')
         }
 
-        // Zero-Lag Signature BeamNG.Earth Blue Route Line with Crisp White Casing:
-        // Project (px, py) onto closest route segment and trim passed vertices at 60 FPS.
+        // North marker moves counter-clockwise around rim by -camRad (when facing East +90 deg, N is on LEFT)
+        if (refs.north) {
+          var nx = 100 - Math.sin(camRad) * 84
+          var ny = 100 - Math.cos(camRad) * 84
+          refs.north.setAttribute('transform', 'translate(' + nx.toFixed(2) + ',' + ny.toFixed(2) + ')')
+        }
+
+        // Zero-lag route path: project (px, py) onto closest route segment and trim passed vertices
         var rpts = nav.miniRoute
-        if (Array.isArray(rpts) && rpts.length >= 4) {
-          var bestSeg = 0
-          var bestDistSq = Infinity
-          var projX = rpts[0]
-          var projY = rpts[1]
-          for (var s = 0; s < rpts.length - 2; s += 2) {
-            var ax = rpts[s]
-            var ay = rpts[s + 1]
-            var bx = rpts[s + 2]
-            var by = rpts[s + 3]
-            var abx = bx - ax
-            var aby = by - ay
-            var l2 = abx * abx + aby * aby
-            var t = l2 > 1e-6 ? Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / l2)) : 0
-            var qx = ax + t * abx
-            var qy = ay + t * aby
-            var d2 = (qx - px) * (qx - px) + (qy - py) * (qy - py)
-            if (d2 < bestDistSq) {
-              bestDistSq = d2
-              bestSeg = s
-              projX = qx
-              projY = qy
+        if (refs.routeBg && refs.routeFg) {
+          if (Array.isArray(rpts) && rpts.length >= 4) {
+            var bestSeg = 0
+            var bestDistSq = Infinity
+            var projX = rpts[0]
+            var projY = rpts[1]
+            for (var s = 0; s < rpts.length - 2; s += 2) {
+              var ax = rpts[s]
+              var ay = rpts[s + 1]
+              var bx = rpts[s + 2]
+              var by = rpts[s + 3]
+              var abx = bx - ax
+              var aby = by - ay
+              var l2 = abx * abx + aby * aby
+              var t = l2 > 1e-6 ? Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / l2)) : 0
+              var qx = ax + t * abx
+              var qy = ay + t * aby
+              var d2 = (qx - px) * (qx - px) + (qy - py) * (qy - py)
+              if (d2 < bestDistSq) {
+                bestDistSq = d2
+                bestSeg = s
+                projX = qx
+                projY = qy
+              }
             }
+            var startX = bestDistSq <= 196 ? px : projX
+            var startY = bestDistSq <= 196 ? py : projY
+            var segs = ['M' + startX.toFixed(2) + ',' + (-startY).toFixed(2)]
+            for (var k = bestSeg + 2; k < rpts.length; k += 2) {
+              segs.push('L' + rpts[k] + ',' + (-rpts[k + 1]))
+            }
+            var rd = segs.join('')
+            refs.routeBg.setAttribute('d', rd)
+            refs.routeFg.setAttribute('d', rd)
+          } else {
+            refs.routeBg.setAttribute('d', '')
+            refs.routeFg.setAttribute('d', '')
           }
-
-          // Start directly at player position when within 14 m of route so line never lags behind chevron
-          var startX = bestDistSq <= 196 ? px : projX
-          var startY = bestDistSq <= 196 ? py : projY
-
-          ctx.lineCap = 'round'
-          ctx.lineJoin = 'round'
-          ctx.beginPath()
-          var srx = startX - px
-          var sry = startY - py
-          ctx.moveTo(cx + (srx * cosR - sry * sinR) * pxPerM, cy - (srx * sinR + sry * cosR) * pxPerM)
-          for (var k = bestSeg + 2; k < rpts.length; k += 2) {
-            var rrx = rpts[k] - px
-            var rry = rpts[k + 1] - py
-            var psx = cx + (rrx * cosR - rry * sinR) * pxPerM
-            var psy = cy - (rrx * sinR + rry * cosR) * pxPerM
-            ctx.lineTo(psx, psy)
-          }
-          // Outer dark shadow for contrast
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.42)'
-          ctx.lineWidth = 11.0
-          ctx.stroke()
-          // Crisp white border casing
-          ctx.strokeStyle = '#ffffff'
-          ctx.lineWidth = 8.4
-          ctx.stroke()
-          // Signature BeamNG.Earth navigation blue
-          ctx.strokeStyle = '#1a8cff'
-          ctx.lineWidth = 5.2
-          ctx.stroke()
         }
-
-        // Sleek rounded orange-with-crisp-white-border player chevron (rotated relative to camera!)
-        ctx.save()
-        ctx.translate(cx, cy)
-        ctx.rotate(arrowRot)
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
-        ctx.shadowBlur = 4
-        ctx.shadowOffsetY = 1
-        ctx.fillStyle = '#ff6600'
-        ctx.strokeStyle = '#ffffff'
-        ctx.lineWidth = 2.2
-        ctx.lineJoin = 'round'
-        ctx.beginPath()
-        ctx.moveTo(0, -10.5)
-        ctx.quadraticCurveTo(2.4, -5.0, 7.6, 6.2)
-        ctx.quadraticCurveTo(8.2, 8.2, 6.2, 7.4)
-        ctx.quadraticCurveTo(1.6, 4.6, 0, 4.4)
-        ctx.quadraticCurveTo(-1.6, 4.6, -6.2, 7.4)
-        ctx.quadraticCurveTo(-8.2, 8.2, -7.6, 6.2)
-        ctx.quadraticCurveTo(-2.4, -5.0, 0, -10.5)
-        ctx.closePath()
-        ctx.fill()
-        ctx.shadowColor = 'transparent'
-        ctx.stroke()
-        ctx.restore()
-
-        // North compass marker on inner rim (rotates with camera pan)
-        var nx = w * 0.5 + Math.sin(mapRot) * (radius - 13)
-        var ny = h * 0.5 - Math.cos(mapRot) * (radius - 13)
-        ctx.fillStyle = 'rgba(15, 18, 24, 0.78)'
-        ctx.beginPath()
-        ctx.arc(nx, ny, 8.5, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.fillStyle = '#ff6600'
-        ctx.font = '800 10px Overpass, sans-serif'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'middle'
-        ctx.fillText('N', nx, ny + 0.5)
-
-        ctx.restore()
       }
 
       function rafStep (nowMs) {
@@ -627,7 +592,7 @@ angular.module('beamng.apps')
           renderPose.speedKph += (targetPose.speedKph - renderPose.speedKph) * alpha
         }
 
-        drawRoundMinimap()
+        updateRoundMinimapSvg()
         rafId = window.requestAnimationFrame(rafStep)
       }
 
@@ -651,6 +616,7 @@ angular.module('beamng.apps')
 
         var design = nav.navDesign || 'gmaps_card'
         scope.designBadge = design === 'gmaps_card' ? '1/3' : (design === 'round_minimap' ? '2/3' : '3/3')
+        scope.mapDiameter = nav.active ? 172 : 192
 
         if (nav.isHighwayExit) {
           scope.bannerStyle = { background: '#0b4f8c' }
@@ -670,7 +636,6 @@ angular.module('beamng.apps')
         scope.primaryTitle = nav.streetName || nav.destName || fallbackAction
         scope.nextActionLabel = ACTION_LABELS[nav.nextManeuver] || ''
 
-        // Always-visible cruise labels
         scope.cruiseTitle = nav.currentStreet || nav.currentPlace || nav.coordsLabel || 'Free Drive'
         if (nav.currentStreet && nav.currentPlace) {
           scope.cruiseSub = nav.currentPlace
@@ -680,7 +645,6 @@ angular.module('beamng.apps')
           scope.cruiseSub = 'Set a destination on Map'
         }
 
-        // Seed pose from HUD payload if 60-Hz pose hasn't arrived yet
         if (!poseInitialized && nav.playerX != null && nav.playerY != null) {
           poseInitialized = true
           targetPose.x = renderPose.x = Number(nav.playerX) || 0
@@ -696,22 +660,27 @@ angular.module('beamng.apps')
 
         formatHeadingFields(nav.headingDeg, nav.speedKph, nav.units)
 
-        // Speed limit badge styling (generous 36px German/EU sign)
+        // Crisp SVG speed-limit colors
         if (nav.speedLimitUnlimited) {
           scope.limitBadgeText = '///'
-          scope.limitBadgeStyle = { background: '#e5e7eb', color: '#374151', border: '3px solid #4b5563' }
+          scope.limitSvgFill = '#e5e7eb'
+          scope.limitSvgStroke = '#4b5563'
+          scope.limitSvgText = '#374151'
         } else if (nav.speedLimitKph != null && nav.speedLimitKph > 0) {
           var dispLim = nav.units === 'imperial'
             ? Math.round(nav.speedLimitKph * 0.621371)
             : Math.round(nav.speedLimitKph)
           scope.limitBadgeText = String(dispLim)
-          scope.limitBadgeStyle = { background: '#ffffff', color: '#111827', border: '3.5px solid #d92d20' }
+          scope.limitSvgFill = '#ffffff'
+          scope.limitSvgStroke = '#d92d20'
+          scope.limitSvgText = '#111827'
         } else {
           scope.limitBadgeText = ''
-          scope.limitBadgeStyle = { background: '#262b33', color: '#9aa2b0', border: '2px solid #48515e' }
+          scope.limitSvgFill = '#262b33'
+          scope.limitSvgStroke = '#48515e'
+          scope.limitSvgText = '#9aa2b0'
         }
 
-        // Chime trigger
         var seq = Number(nav.chimeSeq) || 0
         if (lastChimeSeq >= 0 && seq > lastChimeSeq && nav.chimeEnabled) {
           playChime(nav.chimeKind)
@@ -740,7 +709,6 @@ angular.module('beamng.apps')
         }
       })
 
-      // 4-Hz full navigation + road network payload
       scope.$on('BeamNGEarthHud', function (_, data) {
         if (!data) return
         scope.$evalAsync(function () {
@@ -749,7 +717,6 @@ angular.module('beamng.apps')
         })
       })
 
-      // 60-Hz lightweight pose feed for buttery-smooth canvas rotation & panning
       scope.$on('BeamNGEarthNavPose', function (_, pose) {
         if (!pose) return
         targetPose.x = Number(pose.x) || 0
@@ -768,7 +735,6 @@ angular.module('beamng.apps')
           renderPose.camHeadingRad = targetPose.camHeadingRad
           renderPose.speedKph = targetPose.speedKph
         }
-        // Keep text compass/speed crisp at ~12 Hz without overloading Angular $digest
         var now = Date.now()
         if (scope.nav && (now - lastHudTextPoseMs) >= 80) {
           lastHudTextPoseMs = now
