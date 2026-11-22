@@ -214,10 +214,24 @@ end
 
 local lineKey = nil      -- (setLineArrows: the route-line arrows' key; nil while the planner's arrows are up)
 local managedHidden = false
+local worldArrows = true -- 3D world groundMarkers arrows (false when user drives purely by HUD Turn-by-Turn Nav)
 local function clearArrows()
   local gm = rawget(_G, 'core_groundMarkers')
   if gm and gm.setPath then pcall(gm.setPath, nil) end
   routedTo, lineKey = nil, nil
+end
+
+function M.setWorldArrows(on)
+  local nextVal = on ~= false
+  if worldArrows ~= nextVal then
+    worldArrows = nextVal
+    if not worldArrows then clearArrows() end
+  end
+  return worldArrows
+end
+
+function M.worldArrowsEnabled()
+  return worldArrows
 end
 local function stripFixedTarget(gm)
   local rp = gm and gm.routePlanner
@@ -345,6 +359,27 @@ function M.route()
   if not route then return nil end
   return { version = route.version, points = route.points, dist = route.dist, dur = route.dur, elev = route.elev,
            legs = route.legs, steps = route.steps }
+end
+
+-- Active ENU route polyline & live progress for HUD Turn-by-Turn Navigation (turnByTurn.lua).
+function M.currentEnu()
+  if not route or not enu or not enu.x or #enu.x < 2 then return nil end
+  return {
+    x = enu.x,
+    y = enu.y,
+    cum = enu.cum,
+    progress = progress,
+    progressS = progressS or 0,
+    version = route.version or 0,
+    dist = route.dist,
+    dur = route.dur,
+    steps = route.steps,
+    destName = dest and dest.name or nil,
+    destLat = dest and dest.lat or nil,
+    destLon = dest and dest.lon or nil,
+    remaining = info and info.remaining or nil,
+    eta = info and info.eta or nil,
+  }
 end
 
 local function toEnu(anchor)
@@ -1330,6 +1365,10 @@ function M.update(anchor, player)
       end
     end
     if auto and not tg then return end -- recovery may retry; never drive a destination-nearest fallback
+    if not worldArrows and not auto then
+      if routedTo or lineKey then clearArrows() end
+      return
+    end
     local hereS = e.cum[i] + t * (e.cum[i + 1] - e.cum[i])
     if not auto and speed >= M.LINE_MPS and setLineArrows(e, hereS, player.z) then return end
     tg = tg or (nodes and routeTarget(e, nodes, i, t))
@@ -1352,7 +1391,7 @@ function M.update(anchor, player)
     end
   end
   -- no planned route (yet, or offline), or none of it on the local graph: toward the destination
-  if managedHidden then return end
+  if managedHidden or (not worldArrows and not auto) then return end
   local id, pos, nd = M.pickNode(nodes, tx, ty)
   if not id then return end
   local final = nd <= M.FINAL_M

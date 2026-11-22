@@ -1194,6 +1194,50 @@ function M.uiRadioRefresh()
   return { ok = lr.refresh(), state = lr.uiState() }
 end
 
+-- Turn-by-Turn Navigation & Multi-Design HUD (turnByTurn.lua)
+function M.uiNavState()
+  local nav = ext('beamngEarth_turnByTurn')
+  return nav and nav.uiState and nav.uiState() or { error = 'Turn-by-Turn Navigation not loaded' }
+end
+function M.uiNavSetEnabled(flag)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setEnabled then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  return { ok = true, enabled = nav.setEnabled(flag), state = nav.uiState() }
+end
+function M.uiNavSetDesign(design)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setDesign then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  local d, ok = nav.setDesign(design)
+  return { ok = ok, navDesign = d, state = nav.uiState() }
+end
+function M.uiNavCycleDesign()
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.cycleDesign then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  local d = nav.cycleDesign()
+  return { ok = true, navDesign = d, state = nav.uiState() }
+end
+function M.uiNavSetChime(flag)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setChimeEnabled then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  return { ok = true, chimeEnabled = nav.setChimeEnabled(flag), state = nav.uiState() }
+end
+function M.uiNavSetUnits(units)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setUnits then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  local u, ok = nav.setUnits(units)
+  return { ok = ok, units = u, state = nav.uiState() }
+end
+function M.uiNavSetHideWorldMarkers(flag)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setHideWorldMarkers then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  return { ok = true, hideWorldMarkers = nav.setHideWorldMarkers(flag), state = nav.uiState() }
+end
+function M.uiNavSetNorthUp(flag)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setNorthUp then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  return { ok = true, northUp = nav.setNorthUp(flag), state = nav.uiState() }
+end
+
 -- The map's search-as-you-type: send (q -> { id } or { error }) and poll (id -> nil while waiting, else
 -- { results = {{name, detail, kind, lat, lon}...}, error }). Biased toward the player.
 local geocodeId = 0

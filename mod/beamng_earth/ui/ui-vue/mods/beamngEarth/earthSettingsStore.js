@@ -213,6 +213,13 @@ export const settingsSchema = [
     items: [],
   },
   {
+    // Turn-by-Turn Navigation & Multi-Design HUD (EarthNav.vue, earthNavStore.js)
+    name: "Navigation",
+    intro: "Drive purely by HUD turn-by-turn guidance with Autobahn exit callouts, audio chimes, and three switchable instrument layouts.",
+    nav: true,
+    items: [],
+  },
+  {
     // third-party add-ons (EarthAddons.vue, earthAddonsStore.js): the page is the add-ons' own view, no settings rows
     name: "Add-ons",
     addons: true,
