@@ -1237,6 +1237,11 @@ function M.uiNavSetNorthUp(flag)
   if not nav or not nav.setNorthUp then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
   return { ok = true, northUp = nav.setNorthUp(flag), state = nav.uiState() }
 end
+function M.uiNavSetMinimapSize(size)
+  local nav = ext('beamngEarth_turnByTurn')
+  if not nav or not nav.setMinimapSize then return { ok = false, error = 'Turn-by-Turn Navigation not loaded' } end
+  return { ok = true, minimapSize = nav.setMinimapSize(size), state = nav.uiState() }
+end
 
 -- The map's search-as-you-type: send (q -> { id } or { error }) and poll (id -> nil while waiting, else
 -- { results = {{name, detail, kind, lat, lon}...}, error }). Biased toward the player.
