@@ -226,17 +226,34 @@ do
   local keepRad, keepDeg = N.computeHeading(nil, { vx = 0, vy = -8, speed = 8 }, math.rad(45))
   T.check(keepDeg == 45 and math.abs(keepRad - math.rad(45)) < 1e-4, 'no forward vector retains previous heading, never velocity')
 
-  -- 60-Hz pose hook (BeamNGEarthNavPose) emission & throttling
+  -- 60-Hz pose hook (BeamNGEarthNavPose) emission, camera-pan heading vs vehicle heading & throttling
   local poses = {}
   guihooks = { trigger = function(name, p) if name == 'BeamNGEarthNavPose' then poses[#poses + 1] = p end end }
   getPlayerVehicle = function() return revVeh end
+  -- Camera panned East (1, 0 -> +pi/2) while car faces North (0, 1 -> 0)
+  core_camera = { getForwardXYZ = function() return 1, 0, 0 end }
+  T.check(math.abs(N.computeCameraHeading(core_camera, 0) - math.pi * 0.5) < 1e-4, 'computeCameraHeading reads core_camera.getForwardXYZ()')
   T.check(N.onFrame({ x = 100.5, y = 200.25, vx = 0, vy = -10, speed = 10 }, 1.000) == true, 'onFrame emits first 60 Hz pose')
   T.check(#poses == 1 and poses[1].x == 100.5 and poses[1].y == 200.25 and poses[1].headingDeg == 0 and poses[1].speedKph == 36,
     'BeamNGEarthNavPose carries exact x, y, true forward headingDeg=0, speedKph=36')
+  T.check(math.abs(poses[1].vehHeadingRad) < 1e-4 and math.abs(poses[1].camHeadingRad - math.pi * 0.5) < 1e-4,
+    'BeamNGEarthNavPose separates vehHeadingRad (0) from panned camHeadingRad (pi/2)')
   T.check(N.onFrame({ x = 101, y = 200, vx = 0, vy = -10, speed = 10 }, 1.005) == false and #poses == 1,
     'onFrame throttles within 1/60 s')
+  -- When northUp is enabled, camHeadingRad locks to 0 while vehHeadingRad stays true
+  N.setNorthUp(true)
   T.check(N.onFrame({ x = 101, y = 199, vx = 0, vy = -10, speed = 10 }, 1.020) == true and #poses == 2,
     'onFrame emits again after 1/60 s')
+  T.check(poses[2].camHeadingRad == 0 and math.abs(poses[2].vehHeadingRad) < 1e-4,
+    'northUp locks camHeadingRad to 0 while preserving vehHeadingRad')
+  N.setNorthUp(false)
+  -- Fallback when core_camera is absent: camHeadingRad falls back to vehHeadingRad
+  core_camera = nil
+  getPlayerVehicle = function() return idleVeh end
+  T.check(N.onFrame({ x = 102, y = 199, vx = 0, vy = 0, speed = 0 }, 1.040) == true and #poses == 3,
+    'onFrame emits fallback pose without core_camera')
+  T.check(math.abs(poses[3].vehHeadingRad - math.pi * 0.5) < 1e-4 and math.abs(poses[3].camHeadingRad - math.pi * 0.5) < 1e-4,
+    'without core_camera, camHeadingRad falls back to vehHeadingRad')
   getPlayerVehicle = nil
 
   -- hudapps.lua re-emits when currentPlace or roadsSeq updates
