@@ -35,9 +35,9 @@ M.CHIME_ARRIVE_M = 60.0
 M.MINI_ROUTE_M = 650.0
 M.MINI_ROUTE_BACK_M = 60.0
 M.MINI_ROUTE_MAX_PTS = 70
-M.MINI_ROAD_RADIUS_M = 460.0
-M.MINI_ROAD_MAX_SEGS = 450
-M.MINI_ROAD_REFRESH_M = 60.0
+M.MINI_ROAD_RADIUS_M = 950.0
+M.MINI_ROAD_MAX_SEGS = 2500
+M.MINI_ROAD_REFRESH_M = 35.0
 M.POSE_HZ_INTERVAL = 1.0 / 60.0
 
 local HIGH_CLASS = { motorway = true, trunk = true }
@@ -110,6 +110,7 @@ local state = {
   roadsAtX = nil,
   roadsAtY = nil,
   roadsGraph = nil,
+  roadsIndexSerial = -1,
   lastPoseClock = -math.huge,
   lastUpdateClock = -math.huge,
 }
@@ -809,32 +810,37 @@ local function buildMiniRoute(xs, ys, cum, sNow)
 end
 
 local function buildMiniRoads(px, py, force)
-  -- Primary: reuse minimaproads.lua's already-indexed spatial grid (all roads + tunnels)
+  -- Primary: reuse minimaproads.lua's already-indexed spatial grid (all roads + tunnels, proximity-prioritized)
   local okM, mr = pcall(require, 'beamngEarth/minimaproads')
   local okN, ng = pcall(require, 'beamngEarth/navgraph')
   local curGraph = (okN and ng and ng.currentGraph) and ng.currentGraph() or nil
+  local curSerial = (okM and mr and type(mr.indexSerial) == 'function') and mr.indexSerial() or -1
 
-  if not force and state.miniRoads and state.roadsAtX and state.roadsGraph == curGraph then
+  local sameSource = (curSerial > 0)
+    and (state.roadsIndexSerial == curSerial)
+    or (curSerial <= 0 and state.roadsGraph == curGraph)
+
+  if not force and state.miniRoads and state.roadsAtX and sameSource then
     local dx, dy = px - state.roadsAtX, py - state.roadsAtY
     if dx * dx + dy * dy < M.MINI_ROAD_REFRESH_M * M.MINI_ROAD_REFRESH_M then
-      return state.miniRoads
+      return state.miniRoads, false
     end
   end
 
   local out = nil
   if okM and mr and type(mr.queryWorld) == 'function' then
-    local q, qGraph = mr.queryWorld(px, py, M.MINI_ROAD_RADIUS_M, M.MINI_ROAD_MAX_SEGS)
+    local q, qGraph, qSerial = mr.queryWorld(px, py, M.MINI_ROAD_RADIUS_M, M.MINI_ROAD_MAX_SEGS)
     if q and #q > 0 then
       out = q
       curGraph = qGraph or curGraph
+      curSerial = qSerial or curSerial
     end
   end
 
   if not out and curGraph and curGraph.nodes and curGraph.edges then
     local r = M.MINI_ROAD_RADIUS_M
     local r2 = r * r
-    local cap = M.MINI_ROAD_MAX_SEGS * 5
-    out = {}
+    local candidates = {}
     local seen = {}
     for i = 1, #curGraph.edges do
       local e = curGraph.edges[i]
@@ -848,22 +854,73 @@ local function buildMiniRoads(px, py, force)
             seen[pk] = true
             local d = e[7] or 1
             local cls = (e[13] == 1 or e[13] == 2) and 0 or (d >= 0.85 and 1 or (d > 0.25 and 2 or 3))
-            local n = #out
-            out[n + 1] = math.floor(a[1] * 10 + 0.5) / 10
-            out[n + 2] = math.floor(a[2] * 10 + 0.5) / 10
-            out[n + 3] = math.floor(b[1] * 10 + 0.5) / 10
-            out[n + 4] = math.floor(b[2] * 10 + 0.5) / 10
-            out[n + 5] = cls
-            if #out >= cap then break end
+            local mx, my = (dx1 + dx2) * 0.5, (dy1 + dy2) * 0.5
+            candidates[#candidates + 1] = {
+              x1 = math.floor(a[1] * 10 + 0.5) / 10,
+              y1 = math.floor(a[2] * 10 + 0.5) / 10,
+              x2 = math.floor(b[1] * 10 + 0.5) / 10,
+              y2 = math.floor(b[2] * 10 + 0.5) / 10,
+              cls = cls,
+              d2 = mx * mx + my * my,
+            }
           end
         end
       end
     end
+    if #candidates > M.MINI_ROAD_MAX_SEGS then
+      table.sort(candidates, function(u, v) return u.d2 < v.d2 end)
+    end
+    local limit = math.min(#candidates, M.MINI_ROAD_MAX_SEGS)
+    out = {}
+    local o = 0
+    for i = 1, limit do
+      local c = candidates[i]
+      out[o + 1], out[o + 2], out[o + 3], out[o + 4], out[o + 5] = c.x1, c.y1, c.x2, c.y2, c.cls
+      o = o + 5
+    end
   end
 
-  state.roadsAtX, state.roadsAtY, state.roadsGraph = px, py, curGraph
+  state.miniRoads = out
+  state.roadsAtX, state.roadsAtY = px, py
+  state.roadsGraph, state.roadsIndexSerial = curGraph, curSerial
   state.roadsSeq = state.roadsSeq + 1
-  return out
+  return out, true
+end
+
+-- Push world-space road segments immediately via dedicated 'BeamNGEarthNavRoads' hook whenever
+-- new road tiles/index arrive or the player moves > MINI_ROAD_REFRESH_M (35 m).
+function M.pushRoads(px, py, force)
+  if not state.enabled then return false end
+  local x = tonumber(px) or state.playerX or 0
+  local y = tonumber(py) or state.playerY or 0
+  local roads, changed = buildMiniRoads(x, y, force == true)
+  if not changed and not force then return false end
+  local gh = rawget(_G, 'guihooks')
+  if gh and gh.trigger then
+    gh.trigger('BeamNGEarthNavRoads', {
+      seq = state.roadsSeq,
+      roads = roads or {},
+    })
+  end
+  return true
+end
+
+-- Called by minimaproads.lua the exact frame a new road spatial index finishes building.
+function M.onRoadsUpdated()
+  if not state.enabled or state.navDesign ~= 'round_minimap' then return false end
+  return M.pushRoads(state.playerX, state.playerY, true)
+end
+
+-- Instant road snapshot for BeamNGEarthNav on mount or design switch (no waiting for player movement).
+function M.getRoads()
+  ensurePrefs()
+  if not state.miniRoads then
+    buildMiniRoads(state.playerX or 0, state.playerY or 0, true)
+  end
+  return {
+    seq = state.roadsSeq,
+    roads = state.miniRoads or {},
+  }
 end
 
 -- Pure: true chassis forward heading (radians clockwise from North +y, and 0..359 degrees).
@@ -963,6 +1020,9 @@ function M.onFrame(player, clock)
       speedKph = state.speedKph,
       t = now,
     })
+  end
+  if state.navDesign == 'round_minimap' then
+    M.pushRoads(px, py, false)
   end
   return true
 end
@@ -1114,7 +1174,7 @@ function M.update(dtReal, anchor, player, clock)
 
     if state.navDesign == 'round_minimap' then
       state.miniRoute = buildMiniRoute(enu.x, enu.y, enu.cum, sNow)
-      state.miniRoads = buildMiniRoads(px, py)
+      M.pushRoads(px, py, false)
     else
       state.miniRoute = nil
       state.miniRoads = nil
@@ -1144,7 +1204,7 @@ function M.update(dtReal, anchor, player, clock)
     state.nextStreetName = state.destName
     if state.navDesign == 'round_minimap' then
       state.miniRoute = nil
-      state.miniRoads = buildMiniRoads(px, py)
+      M.pushRoads(px, py, false)
     end
     return
   end
@@ -1193,7 +1253,7 @@ function M.update(dtReal, anchor, player, clock)
       end
       if state.navDesign == 'round_minimap' then
         state.miniRoute = buildMiniRoute(state.routeX, state.routeY, state.routeCum, sNow)
-        state.miniRoads = buildMiniRoads(px, py)
+        M.pushRoads(px, py, false)
       end
       return
     end
@@ -1202,7 +1262,7 @@ function M.update(dtReal, anchor, player, clock)
   -- No active route
   if state.active then clearLiveRoute() end
   if state.navDesign == 'round_minimap' then
-    state.miniRoads = buildMiniRoads(px, py)
+    M.pushRoads(px, py, false)
   else
     state.miniRoads = nil
   end
@@ -1256,7 +1316,6 @@ function M.hudPayload()
     chimeKind = state.chimeKind,
     roadsSeq = state.roadsSeq,
     miniRoute = state.miniRoute,
-    miniRoads = state.miniRoads,
   }
 end
 
@@ -1272,7 +1331,7 @@ function M.reset()
   state.lastUpdateClock = -math.huge
   state.lastPoseClock = -math.huge
   state.miniRoads = nil
-  state.roadsAtX, state.roadsAtY, state.roadsGraph = nil, nil, nil
+  state.roadsAtX, state.roadsAtY, state.roadsGraph, state.roadsIndexSerial = nil, nil, nil, -1
 end
 
 function M._resetForTest()

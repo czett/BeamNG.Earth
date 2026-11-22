@@ -328,7 +328,10 @@ angular.module('beamng.apps')
       var rafId = null
       var lastRafMs = 0
       var lastHudTextPoseMs = 0
-      var lastRoadsSeq = -1
+      var lastAppliedRoadsSeq = -1
+      var latestRoads = null
+      var latestRoadsSeq = -1
+      var prevDesign = ''
       var svgRefs = null
 
       var ACTION_LABELS = {
@@ -464,11 +467,11 @@ angular.module('beamng.apps')
           routeBg: svg.querySelector('.bng-nav-route-bg'),
           routeFg: svg.querySelector('.bng-nav-route-fg')
         }
-        lastRoadsSeq = -1
+        lastAppliedRoadsSeq = -1
         return svgRefs
       }
 
-      // Rebuild world-space vector road <path> geometry ONLY when roadsSeq updates (every ~60 m)
+      // Rebuild world-space vector road <path> geometry immediately on road feed updates
       function rebuildRoadPaths (refs, roads) {
         var buckets = [[], [], [], []]
         if (Array.isArray(roads) && roads.length >= 5) {
@@ -486,6 +489,26 @@ angular.module('beamng.apps')
         }
       }
 
+      function applyRoadSnapshot (seq, roads) {
+        if (Array.isArray(roads)) {
+          latestRoads = roads
+          latestRoadsSeq = Number(seq) || (latestRoadsSeq + 1)
+          var refs = ensureSvgRefs()
+          if (refs) {
+            lastAppliedRoadsSeq = latestRoadsSeq
+            rebuildRoadPaths(refs, latestRoads)
+          }
+        }
+      }
+
+      function fetchRoadsNow () {
+        bngApi.engineLua('if beamngEarth_turnByTurn and beamngEarth_turnByTurn.getRoads then return beamngEarth_turnByTurn.getRoads() end', function (res) {
+          if (res && Array.isArray(res.roads)) {
+            applyRoadSnapshot(res.seq, res.roads)
+          }
+        })
+      }
+
       // 60-FPS Pure Vector SVG update (exact camera-pan rotation, relative chevron, zero-lag route)
       function updateRoundMinimapSvg () {
         var nav = scope.nav
@@ -493,11 +516,9 @@ angular.module('beamng.apps')
         var refs = ensureSvgRefs()
         if (!refs || !refs.world) return
 
-        // Update road geometry only when server/graph cell query refreshed
-        var rSeq = Number(nav.roadsSeq) || 0
-        if (rSeq !== lastRoadsSeq) {
-          lastRoadsSeq = rSeq
-          rebuildRoadPaths(refs, nav.miniRoads)
+        if (latestRoads && lastAppliedRoadsSeq !== latestRoadsSeq) {
+          lastAppliedRoadsSeq = latestRoadsSeq
+          rebuildRoadPaths(refs, latestRoads)
         }
 
         var cx = 100
@@ -644,6 +665,10 @@ angular.module('beamng.apps')
 
         var design = nav.navDesign || 'gmaps_card'
         scope.designBadge = design === 'gmaps_card' ? '1/3' : (design === 'round_minimap' ? '2/3' : '3/3')
+        if (design === 'round_minimap' && prevDesign !== 'round_minimap') {
+          fetchRoadsNow()
+        }
+        prevDesign = design
 
         if (nav.isHighwayExit) {
           scope.bannerStyle = { background: '#0b4f8c' }
@@ -752,6 +777,13 @@ angular.module('beamng.apps')
         if (st && typeof st === 'object') {
           scope.$evalAsync(function () { applyNav(st) })
         }
+      })
+      fetchRoadsNow()
+
+      // Instant full-coverage road geometry push from Lua (0-frame lag on new tiles or > 35 m movement)
+      scope.$on('BeamNGEarthNavRoads', function (_, msg) {
+        if (!msg || !Array.isArray(msg.roads)) return
+        applyRoadSnapshot(msg.seq, msg.roads)
       })
 
       scope.$on('BeamNGEarthHud', function (_, data) {

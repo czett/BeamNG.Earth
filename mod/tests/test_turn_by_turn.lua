@@ -287,4 +287,68 @@ do
   H.setMounted('nav', false)
 end
 
+------------------------------------------------------------------------------------------
+-- 8. Instant road-feed refresh (minimaproads index hook, > 35 m move, 950 m proximity query)
+------------------------------------------------------------------------------------------
+do
+  table.clear = table.clear or function(t) for k in pairs(t) do t[k] = nil end end
+  local MR = require('beamngEarth/minimaproads')
+  N._resetForTest()
+  N.setDesign('round_minimap')
+
+  -- Build a graph spanning SW (-800,-800) AND close East (+60, 0) + far North (0, +880)
+  local g1 = {
+    anchor = 1,
+    nodes = {
+      sw1 = { -800, -800, 0, 3 }, sw2 = { -750, -800, 0, 3 },
+      e1  = { 40, 0, 0, 3 },      e2  = { 80, 0, 0, 3 },
+      n1  = { 0, 860, 0, 3 },     n2  = { 0, 900, 0, 3 },
+    },
+    edges = {
+      { 'sw1', 'sw2', 0, 1, 1, 13.8, 0.9, 3 },
+      { 'e1',  'e2',  0, 1, 1, 13.8, 0.9, 3 },
+      { 'n1',  'n2',  0, 1, 1, 13.8, 0.9, 3 },
+    },
+  }
+
+  local roadPushes = {}
+  guihooks = {
+    trigger = function(name, p)
+      if name == 'BeamNGEarthNavRoads' then roadPushes[#roadPushes + 1] = p end
+    end,
+  }
+  beamngEarth_turnByTurn = N
+
+  -- Verify proximity sorting when capped (maxSegs=1 must pick closest East segment, not SW corner!)
+  MR.update(g1)
+  T.check(#roadPushes == 1 and #roadPushes[1].roads == 15,
+    'minimaproads.update immediately pushes BeamNGEarthNavRoads with all 3 segments within 950 m (got ' .. tostring(#roadPushes) .. ')')
+  local q1 = MR.queryWorld(0, 0, 950, 1)
+  T.check(q1 and #q1 == 5 and q1[1] == 40 and q1[3] == 80,
+    'queryWorld prioritizes closest East segment over SW corner when capped')
+  T.check(N.MINI_ROAD_RADIUS_M >= 900 and N.MINI_ROAD_MAX_SEGS >= 1500 and N.MINI_ROAD_REFRESH_M == 35.0,
+    'radius >= 900 m, budget >= 1500 segs, refresh threshold 35 m')
+
+  -- Small move (< 35 m) does not re-push
+  T.check(N.pushRoads(15, 0, false) == false and #roadPushes == 1, 'move < 35 m does not re-push roads')
+  -- Move > 35 m triggers immediate BeamNGEarthNavRoads push
+  T.check(N.pushRoads(40, 0, false) == true and #roadPushes == 2, 'move > 35 m triggers immediate BeamNGEarthNavRoads push')
+
+  -- New graph arriving triggers immediate refresh without player moving
+  local g2 = {
+    anchor = 1,
+    nodes = { a = { 0, 0, 0, 3 }, b = { 120, 0, 0, 3 } },
+    edges = { { 'a', 'b', 0, 1, 1, 13.8, 1.0, 3 } },
+  }
+  MR.update(g2)
+  T.check(#roadPushes == 3 and #roadPushes[3].roads == 5, 'new road graph pushes immediately via onRoadsUpdated')
+
+  local snap = N.getRoads()
+  T.check(snap and type(snap.roads) == 'table' and #snap.roads == 5 and snap.seq == roadPushes[3].seq,
+    'getRoads returns immediate road snapshot')
+
+  beamngEarth_turnByTurn = nil
+  MR.unhook()
+end
+
 T.done('test_turn_by_turn')
