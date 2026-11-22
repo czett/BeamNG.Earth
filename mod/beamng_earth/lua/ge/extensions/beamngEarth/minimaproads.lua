@@ -17,6 +17,7 @@ M.CELL_M = 128
 M.BUILD_EDGES = 1500        -- links indexed a frame (~0.3 ms)
 
 local index = nil           -- the index drawn: { links = {x1, y1, x2, y2, class, ...}, cells = {key -> {lIdx...}}, graph }
+local indexSerial = 0       -- bumped whenever index finishes building a new road graph
 local building = nil        -- coroutine building the next one
 local buildingFor = nil     -- the graph it is for
 local stamp, seen = 0, {}   -- per draw: a link in several cells drawn once
@@ -128,7 +129,10 @@ function M.update(graph)
   end
   if coroutine.status(building) == 'dead' then
     index, building, buildingFor = res, nil, nil
+    indexSerial = indexSerial + 1
     seen, stamp = {}, 0
+    local nav = rawget(_G, 'beamngEarth_turnByTurn')
+    if nav and nav.onRoadsUpdated then pcall(nav.onRoadsUpdated) end
   end
 end
 
@@ -182,26 +186,42 @@ function M.unhook()
   index, building, buildingFor, broken = nil, nil, nil, false
 end
 
+function M.indexSerial() return indexSerial end
+
 -- World-space road segments within radius of (x, y) from the already-built spatial grid (for BeamNGEarthNav).
--- Returns flat array { x1, y1, x2, y2, cls, ... } and the graph reference, or nil if no index is ready.
+-- Prioritizes segments closest to (x, y) across all directions when exceeding maxSegs so no side streets drop.
+-- Returns flat array { x1, y1, x2, y2, cls, ... }, the graph reference, and indexSerial (or nil if not ready).
 function M.queryWorld(x, y, radius, maxSegs)
-  if not index or not index.links then return nil, nil end
+  if not index or not index.links then return nil, nil, indexSerial end
+  radius = radius or 950
+  maxSegs = maxSegs or 2500
   table.clear(list)
   M.query(index, x, y, radius, list)
   local links = index.links
-  local out = {}
-  local cap = (maxSegs or 450) * 5
-  for t = 1, #list do
-    local l = list[t]
-    local n = #out
-    if n >= cap then break end
-    out[n + 1] = math.floor(links[l] * 10 + 0.5) / 10
-    out[n + 2] = math.floor(links[l + 1] * 10 + 0.5) / 10
-    out[n + 3] = math.floor(links[l + 2] * 10 + 0.5) / 10
-    out[n + 4] = math.floor(links[l + 3] * 10 + 0.5) / 10
-    out[n + 5] = links[l + 4]
+  local count = #list
+  if count > maxSegs then
+    local dists = {}
+    for t = 1, count do
+      local l = list[t]
+      local mx = (links[l] + links[l + 2]) * 0.5 - x
+      local my = (links[l + 1] + links[l + 3]) * 0.5 - y
+      dists[l] = mx * mx + my * my
+    end
+    table.sort(list, function(a, b) return dists[a] < dists[b] end)
+    count = maxSegs
   end
-  return out, index.graph
+  local out = {}
+  local o = 0
+  for t = 1, count do
+    local l = list[t]
+    out[o + 1] = floor(links[l] * 10 + 0.5) / 10
+    out[o + 2] = floor(links[l + 1] * 10 + 0.5) / 10
+    out[o + 3] = floor(links[l + 2] * 10 + 0.5) / 10
+    out[o + 4] = floor(links[l + 3] * 10 + 0.5) / 10
+    out[o + 5] = links[l + 4]
+    o = o + 5
+  end
+  return out, index.graph, indexSerial
 end
 
 function M.status()
