@@ -155,6 +155,7 @@ local function navKey(n)
     .. tostring(n.headingDeg or '') .. '\4' .. tostring(n.speedKph or '') .. '\4'
     .. tostring(n.speedLimitKph or '') .. '\4' .. tostring(n.speedLimitUnlimited) .. '\4'
     .. tostring(n.chimeSeq or 0) .. '\4' .. tostring(n.currentStreet or '') .. '\4'
+    .. tostring(n.currentPlace or '') .. '\4' .. tostring(n.roadsSeq or 0) .. '\4'
     .. tostring(routePts) .. '\4' .. tostring(roadSegs)
 end
 

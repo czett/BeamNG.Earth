@@ -182,6 +182,28 @@ function M.unhook()
   index, building, buildingFor, broken = nil, nil, nil, false
 end
 
+-- World-space road segments within radius of (x, y) from the already-built spatial grid (for BeamNGEarthNav).
+-- Returns flat array { x1, y1, x2, y2, cls, ... } and the graph reference, or nil if no index is ready.
+function M.queryWorld(x, y, radius, maxSegs)
+  if not index or not index.links then return nil, nil end
+  table.clear(list)
+  M.query(index, x, y, radius, list)
+  local links = index.links
+  local out = {}
+  local cap = (maxSegs or 450) * 5
+  for t = 1, #list do
+    local l = list[t]
+    local n = #out
+    if n >= cap then break end
+    out[n + 1] = math.floor(links[l] * 10 + 0.5) / 10
+    out[n + 2] = math.floor(links[l + 1] * 10 + 0.5) / 10
+    out[n + 3] = math.floor(links[l + 2] * 10 + 0.5) / 10
+    out[n + 4] = math.floor(links[l + 3] * 10 + 0.5) / 10
+    out[n + 5] = links[l + 4]
+  end
+  return out, index.graph
+end
+
 function M.status()
   return { links = index and index.count or 0, building = building ~= nil, hooked = wrap ~= nil }
 end

@@ -29,10 +29,13 @@ M.CHIME_TURN_NEAR_M = 150.0
 M.CHIME_ARRIVE_M = 60.0
 
 -- Minimap canvas sampling caps (for 'round_minimap' design)
-M.MINI_ROUTE_M = 480.0
-M.MINI_ROUTE_MAX_PTS = 44
-M.MINI_ROAD_RADIUS_M = 360.0
-M.MINI_ROAD_MAX_SEGS = 90
+M.MINI_ROUTE_M = 650.0
+M.MINI_ROUTE_BACK_M = 60.0
+M.MINI_ROUTE_MAX_PTS = 70
+M.MINI_ROAD_RADIUS_M = 460.0
+M.MINI_ROAD_MAX_SEGS = 450
+M.MINI_ROAD_REFRESH_M = 60.0
+M.POSE_HZ_INTERVAL = 1.0 / 60.0
 
 local HIGH_CLASS = { motorway = true, trunk = true }
 local LINK_CLASS = { motorway_link = true, trunk_link = true }
@@ -74,10 +77,15 @@ local state = {
   nextManeuver = nil,
   nextStreetName = '',
   currentStreet = '',
+  currentPlace = '',
   currentHighway = '',
 
   -- Vehicle / cockpit telemetry
+  playerX = 0,
+  playerY = 0,
+  headingRad = 0,
   headingDeg = 0,
+  speedMs = 0,
   speedKph = 0,
   speedLimitKph = nil,
   speedLimitUnit = 'kmh',
@@ -89,9 +97,14 @@ local state = {
   chimeKind = nil,
   firedChimes = {},
 
-  -- Round minimap geometry
+  -- Round minimap world-space geometry & 60 Hz pose cadence
   miniRoute = nil,
   miniRoads = nil,
+  roadsSeq = 0,
+  roadsAtX = nil,
+  roadsAtY = nil,
+  roadsGraph = nil,
+  lastPoseClock = -math.huge,
   lastUpdateClock = -math.huge,
 }
 
@@ -748,62 +761,152 @@ function M.setNorthUp(flag)
 end
 
 ------------------------------------------------------------------------------------------
--- Minimap Canvas Data Builders (for 'round_minimap' design)
+-- Minimap Canvas Data Builders (world-space ENU coordinates for 60-FPS smooth rendering)
 
-local function buildMiniRoute(xs, ys, cum, sNow, px, py)
+local function buildMiniRoute(xs, ys, cum, sNow)
   if not xs or #xs < 2 then return nil end
   local out = {}
   local n = #xs
+  local sStart = math.max(0, sNow - M.MINI_ROUTE_BACK_M)
   local sEnd = math.min(cum[n], sNow + M.MINI_ROUTE_M)
-  local step = math.max(12, (sEnd - sNow) / M.MINI_ROUTE_MAX_PTS)
+  local step = math.max(10, (sEnd - sStart) / M.MINI_ROUTE_MAX_PTS)
   local k = 1
-  while k < n - 1 and cum[k + 1] < sNow do k = k + 1 end
-  local s = sNow
-  while #out < M.MINI_ROUTE_MAX_PTS do
+  while k < n - 1 and cum[k + 1] < sStart do k = k + 1 end
+  local s = sStart
+  while #out < M.MINI_ROUTE_MAX_PTS * 2 do
     while k < n - 1 and cum[k + 1] < s do k = k + 1 end
     local seg = cum[k + 1] - cum[k]
     local f = seg > 0 and math.max(0, math.min(1, (s - cum[k]) / seg)) or 0
-    local rx = xs[k] + f * (xs[k + 1] - xs[k]) - px
-    local ry = ys[k] + f * (ys[k + 1] - ys[k]) - py
-    out[#out + 1] = { math.floor(rx * 10 + 0.5) / 10, math.floor(ry * 10 + 0.5) / 10 }
+    local rx = xs[k] + f * (xs[k + 1] - xs[k])
+    local ry = ys[k] + f * (ys[k + 1] - ys[k])
+    out[#out + 1] = math.floor(rx * 10 + 0.5) / 10
+    out[#out + 1] = math.floor(ry * 10 + 0.5) / 10
     if s >= sEnd - 0.5 then break end
     s = math.min(s + step, sEnd)
   end
   return out
 end
 
-local function buildMiniRoads(px, py)
+local function buildMiniRoads(px, py, force)
+  -- Primary: reuse minimaproads.lua's already-indexed spatial grid (all roads + tunnels)
+  local okM, mr = pcall(require, 'beamngEarth/minimaproads')
   local okN, ng = pcall(require, 'beamngEarth/navgraph')
-  if not okN or not ng or not ng.currentGraph then return nil end
-  local g = ng.currentGraph()
-  if not g or not g.nodes or not g.edges then return nil end
-  local r = M.MINI_ROAD_RADIUS_M
-  local r2 = r * r
-  local out = {}
-  local seen = {}
-  for i = 1, #g.edges do
-    local e = g.edges[i]
-    local a, b = g.nodes[e[1]], g.nodes[e[2]]
-    if a and b and e[1] ~= e[2] then
-      local dx1, dy1 = a[1] - px, a[2] - py
-      local dx2, dy2 = b[1] - px, b[2] - py
-      if (dx1 * dx1 + dy1 * dy1 <= r2) or (dx2 * dx2 + dy2 * dy2 <= r2) then
-        local pk = e[1] < e[2] and (e[1] .. '|' .. e[2]) or (e[2] .. '|' .. e[1])
-        if not seen[pk] then
-          seen[pk] = true
-          local d = e[7] or 1
-          local cls = d >= 0.85 and 1 or (d > 0.25 and 2 or 3)
-          out[#out + 1] = {
-            math.floor(dx1 + 0.5), math.floor(dy1 + 0.5),
-            math.floor(dx2 + 0.5), math.floor(dy2 + 0.5),
-            cls,
-          }
-          if #out >= M.MINI_ROAD_MAX_SEGS then break end
+  local curGraph = (okN and ng and ng.currentGraph) and ng.currentGraph() or nil
+
+  if not force and state.miniRoads and state.roadsAtX and state.roadsGraph == curGraph then
+    local dx, dy = px - state.roadsAtX, py - state.roadsAtY
+    if dx * dx + dy * dy < M.MINI_ROAD_REFRESH_M * M.MINI_ROAD_REFRESH_M then
+      return state.miniRoads
+    end
+  end
+
+  local out = nil
+  if okM and mr and type(mr.queryWorld) == 'function' then
+    local q, qGraph = mr.queryWorld(px, py, M.MINI_ROAD_RADIUS_M, M.MINI_ROAD_MAX_SEGS)
+    if q and #q > 0 then
+      out = q
+      curGraph = qGraph or curGraph
+    end
+  end
+
+  if not out and curGraph and curGraph.nodes and curGraph.edges then
+    local r = M.MINI_ROAD_RADIUS_M
+    local r2 = r * r
+    local cap = M.MINI_ROAD_MAX_SEGS * 5
+    out = {}
+    local seen = {}
+    for i = 1, #curGraph.edges do
+      local e = curGraph.edges[i]
+      local a, b = curGraph.nodes[e[1]], curGraph.nodes[e[2]]
+      if a and b and e[1] ~= e[2] then
+        local dx1, dy1 = a[1] - px, a[2] - py
+        local dx2, dy2 = b[1] - px, b[2] - py
+        if (dx1 * dx1 + dy1 * dy1 <= r2) or (dx2 * dx2 + dy2 * dy2 <= r2) then
+          local pk = e[1] < e[2] and (e[1] .. '|' .. e[2]) or (e[2] .. '|' .. e[1])
+          if not seen[pk] then
+            seen[pk] = true
+            local d = e[7] or 1
+            local cls = (e[13] == 1 or e[13] == 2) and 0 or (d >= 0.85 and 1 or (d > 0.25 and 2 or 3))
+            local n = #out
+            out[n + 1] = math.floor(a[1] * 10 + 0.5) / 10
+            out[n + 2] = math.floor(a[2] * 10 + 0.5) / 10
+            out[n + 3] = math.floor(b[1] * 10 + 0.5) / 10
+            out[n + 4] = math.floor(b[2] * 10 + 0.5) / 10
+            out[n + 5] = cls
+            if #out >= cap then break end
+          end
         end
       end
     end
   end
+
+  state.roadsAtX, state.roadsAtY, state.roadsGraph = px, py, curGraph
+  state.roadsSeq = state.roadsSeq + 1
   return out
+end
+
+-- Pure: true chassis forward heading (radians clockwise from North +y, and 0..359 degrees).
+-- Uses vehicle forward vector strictly (getDirectionVector / player.fwdX,fwdY), NEVER velocity,
+-- so reversing (R) or idling at 0 km/h never flips or jitters the minimap/compass.
+function M.computeHeading(veh, player, prevHeadingRad)
+  local fx, fy = nil, nil
+  if veh and veh.getDirectionVector then
+    local ok, d = pcall(function() return veh:getDirectionVector() end)
+    if ok and d and isFinite(d.x) and isFinite(d.y) and (d.x * d.x + d.y * d.y) > 1e-4 then
+      fx, fy = d.x, d.y
+    end
+  end
+  if not fx and type(player) == 'table' and isFinite(player.fwdX) and isFinite(player.fwdY) then
+    if (player.fwdX * player.fwdX + player.fwdY * player.fwdY) > 1e-4 then
+      fx, fy = player.fwdX, player.fwdY
+    end
+  end
+  local rad = nil
+  if fx and fy then
+    rad = math.atan2(fx, fy)
+    if rad < 0 then rad = rad + math.pi * 2 end
+  elseif type(player) == 'table' and isFinite(player.heading) then
+    rad = math.rad((player.heading % 360 + 360) % 360)
+  else
+    rad = isFinite(prevHeadingRad) and prevHeadingRad or 0
+  end
+  local deg = math.floor((math.deg(rad) % 360) + 0.5) % 360
+  return rad, deg
+end
+
+-- High-rate (60 Hz) pose emitter called every frame from core.lua while BeamNGEarthNav is mounted.
+function M.onFrame(player, clock)
+  if not state.enabled or not player then return false end
+  local now = tonumber(clock) or os.clock()
+  if now - state.lastPoseClock < M.POSE_HZ_INTERVAL then return false end
+  state.lastPoseClock = now
+
+  local px = tonumber(player.x) or state.playerX or 0
+  local py = tonumber(player.y) or state.playerY or 0
+  local vx = tonumber(player.vx) or 0
+  local vy = tonumber(player.vy) or 0
+  local speedMs = tonumber(player.speed) or math.sqrt(vx * vx + vy * vy)
+  local veh = rawget(_G, 'getPlayerVehicle') and getPlayerVehicle(0) or nil
+  local hRad, hDeg = M.computeHeading(veh, player, state.headingRad)
+
+  state.playerX, state.playerY = px, py
+  state.headingRad, state.headingDeg = hRad, hDeg
+  state.speedMs = speedMs
+  state.speedKph = math.floor(speedMs * 3.6 + 0.5)
+
+  local gh = rawget(_G, 'guihooks')
+  if gh and gh.trigger then
+    gh.trigger('BeamNGEarthNavPose', {
+      x = px,
+      y = py,
+      headingRad = hRad,
+      headingDeg = hDeg,
+      speedMs = speedMs,
+      speedKph = state.speedKph,
+      t = now,
+    })
+  end
+  return true
 end
 
 ------------------------------------------------------------------------------------------
@@ -840,29 +943,23 @@ local function readTelemetry(player)
   local vx = player and tonumber(player.vx) or 0
   local vy = player and tonumber(player.vy) or 0
   local speedMs = tonumber(player and player.speed) or math.sqrt(vx * vx + vy * vy)
+  state.playerX, state.playerY = px, py
+  state.speedMs = speedMs
   state.speedKph = math.floor(speedMs * 3.6 + 0.5)
 
-  -- Heading (degrees clockwise from true North)
-  local heading = player and tonumber(player.heading)
-  if not heading then
-    local veh = rawget(_G, 'getPlayerVehicle') and getPlayerVehicle(0)
-    local d = veh and veh.getDirectionVector and veh:getDirectionVector()
-    if d and (d.x * d.x + d.y * d.y) > 0.01 then
-      heading = (math.deg(math.atan2(d.x, d.y)) + 360) % 360
-    elseif speedMs > 1.5 then
-      heading = (math.deg(math.atan2(vx, vy)) + 360) % 360
-    else
-      heading = state.headingDeg or 0
-    end
-  end
-  state.headingDeg = math.floor((heading % 360) + 0.5) % 360
+  -- True chassis forward heading (never flips on reverse or idle)
+  local veh = rawget(_G, 'getPlayerVehicle') and getPlayerVehicle(0) or nil
+  local hRad, hDeg = M.computeHeading(veh, player, state.headingRad)
+  state.headingRad = hRad
+  state.headingDeg = hDeg
 
-  -- Current street & coordinates
+  -- Current street, town & coordinates
   local okS, sb = pcall(require, 'beamngEarth/statusbar')
   if okS and sb and sb.location then
     local loc = sb.location()
     if type(loc) == 'table' then
       state.currentStreet = trim(loc.street)
+      state.currentPlace = trim(loc.place)
     end
   end
   if player and isFinite(player.lat) and isFinite(player.lon) then
@@ -955,7 +1052,7 @@ function M.update(dtReal, anchor, player, clock)
     end
 
     if state.navDesign == 'round_minimap' then
-      state.miniRoute = buildMiniRoute(enu.x, enu.y, enu.cum, sNow, px, py)
+      state.miniRoute = buildMiniRoute(enu.x, enu.y, enu.cum, sNow)
       state.miniRoads = buildMiniRoads(px, py)
     else
       state.miniRoute = nil
@@ -1034,7 +1131,7 @@ function M.update(dtReal, anchor, player, clock)
         end
       end
       if state.navDesign == 'round_minimap' then
-        state.miniRoute = buildMiniRoute(state.routeX, state.routeY, state.routeCum, sNow, px, py)
+        state.miniRoute = buildMiniRoute(state.routeX, state.routeY, state.routeCum, sNow)
         state.miniRoads = buildMiniRoads(px, py)
       end
       return
@@ -1080,7 +1177,12 @@ function M.hudPayload()
     nextStreetName = state.nextStreetName,
     destName = state.destName,
     currentStreet = state.currentStreet,
+    currentPlace = state.currentPlace,
+    playerX = state.playerX,
+    playerY = state.playerY,
+    headingRad = state.headingRad,
     headingDeg = state.headingDeg,
+    speedMs = state.speedMs,
     speedKph = state.speedKph,
     speedLimitKph = state.speedLimitKph,
     speedLimitUnit = state.speedLimitUnit,
@@ -1088,6 +1190,7 @@ function M.hudPayload()
     coordsLabel = state.coordsLabel,
     chimeSeq = state.chimeSeq,
     chimeKind = state.chimeKind,
+    roadsSeq = state.roadsSeq,
     miniRoute = state.miniRoute,
     miniRoads = state.miniRoads,
   }
@@ -1103,7 +1206,9 @@ end
 function M.reset()
   clearLiveRoute()
   state.lastUpdateClock = -math.huge
+  state.lastPoseClock = -math.huge
   state.miniRoads = nil
+  state.roadsAtX, state.roadsAtY, state.roadsGraph = nil, nil, nil
 end
 
 function M._resetForTest()
@@ -1117,12 +1222,18 @@ function M._resetForTest()
   state.prefsLoaded = true
   state.chimeSeq = 0
   state.chimeKind = nil
+  state.playerX = 0
+  state.playerY = 0
+  state.headingRad = 0
   state.headingDeg = 0
+  state.speedMs = 0
   state.speedKph = 0
   state.speedLimitKph = nil
   state.speedLimitUnlimited = false
   state.currentStreet = ''
+  state.currentPlace = ''
   state.currentHighway = ''
+  state.roadsSeq = 0
 end
 
 return M

@@ -3166,7 +3166,10 @@ local function onUpdate(dtReal, dtSim)
     end
     do
       local nav = rawget(_G, 'beamngEarth_turnByTurn')
-      if nav and nav.update then pcall(nav.update, dtReal, st.anchor, st.player, st.clock) end
+      if nav then
+        if nav.update then pcall(nav.update, dtReal, st.anchor, st.player, st.clock) end
+        if hudapps.mounted('nav') and nav.onFrame then pcall(nav.onFrame, st.player, st.clock) end
+      end
     end
   end
   if st.active then
