@@ -30,3 +30,5 @@ setExtensionUnloadMode('beamngEarth_finder', 'manual')
 setExtensionUnloadMode('beamngEarth_transportModes', 'manual')
 -- Location-Aware Live & Local Radio (locationRadio.lua).
 setExtensionUnloadMode('beamngEarth_locationRadio', 'manual')
+-- Turn-by-Turn Navigation & Highway-Exit Engine (turnByTurn.lua).
+setExtensionUnloadMode('beamngEarth_turnByTurn', 'manual')

@@ -10,7 +10,7 @@
 -- Pure apart from guihooks (runs under plain luajit with a stub).
 local M = {}
 
-M.NAMES = { status = true, credits = true, banner = true, transport = true, radio = true }
+M.NAMES = { status = true, credits = true, banner = true, transport = true, radio = true, nav = true }
 M.SEND_S = 0.25           -- s between updates to the apps (the status bar's fps changes every frame)
 M.STALE_S = 5.0           -- an unchanged payload is sent again this often (an app opened since)
 
@@ -45,6 +45,7 @@ function M.payload(t)
     hidden = t.hidden and true or false,
     transport = t.transport or nil,
     radio = t.radio or nil,
+    nav = t.nav or nil,
   }
   if t.speedLimit ~= nil then p.speedLimit = t.speedLimit end
   return p
@@ -139,9 +140,27 @@ local function radioKey(r)
     .. table.concat(ids, ',')
 end
 
+local function navKey(n)
+  if type(n) ~= 'table' then return '' end
+  local routePts = type(n.miniRoute) == 'table' and #n.miniRoute or 0
+  local roadSegs = type(n.miniRoads) == 'table' and #n.miniRoads or 0
+  return tostring(n.enabled) .. '\4' .. tostring(n.active) .. '\4' .. tostring(n.navDesign or '') .. '\4'
+    .. tostring(n.chimeEnabled) .. '\4' .. tostring(n.units or '') .. '\4' .. tostring(n.hideWorldMarkers) .. '\4'
+    .. tostring(n.northUp) .. '\4' .. tostring(n.maneuver or '') .. '\4' .. tostring(n.streetName or '') .. '\4'
+    .. tostring(n.isHighwayExit) .. '\4' .. tostring(n.exitNum or '') .. '\4'
+    .. tostring(n.distToTurnM or '') .. '\4'
+    .. tostring(math.floor((tonumber(n.approachProgress) or 0) * 100 + 0.5)) .. '\4'
+    .. tostring(n.remainingM or '') .. '\4' .. tostring(n.etaSec or '') .. '\4'
+    .. tostring(n.nextManeuver or '') .. '\4' .. tostring(n.nextStreetName or '') .. '\4'
+    .. tostring(n.headingDeg or '') .. '\4' .. tostring(n.speedKph or '') .. '\4'
+    .. tostring(n.speedLimitKph or '') .. '\4' .. tostring(n.speedLimitUnlimited) .. '\4'
+    .. tostring(n.chimeSeq or 0) .. '\4' .. tostring(n.currentStreet or '') .. '\4'
+    .. tostring(routePts) .. '\4' .. tostring(roadSegs)
+end
+
 local function key(p)
   return p.status .. '\1' .. p.loading .. '\1' .. p.credits .. '\1' .. p.banner .. '\1' .. p.bannerLevel .. '\1'
-    .. tostring(p.hidden) .. '\1' .. transportKey(p.transport) .. '\1' .. radioKey(p.radio)
+    .. tostring(p.hidden) .. '\1' .. transportKey(p.transport) .. '\1' .. radioKey(p.radio) .. '\1' .. navKey(p.nav)
 end
 
 -- now: core's clock (s); get(): the texts (only called when a send is due, so its cost is paid at SEND_S at most).

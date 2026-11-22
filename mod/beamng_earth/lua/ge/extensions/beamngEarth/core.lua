@@ -2424,6 +2424,10 @@ local function hudTexts()
     local lr = rawget(_G, 'beamngEarth_locationRadio')
     hudInput.radio = (shown and lr and lr.hudPayload) and lr.hudPayload() or nil
   end
+  do
+    local nav = rawget(_G, 'beamngEarth_turnByTurn')
+    hudInput.nav = (shown and nav and nav.hudPayload) and nav.hudPayload() or nil
+  end
   return hudInput
 end
 
@@ -3160,6 +3164,10 @@ local function onUpdate(dtReal, dtSim)
       local lr = rawget(_G, 'beamngEarth_locationRadio')
       if lr and lr.update then pcall(lr.update, dtReal, st.player, st.clock) end
     end
+    do
+      local nav = rawget(_G, 'beamngEarth_turnByTurn')
+      if nav and nav.update then pcall(nav.update, dtReal, st.anchor, st.player, st.clock) end
+    end
   end
   if st.active then
     if not dropHoldFailed and (not st.paused or dropHold.active) then     -- (it runs on while it paused the game)
@@ -3445,6 +3453,7 @@ local function onClientEndMission()
   gps.reset()
   do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
   do local lr = rawget(_G, 'beamngEarth_locationRadio') if lr and lr.reset then pcall(lr.reset) end end
+  do local nav = rawget(_G, 'beamngEarth_turnByTurn') if nav and nav.reset then pcall(nav.reset) end end
   do local stg = rawget(_G, 'beamngEarth_settings') if stg and stg.redirectBigMap then stg.redirectBigMap(false) end end
   seasonlook.restore()
   -- runs before the level deletes its objects (server/server.lua:19 vs :34): delete the far tiles
@@ -3503,6 +3512,7 @@ local function onExtensionUnloaded()
   levelinfo.unhookSpawnPois()
   do local tm = rawget(_G, 'beamngEarth_transportModes') if tm and tm.reset then pcall(tm.reset) end end
   do local lr = rawget(_G, 'beamngEarth_locationRadio') if lr and lr.reset then pcall(lr.reset) end end
+  do local nav = rawget(_G, 'beamngEarth_turnByTurn') if nav and nav.reset then pcall(nav.reset) end end
   groundcover.enginePatch(false)
   net.close()
   farfield.clear()

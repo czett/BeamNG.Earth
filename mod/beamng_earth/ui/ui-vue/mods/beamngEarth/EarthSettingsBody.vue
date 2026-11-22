@@ -41,6 +41,9 @@
     <!-- Radio: Location-aware live & local radio (EarthRadio.vue) -->
     <EarthRadio v-if="category.radio" />
 
+    <!-- Navigation: Turn-by-Turn HUD & Multi-Design Settings (EarthNav.vue) -->
+    <EarthNav v-if="category.nav" />
+
     <!-- Add-ons: the page is the add-ons' own view (EarthAddons.vue) -->
     <EarthAddons v-if="category.addons" />
 
@@ -162,6 +165,7 @@ import { CONTRIBUTORS } from "./contributors.js"
 import EarthAddons from "./EarthAddons.vue"
 import EarthTransport from "./EarthTransport.vue"
 import EarthRadio from "./EarthRadio.vue"
+import EarthNav from "./EarthNav.vue"
 
 const props = defineProps({
   page: { type: String, default: "Graphics" },     // the page's name (settingsSchema's)

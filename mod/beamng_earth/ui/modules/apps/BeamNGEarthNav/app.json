@@ -1,0 +1,21 @@
+{
+  "domElement": "<beamng-earth-nav></beamng-earth-nav>",
+  "name": "BeamNG.Earth: Turn-by-Turn Nav",
+  "types": [
+    "ui.apps.categories.gameplay"
+  ],
+  "description": "Turn-by-turn navigation HUD with motorway exit callouts, approach scaling, audio chimes, and 3 switchable designs (Maps Card, Round Minimap, Route Advisor).",
+  "css": {
+    "top": "72px",
+    "left": "16px",
+    "width": "320px",
+    "height": "220px"
+  },
+  "author": "BeamNG.Earth",
+  "version": "1.0",
+  "directive": "beamngEarthNav",
+  "appName": "beamngEarthNav",
+  "category": "BeamNG.Earth",
+  "isAuxiliary": false,
+  "interactive": "yes"
+}

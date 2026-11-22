@@ -179,6 +179,17 @@
         "width": "320px",
         "height": "168px"
       }
+    },
+    {
+      "appName": "beamngEarthNav",
+      "appVersion": 1,
+      "placement": {
+        "top": "72px",
+        "left": "16px",
+        "position": "absolute",
+        "width": "320px",
+        "height": "220px"
+      }
     }
   ]
 }
