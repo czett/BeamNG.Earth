@@ -2810,7 +2810,9 @@ function M.update(gov, currentAnchor, player, view, a, dtSim, dtReal)
       if ok then
         if not isRoad then t.cq = t.cq or {}; t.cq[q.what] = q end
         if isRoad or staged then t[q.what] = id else       -- (a staged collider: registered at the swap's commit)
-          t[q.what] = id; markTileCollider(t); newColliders[#newColliders + 1] = { id, q, objectBox(id) }
+          t[q.what] = id
+          if q.what == 'deck' or q.what == 'tunnel' then markDirty('tile') else markTileCollider(t) end
+          newColliders[#newColliders + 1] = { id, q, objectBox(id) }
           t.colAt = t.colAt or {}; t.colAt[q.what] = now()
         end
       else lastError = tostring(id) end
@@ -3024,7 +3026,7 @@ function M.nextWalk(q)
   local p = playerNow()
   if not p then return 1 end
   local dir = orderDir
-  local best, bestKey, nearest = 1, math.huge, nil
+  local best, bestSort, bestKey, nearest = 1, math.huge, math.huge, nil
   for i, e in ipairs(q) do
     local t = tiles[e.key]
     local k = 1e9
@@ -3046,7 +3048,8 @@ function M.nextWalk(q)
       end
     end
     if not behind and (not nearest or k < nearest) then nearest = k end
-    if (e.renderOnly or e.what == 'wire') and not (M.SURFACE_FIRST and (e.what == 'road' or e.what == 'walk')) then
+    local isSurface = M.SURFACE_FIRST and (e.what == 'road' or e.what == 'walk')
+    if (e.renderOnly or e.what == 'wire') and not isSurface then
       k = k + (M.RENDER_AFTER_M or 1e6)
     end
     if lastSpeed >= M.HIGH_SPEED_MS and not e.renderOnly and e.what ~= 'deck' and e.what ~= 'tunnel'
@@ -3054,19 +3057,27 @@ function M.nextWalk(q)
       k = k + M.CORRIDOR_COL_PENALTY
     end
     if e.what == 'deck' or e.what == 'tunnel' then k = math.max(0, k - M.DRIVE_FIRST_M) end
-    if k < bestKey then best, bestKey = i, k end
+    local sk = k
+    if not behind then
+      if e.what == 'deck' or e.what == 'tunnel' then
+        sk = k - 20000
+      elseif isSurface then
+        sk = k - 10000 - (e.what == 'road' and 1 or 0)
+      end
+    end
+    if sk < bestSort then best, bestSort, bestKey = i, sk, k end
   end
   return best, bestKey, nearest
 end
 
 -- True when a forward colliding drive surface (deck, tunnel) within dueReach or immediate road surface under/just
--- ahead (<= max(150, lastSpeed * 3) m) is still queued in walkQ.
+-- ahead (<= max(150, lastSpeed * 3) m, or max(250, lastSpeed * 6) m at >= HIGH_SPEED_MS) is still queued in walkQ.
 function M.hasDueForward()
   if #walkQ == 0 or not M.DUE then return false end
   local p = playerNow()
   if not p then return false end
   local colReach = M.dueReach(lastSpeed)
-  local roadReach = math.max(150, lastSpeed * 3)
+  local roadReach = lastSpeed >= M.HIGH_SPEED_MS and math.max(250, lastSpeed * 6) or math.max(150, lastSpeed * 3)
   local dir = orderDir
   for _, e in ipairs(walkQ) do
     local isDrive = e.what == 'deck' or e.what == 'tunnel'
@@ -3275,9 +3286,18 @@ function M.urgentColliders()
   local p = playerNow()
   if not p then return true end
   if M.NEED then
-    local reach = M.needReach(lastSpeed)
-    local d = M.needDistance(reach)
-    if d <= reach and (d <= M.hardReach(lastSpeed) or sinceReload() >= M.NEED_GAP_S * 1000) then return true end
+    local needR, hardR = M.needReach(lastSpeed), M.hardReach(lastSpeed)
+    local deckReach = math.max(needR, (lastSpeed * lastSpeed) / 5.0 + 120)
+    local deckHard = math.max(hardR, (lastSpeed * lastSpeed) / 10.0 + 60)
+    local gapOk = sinceReload() >= M.NEED_GAP_S * 1000
+    for _, c in ipairs(newColliders) do
+      local q = c[2]
+      local isDrive = q and (q.what == 'deck' or q.what == 'tunnel')
+      local r = isDrive and deckReach or needR
+      local h = isDrive and deckHard or hardR
+      local d = M.colliderGap(c, p, r)
+      if d <= r and (d <= h or gapOk) then return true end
+    end
     return M.focusDue(M.needDistance, true) -- (or another car about to reach one)
   end
   local reach = math.max(150, lastSpeed * M.URGENT_S) + M.TILE_M * 0.71
@@ -3596,19 +3616,32 @@ end
 -- made or not (a tile that came has its deck queued, made by the urgent imports and turned solid by the NEED rebuilds
 -- before the car reaches it, this module's own job), or it has no deck there at all (the server built none). Roads
 -- off: 'ready' (no deck ever comes).
+local function deckReady(t)
+  if not t or t.ghost then return false end
+  if t.colWant and t.colWant.deck then
+    if t.deck == nil then return false end
+    if not (t.colAt and t.colAt.deck ~= nil) then return false end
+    if lastReloadAt < t.colAt.deck then return false end
+    for _, c in ipairs(newColliders) do
+      if c[1] == t.deck then return false end
+    end
+  end
+  return true
+end
+
 function M.deckAt(x, y)
   if not M.enabled then return 'ready' end
   if M.geo then
     local k = M.geoKeyAt(x, y)
     if not k then return 'ready' end
     local t = tiles[geoKey(k)]
-    if not t then return 'missing', k end
+    if not deckReady(t) then return 'missing', k end
     return 'ready'
   end
   if not anchorId then return 'ready' end
   local sq = math.floor(x / M.TILE_M) .. '_' .. math.floor(y / M.TILE_M)
   local t = tiles[tileKey(anchorId, sq)]
-  if not t or t.ghost then return 'missing', sq end
+  if not deckReady(t) then return 'missing', sq end
   return 'ready'
 end
 
@@ -3634,13 +3667,14 @@ M.deckGrid = {
     if M.geo then
       if not anchorObj then return 'ready' end
       local k = geotile.key(ix, iy)
-      if not tiles[geoKey(k)] then return 'missing', k end
+      local t = tiles[geoKey(k)]
+      if not deckReady(t) then return 'missing', k end
       return 'ready'
     end
     if not anchorId then return 'ready' end
     local sq = ix .. '_' .. iy
     local t = tiles[tileKey(anchorId, sq)]
-    if not t or t.ghost then return 'missing', sq end
+    if not deckReady(t) then return 'missing', sq end
     return 'ready'
   end,
 }

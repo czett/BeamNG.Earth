@@ -291,6 +291,7 @@ class RespawningPool:
         # under self._lock: _renew)
         self._low, self._low_active = collections.deque(), 0
         self._low_pauses = set()
+        self._low_resume_at = 0.0
         self._low_cv = threading.Condition()
         self._low_thread = None
         self._last_high_at = -float("inf")
@@ -335,18 +336,31 @@ class RespawningPool:
             return runtimeprofiler.collector.submit(_shedding(self._renew(pool).submit), self.name, fn, args, kwargs)
 
     LOW_COOLDOWN_S = 2.5
+    PAUSE_HYSTERESIS_S = 1.5
 
     def pause_low(self, key):
         """Pause low-priority queue dispatch while `key` holds a high-priority lease."""
         with self._low_cv:
             self._low_pauses.add(key)
 
-    def resume_low(self, key):
+    def resume_low(self, key, hysteresis_s=0.0):
         """Release a low-priority pause lease for `key` and wake the dispatcher."""
         with self._low_cv:
+            was_paused = bool(self._low_pauses)
             self._low_pauses.discard(key)
             if not self._low_pauses:
+                if was_paused and hysteresis_s > 0:
+                    self._low_resume_at = max(getattr(self, "_low_resume_at", 0.0),
+                                              time.monotonic() + float(hysteresis_s))
                 self._low_cv.notify_all()
+
+    def is_low_paused(self, prefix=None):
+        """Whether low-priority dispatch is currently paused (optionally matching key or tuple prefix)."""
+        with self._low_cv:
+            if prefix is None:
+                return bool(self._low_pauses)
+            return any(k == prefix or (isinstance(k, tuple) and k and k[0] == prefix)
+                       for k in self._low_pauses)
 
     def submit(self, fn, *args, **kwargs):
         self._last_high_at = time.monotonic()
@@ -487,6 +501,8 @@ class RespawningPool:
     def _low_can_run(self):
         if not self._low or self._low_pauses:
             return False
+        if time.monotonic() < getattr(self, "_low_resume_at", 0.0):
+            return False
         if self._low_active == 0:
             return True
         if self.workers > 1 and time.monotonic() - self._last_high_at < self.LOW_COOLDOWN_S:
@@ -498,7 +514,13 @@ class RespawningPool:
         while True:
             with self._low_cv:
                 while not self._low_can_run():
-                    self._low_cv.wait(timeout=min(1.0, self.LOW_COOLDOWN_S))
+                    timeout = min(1.0, self.LOW_COOLDOWN_S)
+                    resume_at = getattr(self, "_low_resume_at", 0.0)
+                    if resume_at > 0.0 and not self._low_pauses and self._low:
+                        rem = resume_at - time.monotonic()
+                        if rem > 0.0:
+                            timeout = min(timeout, max(0.05, rem))
+                    self._low_cv.wait(timeout=timeout)
                 outer, fn, args, kwargs, make_args = self._low.popleft()
                 if not outer.set_running_or_notify_cancel():
                     continue                # (cancelled while it waited)

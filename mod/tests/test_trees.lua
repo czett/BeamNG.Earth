@@ -984,4 +984,69 @@ do -- de_hedge uses non-uniform MatrixF column scaling (sxy=0.75, Z-boosted heig
   trees.dropKey('8:p0_0')
   trees.update(8, { x = 50, y = 50 })
 end
+do -- P1.3: dedicated every-frame guardrail pass, forward velocity alignment, and high-speed row cap
+  T.check(trees.BARRIER_FRAME_MS == 1.5 and trees.BARRIER_PER_FRAME == 200
+    and trees.HIGH_SPEED_MS == 28.0 and trees.HIGH_SPEED_TREE_ROWS == 3000, 'P1.3 guardrail streaming constants')
+  trees.clear()
+  trees.reset()
+  for k in pairs(items) do items[k] = nil end
+  trees.EVERY_N = 3
+  -- Vegetation tile (0_0) AND guardrail tile (g1_0) added together: on frame 1 (frameN % 3 ~= 0),
+  -- guardrail items are made immediately while vegetation waits for frame 3.
+  files['/t/p13_veg'] = '{ groups = { "deciduous" }, items = { {0, 50, 50, 0, 0, 1, 12, 0.0} } }'
+  trees.onTile({ anchorId = 20, key = '0_0', path = '/t/p13_veg', n = 1 }, 20)
+  trees.onRows(20, 'g1_0', { { 0, 300, 50, 0, 0, 1, 0.9, 0.0 } }, { 'guardrail' })
+  local allT = trees.debugTiles()
+  T.check(allT['20:g1_0'].isBarrierTile == true and allT['20:0_0'].isBarrierTile == false,
+    'isBarrierTile tags guardrail tiles only')
+  -- Verify geotile vegetation key (g17_...) is NOT falsely tagged as a barrier tile
+  local gd, gt = require('beamngEarth/geodesy'), require('beamngEarth/geotile')
+  local a20 = gd.newAnchor(48.0, 11.0)
+  local gx, gy = gt.tileOf(48.0, 11.0)
+  local gk = gt.key(gx, gy)
+  local cl, cn = gt.centre(17, gx, gy)
+  files['/t/p13_gveg'] = '{ groups = { "deciduous" }, items = { {0, 10, 10, 0, 0, 1, 12, 0.0} } }'
+  trees.onTile({ anchorId = 20, key = gk, path = '/t/p13_gveg', n = 1, frame = { cl, cn } }, 20, a20)
+  T.check(allT['g:' .. gk].isBarrierTile == false, 'vegetation geotile g17_... is not tagged as barrier tile')
+  trees.onDrop({ anchorId = 20, key = gk })
+
+  trees.update(20, { x = 50, y = 50, vx = 30, vy = 0, speed = 30 })
+  T.check(count() == 1, 'frame 1 (non-EVERY_N): guardrail tile made immediately, vegetation waits')
+  trees.update(20, { x = 50, y = 50, vx = 30, vy = 0, speed = 30 })
+  T.check(count() == 1, 'frame 2 (non-EVERY_N): vegetation still waits')
+  trees.update(20, { x = 50, y = 50, vx = 30, vy = 0, speed = 30 })
+  T.check(count() == 2, 'frame 3 (EVERY_N): vegetation tile processed normally (lastPass not hijacked)')
+  trees.clear()
+
+  -- Forward velocity alignment: forward guardrail tile (2_0 at +x) beats behind guardrail tile (-1_0 at -x)
+  -- even when behind tile is closer, when budget only allows one item.
+  trees.reset()
+  for k in pairs(items) do items[k] = nil end
+  local savedBP = trees.BARRIER_PER_FRAME
+  trees.BARRIER_PER_FRAME = 1
+  trees.onRows(21, 'g-1_0', { { 0, -100, 128, 0, 0, 1, 0.9, 0.0 } }, { 'guardrail' })
+  trees.onRows(21, 'g2_0', { { 0, 600, 128, 0, 0, 1, 0.9, 0.0 } }, { 'guardrail' })
+  trees.update(21, { x = 0, y = 128, vx = 35, vy = 0, speed = 35 })
+  local fwdIt = next(items)
+  T.check(count() == 1 and fwdIt and fwdIt.m.p.x == 600,
+    'forward-aligned barrier tile strictly prioritized ahead of closer behind barrier tile')
+  trees.BARRIER_PER_FRAME = savedBP
+  trees.clear()
+
+  -- High-speed non-barrier row cap (HIGH_SPEED_TREE_ROWS = 3000 when speed > HIGH_SPEED_MS):
+  -- two 3500-row vegetation tiles at 35 m/s -> second tile defers to next EVERY_N pass.
+  trees.reset()
+  for k in pairs(items) do items[k] = nil end
+  trees.EVERY_N = 1
+  local bigRows = {}
+  for i = 1, 3500 do bigRows[i] = { 0, 10, 10, 0, 0, 1, 12, 0.9 } end -- rank 0.9: 0 items made at 0 distance? Wait: at d=0 want=1.0, use rank 2 so 0 made, only scanned
+  for i = 1, 3500 do bigRows[i][8] = 2.0 end
+  trees.onRows(22, '0_0', bigRows, { 'deciduous' })
+  trees.onRows(22, '1_0', { { 0, 300, 10, 0, 0, 1, 12, 0.0 } }, { 'deciduous' })
+  trees.update(22, { x = 50, y = 50, vx = 35, vy = 0, speed = 35 })
+  T.check(count() == 0 and trees.lastRows == 3500, 'speed > HIGH_SPEED_MS caps non-barrier rowsScanned at 3000')
+  trees.update(22, { x = 50, y = 50, vx = 35, vy = 0, speed = 35 })
+  T.check(count() == 1, 'deferred vegetation tile processed on next pass')
+  trees.clear()
+end
 T.done('test_trees')

@@ -19,6 +19,10 @@ local townsigns = require('beamngEarth/townsigns')      -- the town signs' faces
 
 M.PER_FRAME = 250       -- items made or removed per frame at most
 M.ROWS_PER_FRAME = 12000 -- rows of changing tiles looked at per frame at most (Lua time: 30000 averaged 2.5 ms)
+M.BARRIER_FRAME_MS = 1.5
+M.BARRIER_PER_FRAME = 200
+M.HIGH_SPEED_MS = 28.0
+M.HIGH_SPEED_TREE_ROWS = 3000
 -- 2026-10-14: was { 300, 1 }, { 550, 0.5 }, { 900, 0.25 }, { 1e9, 0.12 }; the engine already draws far trees as
 -- billboards (their LODs), so our extra thinning made far forest sparse. Columbia: 48k -> 78k items, no frame cost seen.
 M.RINGS = { { 300, 1.0 }, { 700, 0.6 }, { 1500, 0.35 }, { 1e9, 0.2 } }   -- tile distance (m): the rank shown below
@@ -642,6 +646,7 @@ end
 -- A tree pass's order (M.update): the keys, distances and targets of the tiles it changes, in arrays kept between passes, and their sort
 -- keys: the distance in quarter metres times ORDER_SLOTS plus the entry's index (plain numbers: the default sort)
 local ORDER_SLOTS = 2 ^ 20
+local NON_BARRIER_TIER = 2 ^ 47
 local passOrder = { keys = {}, d = {}, sort = {}, want = {}, band = {}, near = {}, capd = {}, n = 0 }
 function M.orderKey(d, i) return math.floor(math.min(d, 1e7) * 4) * ORDER_SLOTS + i end
 local foci = {}         -- other vehicles' collision foci { x, y, r, trees } (M.setFoci, collisionfoci.lua)
@@ -1163,6 +1168,13 @@ local function addTile(anchorId, tileKey, flat, stride, groups, geo, count)
   end
   t.id = key
   t.furn = tostring(tileKey):match('^[pg]g%d') ~= nil or tostring(tileKey):match('^p') ~= nil  -- (street furniture, rails)
+  local isBar = tostring(tileKey):match('^g') ~= nil and not geotile.isKey(tileKey)
+  if not isBar and t.groups then
+    for _, g in ipairs(t.groups) do
+      if M.isBarrier(g) then isBar = true; break end
+    end
+  end
+  t.isBarrierTile = isBar
   setTile(key, t)
   dirty = true
   if M.onKeepupTile then M.onKeepupTile(key, t) end       -- (keepup.lua: a debug recorder, off unless a tool starts it)
@@ -1645,8 +1657,14 @@ function M.update(anchorId, player, view, frameMs, fill)
   if frameMs and frameMs <= 0 then return end
   if not setup() then return end
   frameN = frameN + 1
-  if frameN % M.EVERY_N ~= 0 then return end
-  if not dirty and not ghostSince and #foci == 0 and lastPass and lastPass.anchor == anchorId and player
+  local barrierOnly = frameN % M.EVERY_N ~= 0
+  if barrierOnly then
+    local hasBarrier = false
+    for li = 1, #tileList do
+      if tiles[tileList[li]].isBarrierTile then hasBarrier = true; break end
+    end
+    if not hasBarrier then return end
+  elseif not dirty and not ghostSince and #foci == 0 and lastPass and lastPass.anchor == anchorId and player
       and math.abs(player.x - lastPass.x) + math.abs(player.y - lastPass.y) < M.RECHECK_M
       and (view and lastPass.vx and math.abs(view.x - lastPass.vx) + math.abs(view.y - lastPass.vy) < M.RECHECK_M
         or not view and not lastPass.vx)
@@ -1657,42 +1675,57 @@ function M.update(anchorId, player, view, frameMs, fill)
     if #pool < M.spareWanted(frameMs) then pool[#pool + 1] = newForest():getID() end
     return
   end
-  dirty = false                           -- (set again below by anything this pass leaves undone)
-  lastPass = player and { anchor = anchorId, x = player.x, y = player.y, vx = view and view.x, vy = view and view.y,
-    clock = stopwatch.new() } or nil
-  local budget = M.PER_FRAME * M.EVERY_N
-  local limit, elapsed = frameMs or M.FRAME_MS, M.clock()
-  -- the previous pass's work, for a hitch's context (core.perfContext: the engine's tick pays for a pass's Forest
-  -- changes, 0.5 us an item of every shape touched; a repeatable 136-612 ms tick beside a Manhattan park, 2026-11-08)
-  local w = frameWork[2]
-  frameWork[2], frameWork[1] = frameWork[1], w
-  local nTouched = 0
-  for _ in pairs(touched) do nTouched = nTouched + 1 end
-  w.made, w.removed, w.shapes, w.items, w.new, w.forests = M.made - workMade, M.removed - workRemoved, nTouched,
-    touchedItems, newShapes, newForests
-  workMade, workRemoved = M.made, M.removed
+  local budget, barrierBudget, limit, barrierLimit
+  local elapsed = M.clock()
+  if barrierOnly then
+    budget = M.BARRIER_PER_FRAME
+    barrierBudget = M.BARRIER_PER_FRAME
+    limit = math.min(frameMs or M.FRAME_MS, M.BARRIER_FRAME_MS)
+    barrierLimit = limit
+  else
+    dirty = false                           -- (set again below by anything this pass leaves undone)
+    lastPass = player and { anchor = anchorId, x = player.x, y = player.y, vx = view and view.x, vy = view and view.y,
+      clock = stopwatch.new() } or nil
+    budget = M.PER_FRAME * M.EVERY_N
+    barrierBudget = math.max(budget, M.BARRIER_PER_FRAME)
+    limit = frameMs or M.FRAME_MS
+    barrierLimit = math.max(limit, M.BARRIER_FRAME_MS)
+    -- the previous pass's work, for a hitch's context (core.perfContext: the engine's tick pays for a pass's Forest
+    -- changes, 0.5 us an item of every shape touched; a repeatable 136-612 ms tick beside a Manhattan park, 2026-11-08)
+    local w = frameWork[2]
+    frameWork[2], frameWork[1] = frameWork[1], w
+    local nTouched = 0
+    for _ in pairs(touched) do nTouched = nTouched + 1 end
+    w.made, w.removed, w.shapes, w.items, w.new, w.forests = M.made - workMade, M.removed - workRemoved, nTouched,
+      touchedItems, newShapes, newForests
+    workMade, workRemoved = M.made, M.removed
+    M.lastShapeItems = touchedItems        -- the previous frame's (diagnostics)
+  end
   newForests = 0
-  M.lastShapeItems = touchedItems        -- the previous frame's (diagnostics)
   touched, touchedItems, newShapes = {}, 0, 0
   if fill == nil then fill = frameMs ~= nil and frameMs >= M.LOADING_FRAME_MS end
   newShapeCap = frameMs == nil and math.huge or (fill and M.NEW_SHAPES_FILL or M.NEW_SHAPES_PER_FRAME)
-  releaseGhosts(anchorId, player)
+  if not barrierOnly then releaseGhosts(anchorId, player) end
   bandCapsUpdate()
   for li = #tileList, 1, -1 do               -- (backwards: a tile removed takes the last one's place, already seen)
     local key = tileList[li]
     local t = tiles[key]
-    if (not t.geo and t.anchor ~= anchorId and not t.ghost) or t.drop or t.flush then
+    if (not barrierOnly or t.isBarrierTile)
+        and ((not t.geo and t.anchor ~= anchorId and not t.ghost) or t.drop or t.flush) then
+      local isBar = t.isBarrierTile
+      local tileLimit = isBar and barrierLimit or limit
       local f = t.forestId and scenetree.findObjectById(t.forestId)
       local fd = f and f:getData()
       local left = false
       for i, it in pairs(t.made) do
-        if budget <= 0 or elapsed() > limit then dirty = true; return end
+        if (isBar and barrierBudget or budget) <= 0 or elapsed() > tileLimit then dirty = true; return end
         local sh = t.madeShape[i]
         if not sh or allow(sh) then
           if fd then removeItem(fd, it, sh) end
           t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
           liveItems = liveItems - 1
           budget = budget - 1
+          barrierBudget = barrierBudget - 1
         else left = true end
       end
       if not left and t.flush and not t.drop then
@@ -1739,16 +1772,24 @@ function M.update(anchorId, player, view, frameMs, fill)
   -- the street furniture's lead at speed (PROP_LEAD_S): its tiles ahead of the car measured that much nearer for the
   -- groups' caps (GROUP_MAX_M), so a door / hydrant / sign shows seconds ahead at any speed, not 120-200 m out
   local leadM, lhx, lhy = 0, 0, 0
-  local psp = player.speed or 0
+  local pvx, pvy = player.vx or 0, player.vy or 0
+  local vlen2 = pvx * pvx + pvy * pvy
+  local psp = player.speed or math.sqrt(vlen2)
+  local hasVel = psp >= 5 and vlen2 >= 25
+  local ux, uy = 0, 0
+  if hasVel then
+    local vlen = math.sqrt(vlen2)
+    ux, uy = pvx / vlen, pvy / vlen
+  end
   if M.PROP_LEAD_S > 0 and psp > M.PROP_LEAD_MIN_MS and psp < 150 then
     leadM = math.min(M.PROP_LEAD_MAX_M, psp * M.PROP_LEAD_S)
-    lhx, lhy = (player.vx or 0) / psp, (player.vy or 0) / psp
+    if hasVel then lhx, lhy = ux, uy else lhx, lhy = pvx / psp, pvy / psp end
   end
-  local nOrder = 0
+  local nOrder, minDist = 0, math.huge
   for li = 1, #tileList do
     local key = tileList[li]
     local t = tiles[key]
-    if (not t.geo and t.anchor ~= anchorId) or t.drop or t.flush then goto continue end     -- still being emptied
+    if (barrierOnly and not t.isBarrierTile) or (not t.geo and t.anchor ~= anchorId) or t.drop or t.flush then goto continue end     -- still being emptied
     do
       local dCar = boxDist(player, t)
       local dist = view and math.min(boxDist(view, t), dCar) or dCar
@@ -1770,7 +1811,19 @@ function M.update(anchorId, player, view, frameMs, fill)
         nOrder = nOrder + 1
         oKeys[nOrder], oD[nOrder] = key, dist
         oWant[nOrder], oBand[nOrder], oNear[nOrder], oCapD[nOrder] = want, band, near, capD
-        oSort[nOrder] = M.orderKey(dist, nOrder)
+        if dist < minDist then minDist = dist end
+        if t.isBarrierTile then
+          local score = dist
+          if hasVel then
+            local dx, dy = t.cx - player.x, t.cy - player.y
+            local cdist = math.sqrt(dx * dx + dy * dy)
+            local dot = (dx * ux + dy * uy) / math.max(1, cdist)
+            score = (dot > 0) and (cdist * (1.5 - 0.5 * dot)) or (cdist * 3 + 5000)
+          end
+          oSort[nOrder] = M.orderKey(score, nOrder)
+        else
+          oSort[nOrder] = NON_BARRIER_TIER + M.orderKey(dist, nOrder)
+        end
       end
     end
     ::continue::
@@ -1779,16 +1832,19 @@ function M.update(anchorId, player, view, frameMs, fill)
     oKeys[i], oD[i], oSort[i], oWant[i], oBand[i], oNear[i], oCapD[i] = nil, nil, nil, nil, nil, nil, nil
   end
   passOrder.n = nOrder
+  if barrierOnly and nOrder == 0 then return end
   table.sort(oSort)
   -- a tile near the car with work left (its rows not all made): the pass's time limit raised to NEAR_URGENT_MS (0: off)
-  if M.NEAR_URGENT_MS > 0 and nOrder > 0 and oD[oSort[1] % ORDER_SLOTS] <= M.NEAR_URGENT_M then
+  if not barrierOnly and M.NEAR_URGENT_MS > 0 and nOrder > 0 and minDist <= M.NEAR_URGENT_M then
     limit = math.max(limit, M.NEAR_URGENT_MS)
+    barrierLimit = math.max(limit, M.BARRIER_FRAME_MS)
   end
   local nearMade = false
   local madeBoxes, cb = nil, nil            -- (boxes { x0, y0, x1, y1 } round the solid items made, one a tile)
   local rowsScanned = 0
+  local treeRowCap = psp > M.HIGH_SPEED_MS and math.min(M.ROWS_PER_FRAME, M.HIGH_SPEED_TREE_ROWS) or M.ROWS_PER_FRAME
   local function finish()
-    M.lastRows = rowsScanned                -- (diagnostics)
+    if not barrierOnly then M.lastRows = rowsScanned end   -- (diagnostics)
     if nearMade then
       local ok, roads = pcall(require, 'beamngEarth/roads')
       if ok and roads.requestCollision then
@@ -1821,6 +1877,8 @@ function M.update(anchorId, player, view, frameMs, fill)
     local want, band, near = oWant[at], oBand[at], oNear[at]
     local capDist = oCapD[at] or dist
     t, fd, cb = tiles[oKeys[at]], nil, nil
+    local isBar = t.isBarrierTile
+    local tileLimit = isBar and barrierLimit or limit
     if t.moved then
       -- a moved geotile: its items made again at its placement (the first loop, next pass). Near, it must collide;
       -- far, the engine draws its items' distant impostors without the Forest's transform: a rebase's 767 m shift
@@ -1830,16 +1888,16 @@ function M.update(anchorId, player, view, frameMs, fill)
       goto nexttile
     end
     if want ~= t.shown or band ~= t.band or near ~= t.near or t.pending then
-      if rowsScanned > M.ROWS_PER_FRAME then dirty = true; finish(); return end   -- (its pass in a later frame: pending kept)
+      if not isBar and rowsScanned > treeRowCap then dirty = true; finish(); return end   -- (its pass in a later frame: pending kept)
       t.pending = false
       local scan = t.scan
       local from = scan and scan.want == want and scan.band == band and scan.near == near and scan.from or 1
       t.scan = nil
       local f, s, names = t.f, t.s, t.groups or GROUPS
-      rowsScanned = rowsScanned + math.max(0, t.n - from + 1)
+      if not isBar then rowsScanned = rowsScanned + math.max(0, t.n - from + 1) end
       local skipped = nil
       for i = from, t.n do
-        if (i - from) % CHECK_ROWS == CHECK_ROWS - 1 and elapsed() > limit then
+        if (i - from) % CHECK_ROWS == CHECK_ROWS - 1 and elapsed() > tileLimit then
           stop(t, i, skipped, want, band, near); return
         end
         local b = (i - 1) * s
@@ -1879,11 +1937,15 @@ function M.update(anchorId, player, view, frameMs, fill)
         local solid = near and not M.NO_COLLIDE[g or '']
         if r < want and (not t.made[i] or (t.solid[i] == true) ~= solid) then
           local sh, sc = shapeOf(t, i)
-          if budget <= 0 then stop(t, i, skipped, want, band, near); return end
+          if (isBar and barrierBudget or budget) <= 0 then stop(t, i, skipped, want, band, near); return end
           if allow(sh) then
             local d = data()
             if not d then stop(t, i, skipped, want, band, near); return end      -- (a new Forest: next frame)
-            if t.made[i] then removeItem(d, t.made[i], t.madeShape[i]); budget = budget - 1; liveItems = liveItems - 1 end  -- solid <-> not
+            if t.made[i] then
+              removeItem(d, t.made[i], t.madeShape[i])
+              budget = budget - 1; barrierBudget = barrierBudget - 1
+              liveItems = liveItems - 1
+            end  -- solid <-> not
             t.made[i] = makeItem(d, t, i, sh, sc, solid, g, t.variant)
             if t.made[i] then liveItems = liveItems + 1 end
             t.solid[i] = (t.made[i] and solid) or nil      -- true or nil
@@ -1905,19 +1967,19 @@ function M.update(anchorId, player, view, frameMs, fill)
                 end
               end
             end
-            budget = budget - 1
-            if elapsed() > limit then stop(t, i + 1, skipped, want, band, near); return end
+            budget = budget - 1; barrierBudget = barrierBudget - 1
+            if elapsed() > tileLimit then stop(t, i + 1, skipped, want, band, near); return end
           else skipped = skipped or i end          -- another frame (this one's shapes are full)
         elseif r >= want and t.made[i] then
-          if budget <= 0 then stop(t, i, skipped, want, band, near); return end
+          if (isBar and barrierBudget or budget) <= 0 then stop(t, i, skipped, want, band, near); return end
           if allow(t.madeShape[i] or '') then
             local d = data()
             if not d then stop(t, i, skipped, want, band, near); return end
             removeItem(d, t.made[i], t.madeShape[i])
             t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
             liveItems = liveItems - 1
-            budget = budget - 1
-            if elapsed() > limit then stop(t, i + 1, skipped, want, band, near); return end
+            budget = budget - 1; barrierBudget = barrierBudget - 1
+            if elapsed() > tileLimit then stop(t, i + 1, skipped, want, band, near); return end
           else skipped = skipped or i end
         end
       end
@@ -1929,6 +1991,7 @@ function M.update(anchorId, player, view, frameMs, fill)
     ::nexttile::
   end
   finish()
+  if barrierOnly then return end
   -- the loading cover: the other tiles' shapes loaded now (warmShapes); a pass left with work keeps the passes going
   if fill and frameMs and M.WARM_PER_PASS > 0 and not warmShapes(player, limit, elapsed) then dirty = true end
   if frameMs and everN ~= savedN then M.saveShapes(false) end

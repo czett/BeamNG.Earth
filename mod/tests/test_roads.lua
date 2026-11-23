@@ -1033,4 +1033,141 @@ do
     'deshops disables castShadows')
   roads.clear()
 end
+do -- P1.4: strict walkQ tiering (deck/tunnel > road/walk > non-surface renderOnly regardless of RENDER_AFTER_M)
+   -- and extended highway-speed hasDueForward reach
+  roads.clear()
+  local prevSF = roads.SURFACE_FIRST
+  roads.SURFACE_FIRST = true
+  local car = { pos = vec3(128, 128, 0.5) }
+  function car:getPosition() return self.pos end
+  function car:getVelocity() return vec3(40, 0, 0) end
+  getPlayerVehicle = function() return car end
+  files['/t/p14.json'] = '{ chunks = { } }'
+  for _, k in ipairs({ '0_0', '2_0', '3_0' }) do
+    roads.onTile({ anchorId = 12, key = k, path = '/t/p14.json', n = 0 }, 12)
+  end
+  roads.update(gov, 12, { x = 128, y = 128, vx = 40, vy = 0, speed = 40 })
+  -- Even with RENDER_AFTER_M = 0 and bld/signs/wire at tile 0_0 (distance 0), road/walk 512 m ahead (2_0) wins;
+  -- and deck 768 m ahead (3_0) beats road at 0_0.
+  local prevAfter = roads.RENDER_AFTER_M
+  roads.RENDER_AFTER_M = 0
+  local q1 = {
+    { key = '12:0_0', what = 'bld', renderOnly = true },
+    { key = '12:0_0', what = 'signs', renderOnly = true },
+    { key = '12:0_0', what = 'wire' },
+    { key = '12:0_0', what = 'rail', renderOnly = true },
+    { key = '12:2_0', what = 'road', renderOnly = true },
+  }
+  local idx1, key1 = roads.nextWalk(q1)
+  T.check(q1[idx1].what == 'road' and key1 >= 400,
+    'walkQ: road surface ahead strictly beats closer non-surface renderOnly items regardless of RENDER_AFTER_M')
+  local q2 = {
+    { key = '12:0_0', what = 'road', renderOnly = true },
+    { key = '12:3_0', what = 'deck' },
+  }
+  local idx2, key2 = roads.nextWalk(q2)
+  T.check(q2[idx2].what == 'deck' and key2 == 768 - roads.DRIVE_FIRST_M,
+    'walkQ: deck strictly beats closer road surface while preserving distance key for lane routing')
+  roads.RENDER_AFTER_M = prevAfter
+
+  -- hasDueForward at highway speed uses max(250, lastSpeed * 6)
+  local prevCC = roads.COLLIDE_CHECK_S
+  roads.COLLIDE_CHECK_S = 0
+  local g = { try = function() return false end, tryUrgent = function() return false end, charge = function() end, chargeMotion = function() end }
+  files['/t/p14_far_road.json'] = '{ chunks = { }, road = { shape = "/t/p14_rd.cdae", pos = { 0, 0, 0 } } }'
+  -- Tile 1_0 centre is 256 m ahead of (128, 128): at 20 m/s roadReach=150 (false); at 50 m/s roadReach=300 (true)
+  roads.onTile({ anchorId = 12, key = '1_0', path = '/t/p14_far_road.json', n = 0 }, 12)
+  function car:getVelocity() return vec3(20, 0, 0) end
+  roads.update(g, 12, { x = 128, y = 128, vx = 20, vy = 0, speed = 20 })
+  T.check(not roads.hasDueForward(), 'hasDueForward: 256 m ahead road not due at 20 m/s (reach 150 m)')
+  function car:getVelocity() return vec3(50, 0, 0) end
+  roads.update(g, 12, { x = 128, y = 128, vx = 50, vy = 0, speed = 50 })
+  T.check(roads.hasDueForward(), 'hasDueForward: 256 m ahead road IS due at 50 m/s (reach max(250, 6*v)=300 m)')
+  roads.COLLIDE_CHECK_S = prevCC
+  roads.SURFACE_FIRST = prevSF
+  getPlayerVehicle = nil
+  roads.clear()
+end
+do -- Blocker 4: deckReady ignores tile-wide t.colDirty from unrelated colliders, and pending deck/tunnel
+   -- colliders use deckguard-aligned reach/hard envelopes at highway speed
+  roads.clear()
+  roads.setGeo(false)
+  local every, check = roads.RELOAD_EVERY_S, roads.COLLIDE_CHECK_S
+  roads.RELOAD_EVERY_S, roads.COLLIDE_CHECK_S = 1e9, 0
+  local function updB4(aid) elapsedMs = elapsedMs + 16; roads.update(gov, aid) end
+  local carB4 = { pos = vec3(150, 150, 10.5), vel = vec3(0, 0, 0) }
+  function carB4:getPosition() return self.pos end
+  function carB4:getVelocity() return self.vel end
+  getPlayerVehicle = function() return carB4 end
+  files['/t/b4_tile.json'] = '{ chunks = { }, ' ..
+    'deck = { shape = "/t/b4_deck.cdae", pos = { 0, 0, 0 } }, ' ..
+    'bldcol = { shape = "/t/b4_bldcol.cdae", pos = { 0, 0, 0 } }, ' ..
+    'colliders = { deck = { { 120, 120, 8, 136, 136, 12 } }, bldcol = { { 200, 200, 0, 210, 210, 10 } } } }'
+  roads.onTile({ anchorId = 13, key = '0_0', path = '/t/b4_tile.json', n = 0 }, 13)
+  -- Instantiate deck first (prioritized over bldcol), then rebuild collision so deck is ready
+  gov.allow, gov.tries = 1, 0
+  updB4(13)
+  gov.allow, gov.tries = nil, 0
+  roads.collisionRebuilt()
+  T.check(roads.deckGrid.at(0, 0) == 'ready' and roads.deckAt(128, 128) == 'ready',
+    'b4: deck is ready after instantiation and collisionRebuilt')
+  -- Move car between collideNear(t, TILE_M) (~758 m) and collideNear(t, UNCOLLIDE_M) (~852 m) so
+  -- bldcol sets t.colDirty = reloads + 1 without dropping t.deck
+  carB4.pos = vec3(930, 128, 10.5)
+  local rBeforeBld = S.calls.reloadCollision or 0
+  updB4(13)
+  T.check((S.calls.reloadCollision or 0) == rBeforeBld and not roads.hasWork(),
+    'b4: unrelated bldcol beyond collideNear(TILE_M) defers via t.colDirty without immediate reload or collisionDirty')
+  T.check(roads.deckGrid.at(0, 0) == 'ready' and roads.deckAt(128, 128) == 'ready',
+    'b4: unrelated t.colDirty does NOT flip deckGrid.at / deckAt back to missing')
+
+  -- Deck instantiated beyond collideNear(t, M.TILE_M) still marks collisionDirty immediately
+  roads.clear()
+  carB4.pos = vec3(150, 150, 10.5)
+  updB4(15)
+  files['/t/b4_far_deck.json'] = '{ chunks = { }, deck = { shape = "/t/b4_far_deck.cdae", pos = { 0, 0, 0 } }, ' ..
+    'colliders = { deck = { { 120, 120, 8, 136, 136, 12 } } } }'
+  roads.onTile({ anchorId = 15, key = '0_0', path = '/t/b4_far_deck.json', n = 0 }, 15)
+  carB4.pos = vec3(930, 128, 10.5) -- outside collideNear(t, TILE_M)
+  updB4(15)
+  T.check(roads.hasWork() == true,
+    'b4: instantiating deck outside collideNear(TILE_M) still sets collisionDirty immediately')
+
+  -- Highway speed (50 m/s): pending deck at d = 350 m (> needReach(50)=320 m, <= deckReach=620 m)
+  roads.clear()
+  carB4.pos = vec3(-250, 105, 10.5)
+  carB4.vel = vec3(50, 0, 0)
+  for _ = 1, math.ceil(roads.NEED_GAP_S * 1000 / 16) + 5 do updB4(14) end
+  files['/t/b4_hw_deck.json'] = '{ chunks = { }, ' ..
+    'deck = { shape = "/t/b4_hw_deck.cdae", pos = { 0, 0, 0 } }, ' ..
+    'colliders = { deck = { { 100, 100, 7.8, 120, 110, 12 } } } }'
+  local r0 = S.calls.reloadCollision or 0
+  roads.onTile({ anchorId = 14, key = '0_0', path = '/t/b4_hw_deck.json', n = 0 }, 14)
+  -- Block reloadCollision on the instantiation frame by checking urgentColliders while queued/pending
+  local prevGap = roads.URGENT_GAP_S
+  roads.URGENT_GAP_S = 1e9
+  updB4(14)
+  T.check((S.calls.reloadCollision or 0) == r0, 'b4: reload held while URGENT_GAP_S blocks')
+  T.check(roads.urgentColliders() == true,
+    'b4: pending deck at 50 m/s, d=350 m (> needReach 320 m) triggers urgentColliders()')
+  roads.URGENT_GAP_S = prevGap
+  updB4(14)
+  T.check((S.calls.reloadCollision or 0) == r0 + 1 and roads.deckGrid.at(0, 0) == 'ready',
+    'b4: reloadCollision fires ahead of deckguard envelope and makes deck ready')
+
+  -- Hard-reach envelope at 50 m/s: d = 300 m (> hardReach(50)=95 m, <= deckHard=310 m) is urgent right after reload
+  roads.clear()
+  updB4(14) -- update lastSpeed = 50
+  roads.collisionRebuilt()
+  r0 = S.calls.reloadCollision or 0
+  carB4.pos = vec3(-200, 105, 10.5) -- d = 300 m to deck box [100, 120]
+  roads.onTile({ anchorId = 14, key = '0_0', path = '/t/b4_hw_deck.json', n = 0 }, 14)
+  for _ = 1, math.ceil(roads.URGENT_GAP_S * 1000 / 16) + 2 do updB4(14) end
+  T.check((S.calls.reloadCollision or 0) == r0 + 1 and roads.deckGrid.at(0, 0) == 'ready',
+    'b4: pending deck within deckHard (300 m <= 310 m) rebuilds after URGENT_GAP_S without waiting NEED_GAP_S')
+
+  roads.RELOAD_EVERY_S, roads.COLLIDE_CHECK_S = every, check
+  getPlayerVehicle = nil
+  roads.clear()
+end
 T.done('test_roads')

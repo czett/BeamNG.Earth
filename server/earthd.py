@@ -63,6 +63,7 @@ import contextlib  # noqa: E402
 import errno  # noqa: E402
 import glob  # noqa: E402
 import functools  # noqa: E402
+import inspect  # noqa: E402
 import itertools  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
@@ -2355,6 +2356,52 @@ class Server:
             anchor._mph = v
         return v
 
+    def _road_pool_fast_busy(self):
+        """True when driving at highway speed while road_pool has active high-priority road work."""
+        if getattr(self, "speed", 0.0) <= HIGH_SPEED_WARM_V:
+            return False
+        rp = getattr(self, "road_pool", None)
+        if rp is not None:
+            is_paused = getattr(rp, "is_low_paused", None)
+            if callable(is_paused):
+                if is_paused("hw"):
+                    return True
+            else:
+                pauses = getattr(rp, "_low_pauses", None)
+                if pauses:
+                    try:
+                        snap = tuple(pauses)
+                    except RuntimeError:
+                        snap = ()
+                    if any(k == "hw" or (isinstance(k, tuple) and k and k[0] == "hw") for k in snap):
+                        return True
+        conns = getattr(self, "connections", None)
+        if conns:
+            try:
+                conns_snap = tuple(conns)
+            except RuntimeError:
+                conns_snap = ()
+            for conn in conns_snap:
+                roads = getattr(conn, "roads", None)
+                if roads is None:
+                    continue
+                if getattr(roads, "deck_first", None):
+                    return True
+                building = getattr(roads, "building", None)
+                if building:
+                    building_low = getattr(roads, "building_low", None)
+                    try:
+                        b_snap = set(building)
+                    except RuntimeError:
+                        b_snap = set()
+                    try:
+                        bl_snap = set(building_low) if building_low else set()
+                    except RuntimeError:
+                        bl_snap = set()
+                    if b_snap - bl_snap:
+                        return True
+        return False
+
     def build_navgraph(self, aid, x, y, serial):
         """navgraph.py: the AI road graph around (x, y) of anchor aid, written to the session folder (the
         anchor's earlier graphs deleted): (vfs path, nodes, edges) or None. Worker threads."""
@@ -2366,7 +2413,12 @@ class Server:
             cla, clo, _ = anchor.frame.enu_to_geodetic(x, y, 0.0)
             rules = navgraphmod.road_rules(navgraphmod.country_at(self.airports_db, float(cla), float(clo), _borders(self)))
             rules["de_junctions"] = designsmod.enabled(self.dej_on)
-            path, n_nodes, n_edges = self.road_pool.submit(
+            fast_busy = getattr(self, "_road_pool_fast_busy", None)
+            busy_now = fast_busy() if callable(fast_busy) else Server._road_pool_fast_busy(self)
+            submit = (self.road_pool.submit_low
+                      if serial > 1 and busy_now and hasattr(self.road_pool, "submit_low")
+                      else self.road_pool.submit)
+            path, n_nodes, n_edges = submit(
                 blockworker.navgraph, aid, anchor.lat, anchor.lon, anchor.zooms[0], x, y, self.out_dir,
                 self.vfs_dir, serial, self.left_hand(anchor), self.mph(anchor), rules).result()
             log.debug("navgraph %d of anchor %d: %d nodes in %.2f s (queue + build)", serial, aid, n_nodes,
@@ -2568,7 +2620,10 @@ class Server:
     def _signs_in_pool(self, aid, anchor, tx, ty):
         """build_signs_tile in the sign process (pools.Abandoned when a teleport leaves aid while it is queued)."""
         st = Server.stale_of(self, anchor)      # (an older version's signs with its roads, where there are)
-        return poolsmod.result_running(self.sign_pool.submit(
+        fast_busy = getattr(self, "_road_pool_fast_busy", None)
+        busy_now = fast_busy() if callable(fast_busy) else Server._road_pool_fast_busy(self)
+        submit = self.sign_pool.submit_low if busy_now and hasattr(self.sign_pool, "submit_low") else self.sign_pool.submit
+        return poolsmod.result_running(submit(
             revisitmod.StaleJob(blockworker.signs_tile, st) if st else blockworker.signs_tile,
             aid, anchor.lat, anchor.lon, anchor.zooms[0], tx, ty, self.out_dir,
             self.vfs_dir, self.left_hand(anchor), self.mph(anchor), self.country(anchor), dirsignsmod.enabled(self),
@@ -2767,7 +2822,10 @@ class Server:
         if got is not None and os.path.exists(os.path.join(self.out_dir, os.path.basename(got[0]))):
             return got
         lh, mph, _buried, _lamps, _country, gzoom = self.geo_rules(gx, gy, distanttraffic.Z)
-        got = self.far_bld_pool.submit(blockworker.traffic_geo, gx, gy, gzoom, self.out_dir, self.vfs_dir, lh, mph, far).result()
+        fast_busy = getattr(self, "_road_pool_fast_busy", None)
+        busy_now = fast_busy() if callable(fast_busy) else Server._road_pool_fast_busy(self)
+        submit = self.far_bld_pool.submit_low if busy_now and hasattr(self.far_bld_pool, "submit_low") else self.far_bld_pool.submit
+        got = submit(blockworker.traffic_geo, gx, gy, gzoom, self.out_dir, self.vfs_dir, lh, mph, far).result()
         if got is not None:
             if len(memo) >= 512:
                 memo.clear()
@@ -2920,7 +2978,7 @@ class Server:
             Server.wear_arg(self)), ROAD_TILE_TIMEOUT_S, abandon=lambda: Server.is_abandoned(self, anchor.id))
         return bool(got and got.get("content") and got.get("skin"))
 
-    def build_roads_geo(self, aid, gx, gy, content=True, skin=True, exact=None):
+    def build_roads_geo(self, aid, gx, gy, content=True, skin=True, exact=None, fast_lane=False, low_prio=False):
         """blockworker.roads_geo in a road process: geotile (gx, gy)'s content (once: kept by the mod across
         rebases), anchor aid's skin and exact variants. Its gas station pads kept for the ground's painters. None
         when the anchor is gone. Worker threads (roads.GeoTracker)."""
@@ -2932,12 +2990,14 @@ class Server:
         st = Server.stale_of(self, anchor)
         job = revisitmod.StaleJob(blockworker.roads_geo, st, only=True) if st else blockworker.roads_geo
         lh, mph, buried, lamps, country, gzoom = self.geo_rules(gx, gy)
-        fut = self.road_pool.submit(
+        submit = getattr(self.road_pool, "submit_low", self.road_pool.submit) if low_prio else self.road_pool.submit
+        fut = submit(
             job, aid, anchor.lat, anchor.lon, anchor.zooms[0], gx, gy, gzoom, self.out_dir,
             self.vfs_dir, self.sidewalks, DETAIL_ROAD_LIFT if self.near_visual == "detail" else 0.0,
             self.buildings, lh, mph, self.anchor_q(anchor) if skin else None, self.gas_stations, buried, lamps,
             country, content, skin, exact, Server.pole_profile(self), designsmod.enabled(self.dej_on),
-            Server.towns_enabled(self), Server.wear_arg(self), Server.de_detail_arg(self))
+            Server.towns_enabled(self), Server.wear_arg(self), Server.de_detail_arg(self),
+            fast_lane=fast_lane)
         t0, waited = time.perf_counter(), []
         try:
             res = poolsmod.result_running(fut, ROAD_TILE_TIMEOUT_S, waited, abandon=lambda: Server.is_abandoned(self, aid)
@@ -4204,6 +4264,8 @@ class Server:
                     now_m = time.monotonic()
                     if len(seen) > 512:
                         seen = self.__dict__["_warm_road_cells"] = {k: t for k, t in seen.items() if now_m - t < 120.0}
+                    fast_busy = getattr(self, "_road_pool_fast_busy", None)
+                    busy_now = fast_busy() if callable(fast_busy) else Server._road_pool_fast_busy(self)
                     queued = 0
                     for k in fwd_keys:
                         if queued >= 4:
@@ -4216,7 +4278,7 @@ class Server:
                         except Exception:
                             continue
                         seen[k] = now_m
-                        sub = submit_hi if (queued < 2 and submit_hi is not None) else (submit_low or submit_hi)
+                        sub = submit_hi if (not busy_now and queued < 2 and submit_hi is not None) else (submit_low or submit_hi)
                         try:
                             sub(blockworker.plan_cell, anchor.id, anchor.lat, anchor.lon,
                                 (int(k[0]), int(k[1]), int(k[2])))
@@ -5400,7 +5462,7 @@ class Server:
                 cy - size / 2 - BASE_SHIFT_M, size, QUICK_BASE_PX, tex, False, anchor.zooms[0],
                 os.path.join(self.out_dir, name), (self.user_dir, f"{self.vfs_dir}/{name}", base_ao_vfs(self.base_px),
                                                    BASE_AO), out_px=self.base_px, quick=True,
-                skip_roads=getattr(self, "speed", 0.0) > HIGH_SPEED_WARM_V).result()
+                skip_roads=False).result()
         except Exception as e:
             log.info("quick base photo %s in the block process: %s", key, e)
             return None
@@ -5485,8 +5547,9 @@ class Server:
                     # block ("the entire ground now turns brown"); none then, as before
                     return None
                 small = np.asarray(small, np.uint8)
-                # At highway speed roads_skin overlays road asphalt in Mesh mode, so skip slow paint_square on stand-ins
-                if roadsmod.ROADS_IN_GROUND and getattr(self, "speed", 0.0) <= HIGH_SPEED_WARM_V:
+                if roadsmod.ROADS_IN_GROUND:
+                    if small.shape[0] < 1024 or small.shape[1] < 1024:
+                        small = np.asarray(surfacemod.enlarge(small, max(1024, n)), np.uint8)
                     try:
                         small = surfacemod.paint_square(small, anchor.frame, x0, y0, size, self.surface,
                                                         self.road_widths, simple=True)
@@ -10685,11 +10748,22 @@ class Connection:
             pause_low = getattr(rp, "pause_low", None)
             resume_low = getattr(rp, "resume_low", None)
             if pause_low is not None and resume_low is not None:
-                roads_busy = bool(getattr(self.roads, "deck_first", None) or getattr(self.roads, "building", None))
+                building = getattr(self.roads, "building", None) or ()
+                building_low = getattr(self.roads, "building_low", None) or ()
+                roads_busy = bool(getattr(self.roads, "deck_first", None) or (set(building) - set(building_low)))
                 if fast_drv and (ground_wait or roads_busy):
                     pause_low(("hw", id(self)))
                 else:
-                    resume_low(("hw", id(self)))
+                    try:
+                        sig = inspect.signature(resume_low)
+                        has_hyst = "hysteresis_s" in sig.parameters or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    except (TypeError, ValueError):
+                        has_hyst = False
+                    if has_hyst:
+                        resume_low(("hw", id(self)), hysteresis_s=getattr(rp, "PAUSE_HYSTERESIS_S", 1.5))
+                    else:
+                        resume_low(("hw", id(self)))
         low_detail_ok = not (fast_drv and ground_wait)
         if self.turbine_geo and aid == self.active and detail and low_detail_ok:
             anchor = self.s.anchors.get(aid)
