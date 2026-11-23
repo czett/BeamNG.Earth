@@ -996,10 +996,16 @@ function M.extractDeliveryPoints(key, data, pl)
     motorway = true, motorway_link = true,
     trunk = true, trunk_link = true,
     primary = true, primary_link = true,
+    secondary = true, secondary_link = true,
+    tertiary_link = true,
   }
+  local function normHw(hw)
+    if type(hw) ~= 'string' or hw == '' then return nil end
+    return hw:lower()
+  end
   local function isExcludedHw(hw)
-    if type(hw) ~= 'string' or hw == '' then return false end
-    return excludedHw[hw:lower()] == true
+    local n = normHw(hw)
+    return n ~= nil and excludedHw[n] == true
   end
   if isExcludedHw(data.highway) or isExcludedHw(data.roadClass) then return out end
 
@@ -1040,13 +1046,13 @@ function M.extractDeliveryPoints(key, data, pl)
   -- Optional road-class proximity check if tile carries road/way geometry with highway class tags.
   local roadSrc = type(data.roads) == 'table' and data.roads or (type(data.ways) == 'table' and data.ways or nil)
   local function onExcludedRoad(x, y)
-    if not roadSrc then return false end
-    local bestD2, bestExcl = 40.0 * 40.0, false
+    if not roadSrc then return false, nil end
+    local bestD2, bestExcl, bestHw = 40.0 * 40.0, false, nil
     for _, r in ipairs(roadSrc) do
       if type(r) == 'table' then
-        local hw = r.highway or r.roadClass or r.class
+        local hw = normHw(r.highway or r.roadClass or r.class)
         local pts = type(r.pts) == 'table' and r.pts or (type(r.nodes) == 'table' and r.nodes or nil)
-        if type(hw) == 'string' and pts then
+        if hw and pts then
           local excl = isExcludedHw(hw)
           for _, pt in ipairs(pts) do
             if type(pt) == 'table' then
@@ -1056,7 +1062,7 @@ function M.extractDeliveryPoints(key, data, pl)
                 local dx, dy = x - rx, y - ry
                 local d2 = dx * dx + dy * dy
                 if d2 < bestD2 then
-                  bestD2, bestExcl = d2, excl
+                  bestD2, bestExcl, bestHw = d2, excl, hw
                 end
               end
             end
@@ -1064,7 +1070,7 @@ function M.extractDeliveryPoints(key, data, pl)
         end
       end
     end
-    return bestExcl
+    return bestExcl, bestHw
   end
 
   local function hasBuiltUpCluster(x, y)
@@ -1085,7 +1091,10 @@ function M.extractDeliveryPoints(key, data, pl)
     z = tonumber(z) or 0
     if pl then x, y, z = geotile.apply(pl, x, y, z) end
     if not hasBuiltUpCluster(x, y) then return end
-    if onExcludedRoad(x, y) then return end
+    local exclRoad, nearestHw = onExcludedRoad(x, y)
+    if exclRoad then return end
+    local roadClass = normHw(hw) or nearestHw or normHw(data.roadClass) or normHw(data.highway)
+    if isExcludedHw(roadClass) then return end
     for j = 1, #out do
       local dx, dy = x - out[j].x, y - out[j].y
       if dx * dx + dy * dy < minSep2 then return end
@@ -1094,6 +1103,7 @@ function M.extractDeliveryPoints(key, data, pl)
       id = id or (tostring(key) .. ':d' .. tostring(#out + 1)),
       x = x, y = y, z = z,
       yaw = (tonumber(yaw) or 0) + dyaw,
+      roadClass = roadClass,
     }
   end
   for _, field in ipairs({ 'deliveryPoints', 'addresses' }) do

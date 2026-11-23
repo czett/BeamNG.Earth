@@ -28,7 +28,7 @@ M.HALO_M = 0
 -- 87.9 / 84.5 fps with it at 650 m against 92.8 / 88.2 with it off and 91.7 / 88.5 before the merge, and 89 frames
 -- over 50 ms in PhysicsAndVLUA in one run (the traffic AI's planning on the longer graph); launch, oncoming spawns and
 -- overtaking cost nothing measurable. 650 to try it.
-M.FAST_HALO_M = 0
+M.FAST_HALO_M = 380
 M.FAST_HALO_MS = 24.5     -- (55 mph)
 -- An apply (or its signals' second step) waits for a light frame (governor roomFor: at most APPLY_ROOM_MS of streaming
 -- and other work spent in it, not a terrain commit's), APPLY_WAIT_FRAMES at most
@@ -37,7 +37,7 @@ M.APPLY_WAIT_FRAMES = 30
 -- The block moved this far from where the graph was last clipped: clipped again to the new block (the server's graph
 -- reaches WINDOW_M = 1100 m, the block ~450 m; without it the graph ran out ahead of a car driving on before the next
 -- graph came, every 400 m: the GPS arrows ended and the autodrive stopped, the user's Cannonball run 2026-10-14)
-M.RECLIP_M = 150
+M.RECLIP_M = 96
 M.UI_MAP = false        -- send our graph to the UI (the big map) on every apply
 M.RULES_FILE = '/temp/beamngEarth/roadRules.json'
 M.rules = { rightHandDrive = false, turnOnRed = true }    -- US; `rightHandDrive = true` means driving on the left
@@ -121,7 +121,7 @@ M.LAUNCH_MIN_MS = 8
 M.LAUNCH_ALIGN = 0.94     -- (cos 20 degrees)
 M.LAUNCH_JUNCTION_M = 20
 M.LAUNCH_SCAN_S = 0.15
-M.LAUNCH_DELAY_S = 0.4      -- (0.12 in PR #728: a launch 0.12 s after a respawn once read 63,000 mph, the car teleported again under it)
+M.LAUNCH_DELAY_S = 0.18
 M.LAUNCH_TIMEOUT_S = 6
 -- (gameplay_walk: 0.40's traffic.lua calls gameplay_walk.addVehicleToBlacklist when it activates its cars, and this
 -- level had none loaded: the cars spawned and never drove, 2026-10-19)
@@ -146,6 +146,9 @@ local started = false
 local respawnAll = false
 local lastGuard = -math.huge
 local cuts = {}         -- { x, y } of the applied graph's nodes that lost a road to the clip
+local openCuts = {}     -- { x, y } of the applied graph's nodes that still have an open dead-end in `nodes`
+local director          -- forward-declared (initialized below with traffic director state)
+local playerForwardHalo -- forward-declared (defined after playerId)
 
 -- Pure: point inside box {x0, y0, x1, y1} shrunk by m (no box: anywhere).
 function M.inside(b, x, y, m)
@@ -192,6 +195,7 @@ function M.compactShortEdges(nodes, protected)
     return a.oneWay == b.oneWay and a.lanes == b.lanes and a.drivability == b.drivability
       and a.rough == b.rough and a.rumble == b.rumble
       and a.highway == b.highway and a.unlimited == b.unlimited
+      and a.roadClass == b.roadClass
   end
   local ids, removed = {}, 0
   for id in pairs(nodes) do ids[#ids + 1] = id end
@@ -227,10 +231,27 @@ function M.compactShortEdges(nodes, protected)
   return removed
 end
 
+M.ROAD_CLASSES = {
+  [1] = 'motorway',
+  [2] = 'motorway_link',
+  [3] = 'trunk',
+  [4] = 'trunk_link',
+  [5] = 'primary',
+  [6] = 'primary_link',
+  [7] = 'secondary',
+  [8] = 'secondary_link',
+  [9] = 'tertiary',
+  [10] = 'residential',
+  [11] = 'living_street',
+  [12] = 'unclassified',
+  [13] = 'service',
+  [14] = 'tertiary_link',
+}
+
 -- Pure-ish (needs vec3): the stock map's node table of graph g clipped to box b: {name = {pos, radius,
 -- links = {other = edge}}}, every edge shared by both ends (double-sided) with in/out nodes, positions and radii.
 -- Returns nodes, node count, edge count and the cuts: { x, y } of each kept node with a road to a node left out.
-function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
+function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo, fwd)
   local nodes, nn, ne = {}, 0, 0
   local keep = {}
   local fast = nil        -- (fastHalo: the nodes of the fast roads, FAST_HALO_MS)
@@ -241,6 +262,11 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
     end
   end
   local phys = {}         -- (halo: the nodes kept past the box's edge for the AI's route planning; the cuts stay at it)
+  local useFwd = b and type(fwd) == 'table' and tonumber(fwd.x) and tonumber(fwd.y)
+  local cx, cy
+  if useFwd then
+    cx, cy = (b[1] + b[3]) * 0.5, (b[2] + b[4]) * 0.5
+  end
   local steps = 0
   local function step()       -- (in a coroutine: a pause every yieldEvery items, buildNodes)
     if yieldEvery then
@@ -251,7 +277,10 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
   for name, n in pairs(g.nodes) do
     if M.inside(b, n[1], n[2], edgeM) then keep[name], phys[name] = n, true
     elseif halo and halo > 0 and M.inside(b, n[1], n[2], edgeM - halo) then keep[name] = n
-    elseif fast and fast[name] and M.inside(b, n[1], n[2], edgeM - fastHalo) then keep[name] = n end
+    elseif fast and fast[name] and M.inside(b, n[1], n[2], edgeM - fastHalo)
+      and (not useFwd or ((n[1] - cx) * fwd.x + (n[2] - cy) * fwd.y > 0)) then
+      keep[name] = n
+    end
     step()
   end
   local function node(name)
@@ -265,6 +294,7 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
     return t
   end
   local cut, cutList = {}, {}
+  local openCut, openCutList = {}, {}
   for _, e in ipairs(g.edges) do
     step()
     local a, bb = e[1], e[2]
@@ -274,16 +304,23 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
         cut[k] = true
         cutList[#cutList + 1] = { keep[k][1], keep[k][2] }
       end
+      if keep[k] and not keep[pair[2]] and g.nodes[pair[2]] and not openCut[k] then
+        openCut[k] = true
+        openCutList[#openCutList + 1] = { keep[k][1], keep[k][2] }
+      end
     end
     if keep[a] and keep[bb] and a ~= bb and not M.tooSteep(keep[a], keep[bb]) then
       local A, B = node(a), node(bb)
       if not A.links[bb] then
+        local rcRaw = e[14]
+        local roadClass = type(rcRaw) == 'string' and rcRaw:lower() or (rcRaw and M.ROAD_CLASSES[rcRaw] or nil)
         local edge = { drivability = e[7], oneWay = e[3] == 1, lanes = M.lanes(e[4], e[5], leftHand),
           lanesOut = e[4], lanesIn = e[5],
           speedLimit = e[6], inNode = a, outNode = bb, inPos = A.pos, outPos = B.pos,
           inRadius = e[8], outRadius = e[9] or e[8],      -- (e[9]: a road narrowing to a tunnel's portal)
           posted = e[10], rough = e[11] == true, rumble = e[12] == true,
-          highway = (e[13] == 1 or e[13] == 2), unlimited = (e[13] == 2) } -- (e[13]: 1=highway, 2=unlimited DE Autobahn)
+          highway = (e[13] == 1 or e[13] == 2), unlimited = (e[13] == 2), -- (e[13]: 1=highway, 2=unlimited DE Autobahn)
+          roadClass = roadClass }
         A.links[bb] = edge
         B.links[a] = edge
         ne = ne + 1
@@ -296,7 +333,7 @@ function M.toNodes(g, b, edgeM, leftHand, yieldEvery, halo, fastHalo)
     for _, app in ipairs(sg.app or {}) do if app[1] then cut[app[1]] = true end end
   end
   local removed = M.compactShortEdges(nodes, cut)
-  return nodes, nn - removed, ne - removed, cutList
+  return nodes, nn - removed, ne - removed, cutList, openCutList
 end
 
 M.FOLLOW_MS = 8         -- m/s the player moves at least for a car ahead going its way to keep going (followsPlayer)
@@ -327,6 +364,11 @@ end
 -- stopping distance), widened by the time the guard missed (lag s, a long frame) at the car's speed.
 function M.cutReach(sp, fresh, lag)
   return math.max(fresh and M.CUT_FRESH_M or math.max(M.CUT_M, sp * M.CUT_S), M.stopReach(sp)) + (lag or 0) * sp
+end
+
+-- Pure: early boundary-cut reach on highways (at least 120 m or stopReach(sp) + 60 m), widened by lag.
+function M.highwayCutReach(sp, lag)
+  return math.max(120, M.stopReach(sp) + 60) + (lag or 0) * (sp or 0)
 end
 
 -- Pure: is a car at (px, py) within m of one of the cuts, whichever way it points?
@@ -491,9 +533,12 @@ end
 local function apply(b, pre, moved)
   setRules()
   local tN = wall()
-  local nodes, nn, ne, cl
-  if pre then nodes, nn, ne, cl = pre[1], pre[2], pre[3], pre[4]
-  else nodes, nn, ne, cl = M.toNodes(graph, b, M.EDGE_M, M.rules.rightHandDrive, nil, M.HALO_M, M.FAST_HALO_M) end
+  local nodes, nn, ne, cl, ocl
+  if pre then nodes, nn, ne, cl, ocl = pre[1], pre[2], pre[3], pre[4], pre[5]
+  else
+    local fh, fwd = playerForwardHalo()
+    nodes, nn, ne, cl, ocl = M.toNodes(graph, b, M.EDGE_M, M.rules.rightHandDrive, nil, M.HALO_M, fh, fwd)
+  end
   stats.nodesMs = wall() - tN         -- (the parts of an apply's frame: the hitch hunt, 2026-10-23)
   local ts = signalsSystem()
   -- before the reset: its onNavgraphReloaded would place the old instances on the new graph (research §2.8)
@@ -541,6 +586,7 @@ local function apply(b, pre, moved)
   if mr and mr.reset then pcall(mr.reset) end
   pendingSignals = ts and nodes or nil     -- next frame: a second, smaller hitch instead of one big one
   cuts = cl
+  openCuts = ocl or cl or {}
   stats.applies, stats.lastMs, stats.nodes, stats.edges = stats.applies + 1, wall() - t0, nn, ne
   stats.applyMs = wall() - tN
   stats.cuts = #cl
@@ -627,6 +673,20 @@ end
 
 local function playerId() return be and be.getPlayerVehicleID and be:getPlayerVehicleID(0) or -1 end
 
+playerForwardHalo = function()
+  if (M.FAST_HALO_M or 0) <= 0 then return 0, nil end
+  local me = playerId()
+  local pv = me >= 0 and getObjectByID and getObjectByID(me) or nil
+  local pu = pv and pv.getVelocity and pv:getVelocity() or nil
+  if pu then
+    local sp = math.sqrt((pu.x or 0) ^ 2 + (pu.y or 0) ^ 2)
+    if sp >= 12.0 then
+      return M.FAST_HALO_M, { x = pu.x / sp, y = pu.y / sp }
+    end
+  end
+  return 0, nil
+end
+
 -- Pure: where a respawned car goes, (x, y, dirX, dirY, min m, max m) for gameplay_traffic.forceTeleport, or nil for
 -- behind the camera: ahead of a player at (px, py) moving (vx, vy) m/s faster than AHEAD_MS, AHEAD_M along the way but
 -- no farther than the block b's edge guard (GUARD_M + a margin) in that direction; nil too when that leaves no room.
@@ -656,13 +716,81 @@ function M.oncomingSpot(px, py, dx, dy, b, leftHand, closest)
       local x, y = px + dx * ahead + sx * side, py + dy * ahead + sy * side
       if M.inside(b, x, y, M.GUARD_M + 20) then
         local r = closest(x, y)
-        if r and r.oneWay and r.dist <= M.ONCOMING_ON_M and (r.dx * dx + r.dy * dy) < -0.8 then
-          return x, y, r.dx, r.dy
+        if r and r.oneWay and not r.isLink and not (type(r.roadClass) == 'string' and r.roadClass:sub(-5) == '_link')
+            and r.dist <= M.ONCOMING_ON_M and (r.dx * dx + r.dy * dy) < -0.8 then
+          return x, y, r.dx, r.dy, r.z
         end
       end
     end
   end
   return nil
+end
+
+-- Pure: smooth local multi-sample tangent across aligned neighbor edges of i and o around parameter t in [0, 1],
+-- falling back cleanly to (o.pos - i.pos) normalized if no aligned neighbor edges exist.
+function M.roadTangentAt(m, e, i, o, t)
+  if not i or not o or not i.pos or not o.pos then return 1, 0 end
+  local ex, ey = o.pos.x - i.pos.x, o.pos.y - i.pos.y
+  local el = math.sqrt(ex * ex + ey * ey)
+  if el < 1e-6 then return 1, 0 end
+  local ux, uy = ex / el, ey / el
+  if not m or not m.nodes or not e then return ux, uy end
+  t = math.max(0, math.min(1, tonumber(t) or 0.5))
+  local p0x, p0y = i.pos.x, i.pos.y
+  local p2x, p2y = o.pos.x, o.pos.y
+  local inId, outId = e.inNode, e.outNode
+  if t < 0.35 and i.links then
+    local bestDot, bestUx, bestUy, bestLen = 0.5, nil, nil, 0
+    for nid, ne in pairs(i.links) do
+      if nid ~= outId and (not ne.oneWay or ne.outNode == inId) then
+        local pn = m.nodes[nid]
+        if pn and pn ~= i and pn ~= o and pn.pos then
+          local vx, vy = i.pos.x - pn.pos.x, i.pos.y - pn.pos.y
+          local vl = math.sqrt(vx * vx + vy * vy)
+          if vl >= 0.1 then
+            local vux, vuy = vx / vl, vy / vl
+            local dot = vux * ux + vuy * uy
+            if dot >= bestDot then
+              bestDot, bestUx, bestUy, bestLen = dot, vux, vuy, vl
+            end
+          end
+        end
+      end
+    end
+    if bestUx then
+      local stepBack = math.min(bestLen, math.max(el, 15)) * ((0.35 - t) / 0.35)
+      p0x = i.pos.x - bestUx * stepBack
+      p0y = i.pos.y - bestUy * stepBack
+    end
+  end
+  if t > 0.65 and o.links then
+    local bestDot, bestUx, bestUy, bestLen = 0.5, nil, nil, 0
+    for nid, ne in pairs(o.links) do
+      if nid ~= inId and (not ne.oneWay or ne.inNode == outId) then
+        local nn = m.nodes[nid]
+        if nn and nn ~= i and nn ~= o and nn.pos then
+          local vx, vy = nn.pos.x - o.pos.x, nn.pos.y - o.pos.y
+          local vl = math.sqrt(vx * vx + vy * vy)
+          if vl >= 0.1 then
+            local vux, vuy = vx / vl, vy / vl
+            local dot = vux * ux + vuy * uy
+            if dot >= bestDot then
+              bestDot, bestUx, bestUy, bestLen = dot, vux, vuy, vl
+            end
+          end
+        end
+      end
+    end
+    if bestUx then
+      local stepFwd = math.min(bestLen, math.max(el, 15)) * ((t - 0.65) / 0.35)
+      p2x = o.pos.x + bestUx * stepFwd
+      p2y = o.pos.y + bestUy * stepFwd
+    end
+  end
+  local dx, dy = p2x - p0x, p2y - p0y
+  local dl = math.sqrt(dx * dx + dy * dy)
+  if dl < 1e-6 then return ux, uy end
+  return dx / dl, dy / dl
 end
 
 local function closestRoad(x, y, z)
@@ -679,9 +807,13 @@ local function closestRoad(x, y, z)
   -- (findClosestRoad's distance is 3D, the probe at the player's height: measured in the plane here)
   local t = math.max(0, math.min(1, ((x - i.pos.x) * ex + (y - i.pos.y) * ey) / (l * l)))
   local qx, qy = i.pos.x + t * ex, i.pos.y + t * ey
-  return { dist = math.sqrt((x - qx) ^ 2 + (y - qy) ^ 2), dx = ex / l, dy = ey / l, oneWay = e.oneWay,
+  local roadZ = (i.pos.z or 0) + t * ((o.pos.z or 0) - (i.pos.z or 0))
+  local tdx, tdy = M.roadTangentAt(m, e, i, o, t)
+  local isLink = (type(e.roadClass) == 'string' and e.roadClass:sub(-5) == '_link') or false
+  return { dist = math.sqrt((x - qx) ^ 2 + (y - qy) ^ 2), dx = tdx, dy = tdy, z = roadZ, oneWay = e.oneWay,
     speedLimit = e.speedLimit, posted = e.posted, rough = e.rough == true,
     highway = e.highway == true, unlimited = e.unlimited == true,
+    roadClass = e.roadClass, isLink = isLink,
     lanes = e.lanes, lanesOut = e.lanesOut, lanesIn = e.lanesIn,
     lateral = (ex * (y - qy) - ey * (x - qx)) / l, halfWidth = (e.inRadius or 3.5) +
       ((e.outRadius or e.inRadius or 3.5) - (e.inRadius or 3.5)) * t, rumble = e.rumble == true,
@@ -694,9 +826,20 @@ function M.speedProfileAt(x, y, z)
   local r = closestRoad(x, y, z)
   if not r or r.dist > 35 then return nil end
   return { target = r.speedLimit, posted = r.posted, rough = r.rough, distance = r.dist,
-    highway = r.highway == true, unlimited = r.unlimited == true,
+    highway = r.highway == true, unlimited = r.unlimited == true, roadClass = r.roadClass,
     lanes = r.lanes, lanesOut = r.lanesOut, lanesIn = r.lanesIn,
     dx = r.dx, dy = r.dy, oneWay = r.oneWay }
+end
+
+-- Pure: true when a candidate highway spawn road is within 35 m, not a *_link ramp, and aligned with travel (ux, uy).
+function M.isValidHighwaySpawnCandidate(road, ux, uy)
+  if type(road) ~= 'table' or (road.dist or math.huge) > 35 then return false end
+  if road.isLink == true or (type(road.roadClass) == 'string' and road.roadClass:sub(-5) == '_link') then
+    return false
+  end
+  local dot = (road.dx or 0) * (ux or 0) + (road.dy or 0) * (uy or 0)
+  if road.oneWay then return dot >= 0.5 end
+  return math.abs(dot) >= 0.5
 end
 
 -- Lane-departure strip metadata for the rumble audio. The server only marks selected country/road classes; only the
@@ -749,23 +892,28 @@ local function guard(b, all, lag)
         if not s0 or (p.x - s0[1]) ^ 2 + (p.y - s0[2]) ^ 2 > jump ^ 2 then s0 = { p.x, p.y, now } end
         seenAt[id] = { p.x, p.y, s0[3], sp }
         local fresh = now - s0[3] < M.FRESH_S
-        local reach = M.cutReach(sp, fresh, lag)
-        local toCut = dl > 1e-6 and M.headingToCut(p.x, p.y, dir.x / dl, dir.y / dl, cuts, reach)
-        if toCut and pp and M.followsPlayer(p, dir, pp, pv:getVelocity(), sp) then
+        local r = ((#cuts > 0 or #openCuts > 0) and map and map.getMap) and closestRoad(p.x, p.y, p.z) or nil
+        local isHighway = (r ~= nil and r.highway == true)
+        local cutList = isHighway and openCuts or cuts
+        local reach = isHighway and math.max(M.cutReach(sp, fresh, lag), M.highwayCutReach(sp, lag))
+          or M.cutReach(sp, fresh, lag)
+        local toCut = dl > 1e-6 and M.headingToCut(p.x, p.y, dir.x / dl, dir.y / dl, cutList, reach)
+        if toCut and not isHighway and pp and M.followsPlayer(p, dir, pp, pv:getVelocity(), sp) then
           toCut = false     -- (the block goes on with the player: the guard's box check stays; GitHub #353)
         end
         -- at the cut already (GitHub #855): stopped at the dead end or turning round, which no longer heads for it
+        local nearM = isHighway and math.max(120, M.stopReach(sp) + 60) or M.CUT_NEAR_M
         local atCut = false
-        if not toCut and not fresh and not paused and M.nearCut(p.x, p.y, cuts, M.CUT_NEAR_M) then
+        if not toCut and (isHighway or not fresh) and not paused and M.nearCut(p.x, p.y, cutList, nearM) then
           local f = o:getDirectionVector()
           local fl = math.sqrt(f.x * f.x + f.y * f.y)
           local fwd = u.x * f.x + u.y * f.y
           local hx, hy        -- its direction of travel at speed, its facing at a stand
           if sp >= M.CUT_NEAR_MS then hx, hy = u.x / sp, u.y / sp
           elseif fl > 1e-6 then hx, hy = f.x / fl, f.y / fl end
-          local r = hx and closestRoad(p.x, p.y, p.z) or nil
-          local roadDot = r and (r.dx * hx + r.dy * hy) or nil
-          local facingCut = fl > 1e-6 and M.headingToCut(p.x, p.y, f.x / fl, f.y / fl, cuts, M.CUT_NEAR_M) or false
+          if r == nil and map and map.getMap then r = hx and closestRoad(p.x, p.y, p.z) or nil end
+          local roadDot = (r and hx) and (r.dx * hx + r.dy * hy) or nil
+          local facingCut = fl > 1e-6 and M.headingToCut(p.x, p.y, f.x / fl, f.y / fl, cutList, nearM) or false
           atCut = M.cutStopped(sp, fwd, roadDot, r and r.oneWay or nil, facingCut)
         end
         if not paused and o:getVelocity():length() < M.STUCK_MS then
@@ -773,37 +921,84 @@ local function guard(b, all, lag)
         else
           stillSince[id] = nil
         end
-        local d = pp and (p - pp):length() or math.huge
+        local d = pp and math.sqrt((p.x - pp.x) ^ 2 + (p.y - pp.y) ^ 2 + ((p.z or 0) - (pp.z or 0)) ^ 2) or math.huge
         local underCooldown = (now - (lastTeleport[id] or -math.huge)) < M.COOLDOWN_S
         local urgent = not M.inside(b, p.x, p.y, M.GUARD_M)
-        if all or urgent or (not underCooldown and (toCut or atCut or M.stuck(stillSince[id], now, d))) then
+        local highwayCut = isHighway and (toCut or atCut)
+        if all or urgent or highwayCut or (not underCooldown and (toCut or atCut or M.stuck(stillSince[id], now, d))) then
           if toCut then stats.cutRespawns = (stats.cutRespawns or 0) + 1
           elseif atCut then stats.cutStopRespawns = (stats.cutStopRespawns or 0) + 1 end
           stillSince[id] = nil
           lastTeleport[id] = now
+          if director then
+            director.courierDwell[id] = nil
+            director.busDwell[id] = nil
+          end
           -- behind the camera: the stock default is 100-500 m in front of it, where the player sees the car
           -- pop in and its tyres smoke as it lands (the photo comparisons, 2026-10-14)
           local cp, cf = core_camera and core_camera.getPosition(), core_camera and core_camera.getForward()
           local pu = pv and pv:getVelocity()
-          local ax, ay, adx, ady, amin, amax = nil
-          if pp and pu and not all then ax, ay, adx, ady, amin, amax = M.aheadSpot(pp.x, pp.y, pu.x, pu.y, b) end
-          local ox, oy, odx, ody
-          if ax and M.ONCOMING then
-            oncomingTurn = not oncomingTurn
-            if oncomingTurn then
-              local ok, x, y, ddx, ddy = pcall(M.oncomingSpot, pp.x, pp.y, adx, ady, b, M.rules.rightHandDrive,
-                function(x, y) return closestRoad(x, y, pp.z) end)
-              if ok and x then ox, oy, odx, ody = x, y, ddx, ddy end
+          local psp = pu and math.sqrt(pu.x * pu.x + pu.y * pu.y) or 0
+          local ox, oy, odx, ody, oz
+          local fx, fy, fdx, fdy, flo, fhi, fz
+          if pp and pu and psp >= M.AHEAD_MS and not all then
+            local pdx, pdy = pu.x / psp, pu.y / psp
+            local function tryOncoming()
+              if not M.ONCOMING then return false end
+              local okO, x, y, ddx, ddy, rz = pcall(M.oncomingSpot, pp.x, pp.y, pdx, pdy, b, M.rules.rightHandDrive,
+                function(cx, cy) return map and map.getMap and closestRoad(cx, cy, pp.z) or nil end)
+              if okO and x then
+                ox, oy, odx, ody, oz = x, y, ddx, ddy, rz
+                return true
+              end
+              return false
+            end
+            local function tryForwardHwy()
+              local hax, hay, hahx, hahy, halo, hahi = M.horizonSpawnWindow(
+                pp.x, pp.y, pdx, pdy, b, cp and cp.x, cp and cp.y, true)
+              if not hax then return false end
+              local offs = { 0.5, 0.75, 0.25 }
+              local anyRejected = false
+              for _, frac in ipairs(offs) do
+                local dist = halo + (hahi - halo) * frac
+                local cx, cy = hax + hahx * dist, hay + hahy * dist
+                if not M.nearCut(cx, cy, openCuts, 120) then
+                  local tr = map and map.getMap and closestRoad(cx, cy, pp.z) or nil
+                  if tr and M.isValidHighwaySpawnCandidate(tr, hahx, hahy) then
+                    local shx, shy = M.snapRoadTangent(hahx, hahy, tr)
+                    if not M.headingToCut(cx, cy, shx, shy, openCuts, M.highwayCutReach(32, 0)) then
+                      local slo, shi = halo, hahi
+                      if anyRejected then
+                        slo, shi = math.max(halo, dist - 15), math.min(hahi, dist + 15)
+                      end
+                      fx, fy, fdx, fdy, flo, fhi, fz = cx - shx * dist, cy - shy * dist, shx, shy, slo, shi, tr.z or pp.z
+                      return true
+                    end
+                  end
+                end
+                anyRejected = true
+              end
+              return false
+            end
+            if M.ONCOMING then
+              oncomingTurn = not oncomingTurn
+              if oncomingTurn then
+                if not tryOncoming() then tryForwardHwy() end
+              else
+                if not tryForwardHwy() then tryOncoming() end
+              end
+            else
+              tryForwardHwy()
             end
           end
           if ox then
             stats.oncomingRespawns = (stats.oncomingRespawns or 0) + 1
-            pcall(gt.forceTeleport, id, vec3(ox, oy, pp.z), vec3(odx, ody, 0), 0, 40)
-          elseif ax then
+            pcall(gt.forceTeleport, id, vec3(ox, oy, oz or pp.z), vec3(odx, ody, 0), 0, 40)
+          elseif fx then
             stats.aheadRespawns = (stats.aheadRespawns or 0) + 1
-            pcall(gt.forceTeleport, id, vec3(ax, ay, pp.z), vec3(adx, ady, 0), amin, amax)
+            pcall(gt.forceTeleport, id, vec3(fx, fy, fz), vec3(fdx, fdy, 0), flo, fhi)
           elseif cp and cf then
-            pcall(gt.forceTeleport, id, cp, -cf, M.RESPAWN_M[1], M.RESPAWN_M[2])
+            pcall(gt.forceTeleport, id, cp, vec3(-cf.x, -cf.y, -(cf.z or 0)), M.RESPAWN_M[1], M.RESPAWN_M[2])
           else
             pcall(gt.forceTeleport, id)
           end
@@ -830,6 +1025,12 @@ local function scatterTraffic(gt, b)
     end
   end
   pcall(gt.forceTeleportAll, eligibleTraffic)
+  if director then
+    for _, id in ipairs(eligibleTraffic) do
+      director.courierDwell[id] = nil
+      director.busDwell[id] = nil
+    end
+  end
 end
 
 -- Stock can keep a traffic car in its AI pool after somebody enters it. In particular, setActiveAmount(0) would
@@ -910,6 +1111,10 @@ local onVehicleSwitchedLivery -- forward-declared (defined with traffic director
 function M.onVehicleSwitched(oldId, newId, player)
   localplayers.observe(player)
   if onVehicleSwitchedLivery then onVehicleSwitchedLivery(oldId, newId) end
+  if director then
+    if oldId then director.courierDwell[oldId], director.busDwell[oldId] = nil, nil end
+    if newId then director.courierDwell[newId], director.busDwell[newId] = nil, nil end
+  end
   local gt = gameplay_traffic
   if gt and gt.getState() == 'on' then syncTrafficPool(gt) end
 end
@@ -1043,6 +1248,7 @@ M.HORIZON_SPAWN_MAX_M = 340
 M.HORIZON_HWY_SPAWN_MIN_M = 340
 M.HORIZON_HWY_SPAWN_MAX_M = 480
 M.HORIZON_SAFE_MIN_M = 95
+M.HORIZON_HWY_SAFE_MIN_M = 320
 M.HORIZON_BEHIND_DESPAWN_M = 420
 M.HORIZON_SPAWN_SPACING_M = 140
 M.HORIZON_SPACING_TTL_S = 10.0
@@ -1059,13 +1265,25 @@ M.BUS_STOP_LATERAL_MAX_M = 12.0
 M.BUS_STOP_CURB_OFFSET_M = 0.85
 
 M.COURIER_STOP_RANGE_M = 16.0
+M.COURIER_APPROACH_RANGE_M = 40.0
+M.COURIER_APPROACH_RAMP_S = 3.0
 M.COURIER_STOP_MAX_SPEED_MS = 12.5
-M.COURIER_STOP_MAX_LIMIT_MS = 15.3
+M.COURIER_STOP_MAX_LIMIT_MS = 13.9
 M.COURIER_STOP_COOLDOWN_S = 45.0
 M.COURIER_STOP_DWELL_MIN_S = 4.0
 M.COURIER_STOP_DWELL_MAX_S = 6.0
-M.COURIER_STOP_LATERAL_MAX_M = 16.0
+M.COURIER_STOP_LATERAL_MAX_M = 8.0
+M.COURIER_STOP_ROAD_DIST_MAX_M = 12.0
 M.COURIER_STOP_CURB_OFFSET_M = 0.85
+M.COURIER_MERGE_CLEAR_BEHIND_M = 45.0
+M.COURIER_MERGE_ACCEL_S = 1.5
+M.COURIER_MERGE_MAX_WAIT_S = 6.0
+M.COURIER_ALLOWED_ROAD_CLASSES = {
+  residential = true,
+  living_street = true,
+  unclassified = true,
+  service = true,
+}
 
 M.BUS_MODELS = { citybus = true, wentward = true, dt40l = true }
 M.MINIBUS_MODELS = { van = true, h_series = true, gavril_h = true }
@@ -1146,7 +1364,7 @@ M.LIVERY_MAX_RETRIES = 3
 M.LIVERY_RETRY_S = 0.5
 M.LIVERY_DEFER_S = 0.35
 
-local director = {
+director = {
   accum = 0,
   clock = 0,
   rosterArchetype = {},
@@ -1818,6 +2036,8 @@ end
 -- and defer inspection of externally spawned/replaced traffic vehicles until traffic init completes.
 function M.onVehicleSpawned(vehId)
   if not vehId then return end
+  director.busDwell[vehId] = nil
+  director.courierDwell[vehId] = nil
   local st = director.liveryState[vehId]
   if st and st.applying then
     st.applying = false
@@ -2454,6 +2674,7 @@ function M.onDeliveryPoints(key, pts)
           id = s.id or (tostring(key) .. ':d' .. tostring(i)),
           x = x, y = y, z = tonumber(s.z or s[3]) or 0,
           yaw = tonumber(s.yaw or s[4]) or 0,
+          roadClass = type(s.roadClass) == 'string' and s.roadClass:lower() or nil,
         }
       end
     end
@@ -2479,53 +2700,119 @@ function M.isCourierDwelling(vehId)
 end
 
 -- Step the AI courier curbside delivery stop state machine for one courier vehicle (zero table allocations on idle ticks).
--- Restricted to built-up villages/towns: requires vehicle speed < 12.5 m/s (45 km/h) and local road speed limit
--- <= 15.3 m/s (55 km/h), never pulling over on rural highways.
-function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj, roadLimitMs)
+-- Restricted to urban residential/service streets: requires urban trafficProfile, speed < 12.5 m/s, roadClass in
+-- COURIER_ALLOWED_ROAD_CLASSES, road.dist <= 12 m, not highway/unlimited/_link, and posted limit <= 13.9 m/s (50 km/h).
+function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj, roadOrLimit, rearClear)
   local dwell = director.courierDwell[vehId]
   if dwell then
-    if now >= dwell.releaseAt then
-      director.courierDwell[vehId] = nil
-      director.deliveryCooldowns[dwell.pointId] = now + M.COURIER_STOP_COOLDOWN_S
-      stats.courierStopsServed = (stats.courierStopsServed or 0) + 1
-      if obj and obj.queueLuaCommand then
-        local resetOff = -(tonumber(dwell.curbOffset) or 0)
-        obj:queueLuaCommand(string.format(
-          'electrics.set_warn_signal(0) ai.driveInLane("on") ai.laneChange(nil, 12.0, %.2f) ai.setSpeedMode("legal") ai.setMode("traffic")',
-          resetOff))
+    if dwell.phase == 'approach' then
+      local vx, vy = dwell.pointX - px, dwell.pointY - py
+      local along = vx * dx + vy * dy
+      local dPt = math.sqrt(vx * vx + vy * vy)
+      local elapsed = now - dwell.startedAt
+      if elapsed >= M.COURIER_APPROACH_RAMP_S or dPt <= 4.0 or along < -2.0 then
+        dwell.phase = 'stopped'
+        dwell.releaseAt = now + dwell.dwellS
+        director.deliveryCooldowns[dwell.pointId] = now + dwell.dwellS + M.COURIER_MERGE_ACCEL_S + M.COURIER_STOP_COOLDOWN_S
+        if obj and obj.queueLuaCommand then
+          obj:queueLuaCommand(string.format(
+            'electrics.%s(0) electrics.set_warn_signal(1) ai.driveInLane("off") ai.setSpeedMode("set") ai.setSpeed(0)',
+            dwell.curbSig))
+        end
+        return 'stopped', dwell.pointId
       end
-      return 'released', dwell.pointId
+      local frac = math.max(0, math.min(1, elapsed / M.COURIER_APPROACH_RAMP_S))
+      local rampSpeed = math.max(0.5, (dwell.startSpeed or 6.0) * (1 - frac))
+      if obj and obj.queueLuaCommand then
+        obj:queueLuaCommand(string.format('ai.setSpeed(%.2f)', rampSpeed))
+      end
+      return 'approach', dwell.pointId
+    elseif dwell.phase == 'stopped' then
+      if now >= dwell.releaseAt then
+        dwell.phase = 'merging'
+        dwell.mergeStartedAt = now
+        local resetOff = -(tonumber(dwell.curbOffset) or 0)
+        if rearClear ~= false then
+          dwell.mergeMoving = true
+          dwell.mergeDoneAt = now + M.COURIER_MERGE_ACCEL_S
+          if obj and obj.queueLuaCommand then
+            obj:queueLuaCommand(string.format(
+              'electrics.set_warn_signal(0) electrics.%s(1) ai.driveInLane("on") ai.laneChange(nil, 12.0, %.2f) ai.setSpeedMode("legal") ai.setMode("traffic")',
+              dwell.mergeSig, resetOff))
+          end
+        else
+          dwell.mergeMoving = false
+          if obj and obj.queueLuaCommand then
+            obj:queueLuaCommand(string.format(
+              'electrics.set_warn_signal(0) electrics.%s(1)',
+              dwell.mergeSig))
+          end
+        end
+        return 'merging', dwell.pointId
+      end
+      return 'dwelling', dwell.pointId
+    elseif dwell.phase == 'merging' then
+      if not dwell.mergeMoving then
+        if rearClear ~= false or (now - dwell.mergeStartedAt) >= M.COURIER_MERGE_MAX_WAIT_S then
+          dwell.mergeMoving = true
+          dwell.mergeDoneAt = now + M.COURIER_MERGE_ACCEL_S
+          if obj and obj.queueLuaCommand then
+            obj:queueLuaCommand(string.format(
+              'ai.driveInLane("on") ai.laneChange(nil, 12.0, %.2f) ai.setSpeedMode("legal") ai.setMode("traffic")',
+              -(tonumber(dwell.curbOffset) or 0)))
+          end
+        end
+        return 'merging', dwell.pointId
+      end
+      if now >= dwell.mergeDoneAt then
+        director.courierDwell[vehId] = nil
+        director.deliveryCooldowns[dwell.pointId] = now + M.COURIER_STOP_COOLDOWN_S
+        stats.courierStopsServed = (stats.courierStopsServed or 0) + 1
+        if obj and obj.queueLuaCommand then
+          obj:queueLuaCommand(string.format('electrics.%s(0)', dwell.mergeSig))
+        end
+        return 'released', dwell.pointId
+      end
+      return 'merging', dwell.pointId
     end
-    return 'dwelling', dwell.pointId
   end
+
   if not speed or speed >= M.COURIER_STOP_MAX_SPEED_MS then return 'none' end
-  local limitMs = tonumber(roadLimitMs)
-  if limitMs == nil and map and map.getMap then
-    local road = closestRoad(px, py, 0)
-    if road then
-      if road.highway == true or road.unlimited == true then return 'none' end
-      limitMs = tonumber(road.speedLimit)
-    end
+  if not (graph and type(graph.trafficProfile) == 'table' and graph.trafficProfile.band == 'urban') then
+    return 'none'
   end
-  if limitMs ~= nil and (limitMs <= 0 or limitMs > M.COURIER_STOP_MAX_LIMIT_MS) then return 'none' end
+  local road = type(roadOrLimit) == 'table' and roadOrLimit or nil
+  if road == nil and map and map.getMap then
+    road = closestRoad(px, py, 0)
+  end
+  if not road or (road.dist or math.huge) > M.COURIER_STOP_ROAD_DIST_MAX_M then return 'none' end
+  if road.highway == true or road.unlimited == true or road.isLink == true then return 'none' end
+  local rc = type(road.roadClass) == 'string' and road.roadClass:lower() or nil
+  if not rc or M.COURIER_ALLOWED_ROAD_CLASSES[rc] ~= true then return 'none' end
+  local postedRaw = tonumber(road.posted)
+  local postedMs = (postedRaw and math.abs(postedRaw)) or tonumber(road.speedLimit)
+    or (type(roadOrLimit) == 'number' and roadOrLimit or nil)
+  if postedMs == nil or postedMs <= 0 or postedMs > M.COURIER_STOP_MAX_LIMIT_MS then return 'none' end
   if director.deliveryPointCount <= 0 then return 'none' end
 
-  local range2 = M.COURIER_STOP_RANGE_M * M.COURIER_STOP_RANGE_M
+  local range2 = M.COURIER_APPROACH_RANGE_M * M.COURIER_APPROACH_RANGE_M
   local latMax = M.COURIER_STOP_LATERAL_MAX_M
   local bestPt, bestD2 = nil, range2 + 1
   for _, list in pairs(director.deliveryPoints) do
     for i = 1, #list do
       local s = list[i]
-      local cd = director.deliveryCooldowns[s.id]
-      if not cd or now >= cd then
-        local vx, vy = s.x - px, s.y - py
-        local d2 = vx * vx + vy * vy
-        if d2 <= range2 and d2 < bestD2 then
-          local along = vx * dx + vy * dy
-          if along >= -2.0 and along <= M.COURIER_STOP_RANGE_M then
-            local lat = math.abs(vx * dy - vy * dx)
-            if lat <= latMax then
-              bestPt, bestD2 = s, d2
+      if not s.roadClass or M.COURIER_ALLOWED_ROAD_CLASSES[s.roadClass] == true then
+        local cd = director.deliveryCooldowns[s.id]
+        if not cd or now >= cd then
+          local vx, vy = s.x - px, s.y - py
+          local d2 = vx * vx + vy * vy
+          if d2 <= range2 and d2 < bestD2 then
+            local along = vx * dx + vy * dy
+            if along >= -2.0 and along <= M.COURIER_APPROACH_RANGE_M then
+              local lat = math.abs(vx * dy - vy * dx)
+              if lat <= latMax then
+                bestPt, bestD2 = s, d2
+              end
             end
           end
         end
@@ -2536,22 +2823,34 @@ function M.stepCourierStop(vehId, px, py, dx, dy, speed, now, obj, roadLimitMs)
 
   local frac = (((math.abs(math.floor(tonumber(vehId) or 0)) * 131 + math.floor(now * 10)) % 101) / 100)
   local dwellS = M.COURIER_STOP_DWELL_MIN_S + frac * (M.COURIER_STOP_DWELL_MAX_S - M.COURIER_STOP_DWELL_MIN_S)
-  local curbSign = (M.rules and M.rules.rightHandDrive) and -1 or 1
+  local lht = (M.rules and M.rules.rightHandDrive) and true or false
+  local curbSig = lht and 'toggle_left_signal' or 'toggle_right_signal'
+  local mergeSig = lht and 'toggle_right_signal' or 'toggle_left_signal'
+  local curbSign = lht and -1 or 1
   local curbOff = curbSign * M.COURIER_STOP_CURB_OFFSET_M
   director.courierDwell[vehId] = {
+    phase = 'approach',
     pointId = bestPt.id,
+    pointX = bestPt.x,
+    pointY = bestPt.y,
     startedAt = now,
-    releaseAt = now + dwellS,
+    startSpeed = speed,
     dwellS = dwellS,
+    releaseAt = nil,
+    mergeStartedAt = nil,
+    mergeDoneAt = nil,
+    mergeMoving = false,
     curbOffset = curbOff,
+    curbSig = curbSig,
+    mergeSig = mergeSig,
   }
-  director.deliveryCooldowns[bestPt.id] = now + dwellS + M.COURIER_STOP_COOLDOWN_S
+  director.deliveryCooldowns[bestPt.id] = now + M.COURIER_APPROACH_RAMP_S + dwellS + M.COURIER_MERGE_ACCEL_S + M.COURIER_STOP_COOLDOWN_S
   if obj and obj.queueLuaCommand then
     obj:queueLuaCommand(string.format(
-      'electrics.set_warn_signal(1) ai.driveInLane("off") ai.laneChange(nil, 10.0, %.2f) ai.setSpeedMode("set") ai.setSpeed(0)',
-      curbOff))
+      'electrics.%s(1) ai.driveInLane("off") ai.laneChange(nil, 28.0, %.2f) ai.setSpeedMode("set") ai.setSpeed(%.2f)',
+      curbSig, curbOff, math.max(1.0, speed * 0.75)))
   end
-  return 'stopped', bestPt
+  return 'approach', bestPt
 end
 
 -- Pure zero-alloc: true when candidate horizon spawn point (sx, sy) is >= minSpacingM from all recent horizon spawns.
@@ -2591,12 +2890,13 @@ function M.horizonSpawnWindow(px, py, hx, hy, b, camX, camY, isHighway)
   local minSpawn = isHighway and M.HORIZON_HWY_SPAWN_MIN_M or M.HORIZON_SPAWN_MIN_M
   local maxSpawn = isHighway and M.HORIZON_HWY_SPAWN_MAX_M or M.HORIZON_SPAWN_MAX_M
   local hi = math.min(maxSpawn, reach - M.GUARD_M - 20)
-  local safeMin = M.HORIZON_SAFE_MIN_M
+  local minClear = isHighway and math.max(M.HORIZON_SAFE_MIN_M, M.HORIZON_HWY_SAFE_MIN_M) or M.HORIZON_SAFE_MIN_M
+  local safeMin = minClear
   if camX and camY then
     local camAlong = (camX - px) * hx + (camY - py) * hy
     local camPerp = math.abs((camX - px) * hy - (camY - py) * hx)
-    if camPerp < M.HORIZON_SAFE_MIN_M then
-      local clearance = math.sqrt(M.HORIZON_SAFE_MIN_M * M.HORIZON_SAFE_MIN_M - camPerp * camPerp)
+    if camPerp < minClear then
+      local clearance = math.sqrt(minClear * minClear - camPerp * camPerp)
       local needed = camAlong + clearance
       if needed > safeMin then safeMin = needed end
     end
@@ -2673,6 +2973,12 @@ function M.updateTrafficDirector(dtReal, player, box)
   if simTimeAuthority and simTimeAuthority.getPause and simTimeAuthority.getPause() then return false end
   local gt = gameplay_traffic
   if not gt or not gt.getState or gt.getState() ~= 'on' then return false end
+  if gt.setTrafficVars then
+    local tv = gt.getTrafficVars and gt.getTrafficVars()
+    if not tv or tv.enableRespawn ~= false then
+      pcall(gt.setTrafficVars, { enableRespawn = false })
+    end
+  end
   local data = gt.getTrafficData and gt.getTrafficData()
   if type(data) ~= 'table' then return false end
 
@@ -2688,6 +2994,7 @@ function M.updateTrafficDirector(dtReal, player, box)
     end
   end
   local pv = (px == nil or (hx == 0 and hy == 0)) and me >= 0 and getObjectByID and getObjectByID(me) or nil
+  local pveh = pv or (me >= 0 and getObjectByID and getObjectByID(me) or nil)
   if pv then
     if px == nil then
       local pp = pv:getPosition()
@@ -2744,6 +3051,7 @@ function M.updateTrafficDirector(dtReal, player, box)
     if type(t) == 'table' and t.isAi ~= false then
       local o = getObjectByID and getObjectByID(id) or nil
       if o and o:getActive() and not localplayers.controlled(id, o, controlled) then
+        t.enableRespawn = false
         local p = o:getPosition()
         local u = o:getVelocity()
         local f = o:getDirectionVector()
@@ -2759,6 +3067,10 @@ function M.updateTrafficDirector(dtReal, player, box)
         -- 1. Deferred post-spawn courier paint_design application, recycling verification & persona sync
         local rc = tonumber(t.respawnCount) or 0
         local curP = director.personas[id]
+        if t.respawnActive == true or (curP and curP._respawnCount ~= rc) then
+          director.courierDwell[id] = nil
+          director.busDwell[id] = nil
+        end
         local lst = director.liveryState[id]
         local pend = director.pendingLivery[id]
         if lst and lst.paintDesign then
@@ -2912,16 +3224,48 @@ function M.updateTrafficDirector(dtReal, player, box)
           if cmd and o.queueLuaCommand then o:queueLuaCommand(cmd) end
         end
 
-        -- 2. City bus / H-Series minibus OSM bus stop & AI courier village-only curbside delivery dwell state machines
+        -- 2. City bus / H-Series minibus OSM bus stop & AI courier urban residential curbside delivery dwell state machines
         if curP.persona == 'bus' and (dx ~= 0 or dy ~= 0) then
           M.stepBusStop(id, p.x, p.y, dx, dy, sp, now, o)
         elseif curP.persona == 'courier' and (dx ~= 0 or dy ~= 0) then
           if road == nil and map and map.getMap then road = closestRoad(p.x, p.y, p.z) end
-          local roadLimitMs = nil
-          if road then
-            roadLimitMs = (road.highway == true or road.unlimited == true) and math.huge or road.speedLimit
+          local rearClear = true
+          local cdwell = director.courierDwell[id]
+          if cdwell and (cdwell.phase == 'merging' or (cdwell.phase == 'stopped' and now >= (cdwell.releaseAt or math.huge))) then
+            for oid, ot in pairs(data) do
+              if oid ~= id and type(ot) == 'table' then
+                local oo = getObjectByID and getObjectByID(oid) or nil
+                if oo and oo.getActive and oo:getActive() then
+                  local op = oo:getPosition()
+                  local ou = oo:getVelocity()
+                  local osp = math.sqrt(ou.x * ou.x + ou.y * ou.y)
+                  if osp > 1.0 then
+                    local rx, ry = op.x - p.x, op.y - p.y
+                    local along = rx * dx + ry * dy
+                    local side = math.abs(rx * dy - ry * dx)
+                    if along > -M.COURIER_MERGE_CLEAR_BEHIND_M and along < 0 and side < 4.5 then
+                      rearClear = false
+                      break
+                    end
+                  end
+                end
+              end
+            end
+            if rearClear and pveh and me >= 0 and me ~= id then
+              local op = pveh:getPosition()
+              local ou = pveh:getVelocity()
+              local osp = math.sqrt(ou.x * ou.x + ou.y * ou.y)
+              if osp > 1.0 then
+                local rx, ry = op.x - p.x, op.y - p.y
+                local along = rx * dx + ry * dy
+                local side = math.abs(rx * dy - ry * dx)
+                if along > -M.COURIER_MERGE_CLEAR_BEHIND_M and along < 0 and side < 4.5 then
+                  rearClear = false
+                end
+              end
+            end
           end
-          M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o, roadLimitMs)
+          M.stepCourierStop(id, p.x, p.y, dx, dy, sp, now, o, road, rearClear)
         end
 
         -- 3. Behind-player horizon recycling into forward cone ([160, 340] m standard, [340, 480] m highway)
@@ -2929,53 +3273,114 @@ function M.updateTrafficDirector(dtReal, player, box)
         if hasHeading and not director.busDwell[id] and not director.courierDwell[id]
             and (now - (lastTeleport[id] or -math.huge)) >= M.COOLDOWN_S
             and M.shouldRecycleBehind(p.x, p.y, px, py, hx, hy) then
-          local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, false)
+          local playerRoad = (map and map.getMap) and closestRoad(px, py, pz) or nil
+          local playerOnHwy = (playerRoad ~= nil and playerRoad.highway == true)
+          local ax, ay, ahx, ahy, alo, ahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, playerOnHwy)
           if ax and gt.forceTeleport and not nearJunction(ax, ay, M.HORIZON_JUNCTION_CLEAR_M) then
             local mid = (alo + ahi) * 0.5
             local sx, sy = ax + ahx * mid, ay + ahy * mid
             local targetRoad = nil
+            local useOncoming = false
+            local skipRecycle = false
             if map and map.getMap then
-              local rT = closestRoad(sx, sy, pz)
-              if rT and rT.dist <= 35 then
-                targetRoad = rT
-              else
-                local rP = closestRoad(px, py, pz)
-                if rP and rP.dist <= 35 then targetRoad = rP end
-              end
-            end
-            if targetRoad and targetRoad.highway == true then
-              local hax, hay, hahx, hahy, halo, hahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, true)
-              if hax then
-                ax, ay, ahx, ahy, alo, ahi = hax, hay, hahx, hahy, halo, hahi
-                mid = (alo + ahi) * 0.5
-                sx, sy = ax + ahx * mid, ay + ahy * mid
-                local rH = closestRoad(sx, sy, pz)
-                if rH and rH.dist <= 35 and rH.highway == true then
-                  targetRoad = rH
+              local wantHwy = playerOnHwy
+              if not wantHwy then
+                local rT = closestRoad(sx, sy, pz)
+                if rT and rT.dist <= 35 then
+                  if rT.highway == true then
+                    wantHwy = true
+                  elseif rT.isLink == true or (type(rT.roadClass) == 'string' and rT.roadClass:sub(-5) == '_link') then
+                    skipRecycle = true
+                  else
+                    targetRoad = rT
+                  end
                 end
               end
-            end
-            if targetRoad then
-              ahx, ahy = M.snapRoadTangent(ahx, ahy, targetRoad)
-              sx, sy = ax + ahx * mid, ay + ahy * mid
-            end
-            if not nearJunction(sx, sy, M.HORIZON_JUNCTION_CLEAR_M)
-                and M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
-              lastTeleport[id] = now
-              stillSince[id] = nil
-              local slot = (director.recentSpawnIdx % #director.recentSpawns) + 1
-              director.recentSpawnIdx = slot
-              local rec = director.recentSpawns[slot]
-              rec.x, rec.y, rec.at = sx, sy, now
-              stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
-              pcall(gt.forceTeleport, id, vec3(ax, ay, pz), vec3(ahx, ahy, 0), alo, ahi)
-              recycled = true
-              if targetRoad and targetRoad.highway == true then
-                M.applyHighwayRollingStart(id, o, ahx, ahy, curP, targetRoad)
-                director.highwayBoostAt[id] = now
+              if not skipRecycle and wantHwy then
+                local hax, hay, hahx, hahy, halo, hahi
+                if playerOnHwy then
+                  hax, hay, hahx, hahy, halo, hahi = ax, ay, ahx, ahy, alo, ahi
+                else
+                  hax, hay, hahx, hahy, halo, hahi = M.horizonSpawnWindow(px, py, hx, hy, activeBox, camX, camY, true)
+                end
+                local foundHwy = false
+                if hax then
+                  local offs = { 0.5, 0.75, 0.25 }
+                  local anyRejected = false
+                  for _, frac in ipairs(offs) do
+                    local dist = halo + (hahi - halo) * frac
+                    local cx, cy = hax + hahx * dist, hay + hahy * dist
+                    if not M.nearCut(cx, cy, openCuts, 120) then
+                      local rH = closestRoad(cx, cy, pz)
+                      if M.isValidHighwaySpawnCandidate(rH, hahx, hahy)
+                          and not nearJunction(cx, cy, M.HORIZON_JUNCTION_CLEAR_M)
+                          and M.horizonSpawnClear(cx, cy, director.recentSpawns, now) then
+                        local shx, shy = M.snapRoadTangent(hahx, hahy, rH)
+                        if not M.headingToCut(cx, cy, shx, shy, openCuts, M.highwayCutReach(32, 0)) then
+                          ax, ay, ahx, ahy = hax, hay, hahx, hahy
+                          if anyRejected then
+                            alo, ahi = math.max(halo, dist - 15), math.min(hahi, dist + 15)
+                          else
+                            alo, ahi = halo, hahi
+                          end
+                          mid = dist
+                          sx, sy = cx, cy
+                          targetRoad = rH
+                          foundHwy = true
+                          break
+                        end
+                      end
+                    end
+                    anyRejected = true
+                  end
+                end
+                if not foundHwy then
+                  local ox, oy, odx, ody, oz = M.oncomingSpot(px, py, hx, hy, activeBox, M.rules.rightHandDrive,
+                    function(cx, cy) return closestRoad(cx, cy, pz) end)
+                  if ox and not nearJunction(ox, oy, M.HORIZON_JUNCTION_CLEAR_M)
+                      and M.horizonSpawnClear(ox, oy, director.recentSpawns, now) then
+                    sx, sy, ahx, ahy = ox, oy, odx, ody
+                    alo, ahi = 0, 40
+                    targetRoad = { z = oz or pz, highway = true }
+                    useOncoming = true
+                  else
+                    skipRecycle = true
+                  end
+                end
               end
-              if lightsOn and o.queueLuaCommand then
-                o:queueLuaCommand('electrics.setLightsState(1)')
+              if targetRoad == nil then
+                skipRecycle = true
+              end
+            end
+            if not skipRecycle then
+              if targetRoad and not useOncoming then
+                ahx, ahy = M.snapRoadTangent(ahx, ahy, targetRoad)
+              end
+              if not nearJunction(sx, sy, M.HORIZON_JUNCTION_CLEAR_M)
+                  and M.horizonSpawnClear(sx, sy, director.recentSpawns, now) then
+                lastTeleport[id] = now
+                stillSince[id] = nil
+                director.courierDwell[id] = nil
+                director.busDwell[id] = nil
+                local slot = (director.recentSpawnIdx % #director.recentSpawns) + 1
+                director.recentSpawnIdx = slot
+                local rec = director.recentSpawns[slot]
+                rec.x, rec.y, rec.at = sx, sy, now
+                stats.horizonRespawns = (stats.horizonRespawns or 0) + 1
+                local roadZ = (targetRoad and targetRoad.z) or pz
+                if useOncoming then
+                  pcall(gt.forceTeleport, id, vec3(sx, sy, roadZ), vec3(ahx, ahy, 0), 0, 40)
+                else
+                  pcall(gt.forceTeleport, id, vec3(sx - ahx * mid, sy - ahy * mid, roadZ), vec3(ahx, ahy, 0), alo, ahi)
+                end
+                recycled = true
+                if targetRoad and targetRoad.highway == true then
+                  M.applyHighwayRollingStart(id, o, ahx, ahy, curP, targetRoad)
+                  director.highwayBoostAt[id] = now
+                end
+                if lightsOn and o.queueLuaCommand then
+                  o:queueLuaCommand('electrics.setLightsState(1)')
+                end
               end
             end
           end
@@ -2987,7 +3392,7 @@ function M.updateTrafficDirector(dtReal, player, box)
             and t.respawnActive ~= true and t.state ~= 'disabled' and (tonumber(t.damage) or 0) <= 1000
             and (now - (director.highwayBoostAt[id] or -math.huge)) >= M.HWY_BOOST_COOLDOWN_S then
           if road == nil and map and map.getMap then road = closestRoad(p.x, p.y, p.z) end
-          if road and road.dist <= 35 and road.highway == true and not nearJunction(p.x, p.y, M.LAUNCH_JUNCTION_M) then
+          if road and road.dist <= 35 and road.highway == true then
             local alignDot = dx * road.dx + dy * road.dy
             local aligned = (road.oneWay and alignDot >= 0.5) or (not road.oneWay and math.abs(alignDot) >= 0.5)
             if aligned then
@@ -2997,6 +3402,9 @@ function M.updateTrafficDirector(dtReal, player, box)
             end
           end
         end
+      else
+        director.courierDwell[id] = nil
+        director.busDwell[id] = nil
       end
     end
   end
@@ -3075,6 +3483,9 @@ local function setupTraffic(gt, c)
   local ok, err = pcall(gt.setupTraffic, c.trafficAmount ~= 0 and c.trafficAmount or -1,
     { police = c.police, vehGroup = okG and group or nil })
   if not ok then log('W', 'beamngEarth', 'navgraph: setupTraffic: ' .. tostring(err)) end
+  if gt.setTrafficVars then
+    pcall(gt.setTrafficVars, { enableRespawn = false })
+  end
 end
 
 local function startTraffic()
@@ -3285,8 +3696,9 @@ local function buildNodes(b)
       and prep.box[3] == b[3] and prep.box[4] == b[4])) then
     setRules()
     local g, box, rh = graph, b and { b[1], b[2], b[3], b[4] } or nil, M.rules.rightHandDrive
+    local fh, fwd = playerForwardHalo()
     prep = { graph = g, box = box, co = coroutine.create(function()
-      return { M.toNodes(g, box, M.EDGE_M, rh, M.PREP_YIELD, M.HALO_M, M.FAST_HALO_M) }
+      return { M.toNodes(g, box, M.EDGE_M, rh, M.PREP_YIELD, M.HALO_M, fh, fwd) }
     end) }
   end
   if prep.result then return prep.result end
@@ -3329,9 +3741,9 @@ end
 
 -- Pure: the speed (m/s) a respawned car is launched at on an edge with this limit (m/s), its heading's cosine with the
 -- edge's direction (in -> out; negative: against it), the edge one-way, a junction within LAUNCH_JUNCTION_M; or nil.
-function M.launchSpeed(limit, cosine, oneWay, nearJunction)
+function M.launchSpeed(limit, cosine, oneWay, nearJunction, isHighway)
   limit, cosine = tonumber(limit), tonumber(cosine)
-  if not limit or not cosine or nearJunction then return nil end
+  if not limit or not cosine or (nearJunction and not isHighway) then return nil end
   if (oneWay and cosine or math.abs(cosine)) < M.LAUNCH_ALIGN then return nil end
   local v = limit * M.LAUNCH_SHARE
   if v < M.LAUNCH_MIN_MS then return nil end
@@ -3369,12 +3781,18 @@ local function launch(id)
   if not e then return end
   local inN, outN = m.nodes[e.inNode or n1], m.nodes[e.outNode or n2]
   if not inN or not outN then return end
-  local d = outN.pos - inN.pos
-  d.z = 0
+  local ex, ey = outN.pos.x - inN.pos.x, outN.pos.y - inN.pos.y
+  local el2 = ex * ex + ey * ey
+  if el2 < 0.01 then return end
+  local t = math.max(0, math.min(1, ((p.x - inN.pos.x) * ex + (p.y - inN.pos.y) * ey) / el2))
+  local tx, ty = M.roadTangentAt(m, e, inN, outN, t)
+  local tl = math.sqrt(tx * tx + ty * ty)
   local f = o:getDirectionVector()
-  f.z = 0
-  if d:length() < 0.1 or f:length() < 0.1 then return end
-  local v = M.launchSpeed(e.speedLimit, d:normalized():dot(f:normalized()), e.oneWay, nearJunction(p.x, p.y))
+  local fl = math.sqrt(f.x * f.x + f.y * f.y)
+  if tl < 0.1 or fl < 0.1 then return end
+  local dot = (tx / tl) * (f.x / fl) + (ty / tl) * (f.y / fl)
+  local isHighwayEdge = (e.highway == true or e.unlimited == true or (tonumber(e.speedLimit) or 0) >= M.FAST_HALO_MS)
+  local v = M.launchSpeed(e.speedLimit, dot, e.oneWay, nearJunction(p.x, p.y), isHighwayEdge)
   local cmd = v and M.spawnVelocityCommand(v)
   if cmd then
     o:queueLuaCommand(cmd)
@@ -3382,7 +3800,7 @@ local function launch(id)
   end
 end
 
--- Every LAUNCH_SCAN_S: the traffic cars whose respawn count went up are launched once placed (M.LAUNCH above).
+-- Every LAUNCH_SCAN_S: the traffic cars whose respawn count went up (or newly spawned slow/fading-in) are launched once placed.
 local function launchRespawned(now)
   local gt = gameplay_traffic
   if not M.LAUNCH or not gt or not gt.getState or gt.getState() ~= 'on' or now - lastLaunchScan < M.LAUNCH_SCAN_S then
@@ -3395,13 +3813,23 @@ local function launchRespawned(now)
   for id, t in pairs(data) do
     if type(t) == 'table' and t.isAi ~= false then
       local rc = tonumber(t.respawnCount)
-      if rc and launchCount[id] and rc > launchCount[id] then
+      local o = getObjectByID and getObjectByID(id) or nil
+      local active = o and o.getActive and o:getActive()
+      if launchCount[id] == nil then
+        local slow = active and o.getVelocity and o:getVelocity():length() < M.LAUNCH_MIN_MS
+        if t.state == 'fadeIn' or t.state == 'reset' or t.respawnActive == true or slow then
+          launchWait[id] = { readyAt = nil, expires = now + M.LAUNCH_TIMEOUT_S }
+          launchCount[id] = rc or 0
+        elseif active then
+          launchCount[id] = rc or 0
+        end
+      elseif rc and rc > launchCount[id] then
         launchWait[id] = { readyAt = nil, expires = now + M.LAUNCH_TIMEOUT_S }
+        launchCount[id] = rc
       end
-      launchCount[id] = rc
       local w = launchWait[id]
       if w then
-        if t.state == 'fadeIn' or (t.state == 'active' and t.respawnActive ~= true) then
+        if t.state == 'fadeIn' or ((t.state == 'active' or (t.state == nil and active)) and t.respawnActive ~= true) then
           w.readyAt = w.readyAt or (now + M.LAUNCH_DELAY_S)
           if now >= w.readyAt then
             launchWait[id] = nil
@@ -3435,7 +3863,8 @@ local function overtakeScan(now)
   localplayers.snapshot(controlled)
   overtake.update(now, ids, auto, nearJunction, M.rules.rightHandDrive,
     function(id) return localplayers.controlled(id, getObjectByID(id), controlled) end,
-    M.getVehiclePersona)
+    M.getVehiclePersona,
+    function(id) return M.isBusDwelling(id) or M.isCourierDwelling(id) end)
 end
 
 function M.update(aid, b, gov)
@@ -3489,8 +3918,9 @@ function M.update(aid, b, gov)
   local pre
   if urgent then
     setRules()
+    local fh, fwd = playerForwardHalo()
     pre = { M.toNodes(graph, b and { b[1], b[2], b[3], b[4] } or nil, M.EDGE_M, M.rules.rightHandDrive, nil, M.HALO_M,
-                      M.FAST_HALO_M) }
+                      fh, fwd) }
   else
     pre = buildNodes(b)
     if not pre or not room(gov) then return end
@@ -3579,6 +4009,7 @@ function M.reset()
   seenAt = {}
   lastTeleport = {}
   cuts = {}
+  openCuts = {}
   director.accum, director.clock = 0, 0
   director.rosterArchetype = {}
   director.rosterEntry = {}

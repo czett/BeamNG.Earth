@@ -232,6 +232,8 @@ def _lonlat_boxes(feats):
 ROAD_EDGE_M = 0.5 * heightmap.SQUARE  # m past a carriageway's edge its material reaches: a square whose centre is at most this far out
                      # is road (a 1 m square reaches back up to 0.7 m; at 2 m squares this was 1.0: at 0.5 a wheel 0.2 m
                      # inside a 9 m road's edge was on dirt; the grain beyond lies under the edge decal, roads.EDGE_DECAL)
+HIGHWAY_ROAD_EDGE_BUFFER_M = 0.5        # extra m past paved motorway/trunk/link edges so wheels near the shoulder stay on asphalt
+HIGHWAY_EDGE_CLASSES = ("motorway", "trunk")
 
 
 @profile_step('Surface road paint')
@@ -296,14 +298,16 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
                                                 # match the border of the paint collor")
         c, r = to_px(x, y)
         c, r = np.asarray(c, np.float64), np.asarray(r, np.float64)
+        edge_m = ROAD_EDGE_M + (HIGHWAY_ROAD_EDGE_BUFFER_M
+                                if (kind == "paved" and spec.cls in HIGHWAY_EDGE_CLASSES) else 0.0)
         edge_reach = max((walk.setback + walk.width for _, walk in street.walks()), default=0.) if street else 0.
-        reach = (float(np.max(width)) / 2 + band / 2 + ROAD_EDGE_M + max(edge_reach, 0 if walks else VERGE_M)) \
+        reach = (float(np.max(width)) / 2 + band / 2 + edge_m + max(edge_reach, 0 if walks else VERGE_M)) \
             / square + 2
         if c.max() < -reach or c.min() > w + reach or r.max() < -reach or r.min() > h + reach:
             return
-        add(segs[kind], c, r, width / 2 + ROAD_EDGE_M)
+        add(segs[kind], c, r, width / 2 + edge_m)
         if band:
-            add(footpaths, c, r, (width + band) / 2 + ROAD_EDGE_M)
+            add(footpaths, c, r, (width + band) / 2 + edge_m)
         if street is not None:
             for side, walk in street.walks():
                 # Independent strips leave the setback to the original ground.
@@ -314,14 +318,14 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
                 wc, wr = to_px(*(xy[:, :2] / scale + ll[0]).T)
                 add(footpaths, wc, wr, walk.width / 2 + .15)
             if not street.walks():
-                add(verge, c, r, width / 2 + ROAD_EDGE_M + .45)
+                add(verge, c, r, width / 2 + edge_m + .45)
         elif not walks:
-            add(verge, c, r, width / 2 + ROAD_EDGE_M + VERGE_M)    # (VERGE_M past the road's material)
+            add(verge, c, r, width / 2 + edge_m + VERGE_M)    # (VERGE_M past the road's material)
         if eastern and kind == "paved" and spec.cls in europewalks.STREETS and not spec.link and not spec.median:
             mid = len(x) // 2
             country = europewalks.country_for(float(x[mid]), float(y[mid]))
             if europewalks.grassy_verges(country, float(x[mid]), float(y[mid])):
-                add(grass_verge, c, r, width / 2 + ROAD_EDGE_M + 2.6)
+                add(grass_verge, c, r, width / 2 + edge_m + 2.6)
 
     copies = () if quick else roadsmod.copies_of(feats_list)  # (each joint's taper from its own cell: roads.joint_desc)
     import geodesy
@@ -380,22 +384,21 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
                     add(lawn, np.asarray(c, np.float64), np.asarray(r, np.float64), mw / 2)
     for la, lo, spec in extra:
         line(np.asarray(lo), np.asarray(la), spec, False)
-    # ramp gores, paved (gore_fills, in a frame at the grid's middle; skipped in quick mode where roads_skin drapes it)
-    if not quick:
-        import geodesy
-        gfr = geodesy.EnuFrame(la_c, lo_c)
-        gb = gfr.geodetic_to_enu(np.array([float(np.min(lat)), float(np.max(lat))]),
-                                 np.array([float(np.min(lon)), float(np.max(lon))]), np.zeros(2))
-        for hw_, mid in gore_fills(gfr, feats_list, (float(np.min(gb[0])) - 300, float(np.min(gb[1])) - 300,
-                                                     float(np.max(gb[0])) + 300, float(np.max(gb[1])) + 300), urban_fn, widths,
-                                   quick=quick):
-            gla, glo, _ = gfr.enu_to_geodetic(mid[:, 0], mid[:, 1], np.zeros(len(mid)))
-            c, r = to_px(np.asarray(glo), np.asarray(gla))
-            c, r = np.asarray(c, np.float64), np.asarray(r, np.float64)
-            sk = segs.setdefault("paved", ([], [])) if "paved" in segs else None
-            if sk is not None:
-                sk[0].append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
-                sk[1].append(np.maximum(hw_[:-1], hw_[1:]) / square)
+    # ramp gores, paved (gore_fills, in a frame at the grid's middle; motorway/trunk gores also run in quick mode
+    # using quick_ground_parts so provisional blocks keep ramp gore pavement without waiting on lidar)
+    gfr = geodesy.EnuFrame(la_c, lo_c)
+    gb = gfr.geodetic_to_enu(np.array([float(np.min(lat)), float(np.max(lat))]),
+                             np.array([float(np.min(lon)), float(np.max(lon))]), np.zeros(2))
+    for hw_, mid in gore_fills(gfr, feats_list, (float(np.min(gb[0])) - 300, float(np.min(gb[1])) - 300,
+                                                 float(np.max(gb[0])) + 300, float(np.max(gb[1])) + 300), urban_fn, widths,
+                               quick=quick):
+        gla, glo, _ = gfr.enu_to_geodetic(mid[:, 0], mid[:, 1], np.zeros(len(mid)))
+        c, r = to_px(np.asarray(glo), np.asarray(gla))
+        c, r = np.asarray(c, np.float64), np.asarray(r, np.float64)
+        sk = segs.setdefault("paved", ([], [])) if "paved" in segs else None
+        if sk is not None:
+            sk[0].append(np.stack([c[:-1], r[:-1], c[1:], r[1:]], axis=1))
+            sk[1].append(np.maximum(hw_[:-1], hw_[1:]) / square)
     fast.require(91, "mask_segments")
 
     def mask(dst):
@@ -555,7 +558,7 @@ def gore_fills(frame, feats_list, box, urban_fn=None, widths=None, quick=False):
 def _gore_fills(frame, feats_list, box, urban_fn=None, widths=None, quick=False):
     import markings
     near, seen = [], set()
-    placement = roadsmod.placement_context(feats_list, urban_fn, widths)   # (where the road tiles draw them)
+    placement = None if quick else roadsmod.placement_context(feats_list, urban_fn, widths)   # (where the road tiles draw them)
     for feats in feats_list:
         if feats is None or len(feats) == 0:
             continue
@@ -568,7 +571,8 @@ def _gore_fills(frame, feats_list, box, urban_fn=None, widths=None, quick=False)
                 continue
             seen.add(fid)
             for k, ring in enumerate(_ground_parts(quick)(feats, i)):
-                ring = placement.ring(frame, feats, i, ring, sp, fid)
+                if placement is not None:
+                    ring = placement.ring(frame, feats, i, ring, sp, fid)
                 e, n = mapgeom.enu_xy(feats, frame, ring)
                 if e.max() < box[0] or e.min() > box[2] or n.max() < box[1] or n.min() > box[3]:
                     continue

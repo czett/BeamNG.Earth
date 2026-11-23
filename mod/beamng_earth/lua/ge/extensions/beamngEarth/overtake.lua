@@ -39,6 +39,7 @@ M.SPEEDER_HELD_S = 0.8
 M.SPEEDER_LOOK_M = 80
 M.MAX_LANE_CHANGE_SPEED_MS = 25.0   -- 90 km/h: suppress forced ai.laneChange impulses at or above this speed
 M.MAX_LANE_CHANGE_LIMIT_MS = 27.7   -- 100 km/h: suppress forced ai.laneChange impulses on high-speed roads
+M.BLINK_DURATION_S = 2.0
 
 local held = {}         -- car id -> os.clock() it started being held
 local passing = {}      -- car id -> { lead, at }: passing it
@@ -46,6 +47,7 @@ local lastPass = {}     -- car id -> os.clock() of its last pass
 local lastLaneChange = {} -- car id -> os.clock() of its last lane change (pass or merge-right)
 local campSince = {}    -- car id -> os.clock() it has been camping in a passing lane with no lead car
 local laneHoldSent = {} -- car id -> true once ai.driveInLane("on") has been enforced on highway/high-speed road
+local signalOffAt = {}  -- car id -> { at = number, fn = 'toggle_left_signal' | 'toggle_right_signal' }
 local lastScan = -math.huge
 local stats = { passes = 0, mergesRight = 0 }
 
@@ -184,6 +186,23 @@ local function onRoad(m, o, p, f)
            lanesOut = lanesOut, lanes = totalLanes }
 end
 
+local function blinkSignalForShift(shift)
+  return shift > 0 and 'toggle_right_signal' or 'toggle_left_signal'
+end
+
+local function queueLaneChangeWithBlink(c, shift, now)
+  local sigFn = blinkSignalForShift(shift)
+  local prevSig = signalOffAt[c.id]
+  local offPrefix = ''
+  if prevSig and prevSig.fn ~= sigFn then
+    offPrefix = string.format('if electrics and electrics.%s then electrics.%s(0) end ', prevSig.fn, prevSig.fn)
+  end
+  c.o:queueLuaCommand(offPrefix .. string.format(
+    'if electrics and electrics.%s then electrics.%s(1) end ai.laneChange(nil, %.1f, %.2f)',
+    sigFn, sigFn, math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S), shift))
+  signalOffAt[c.id] = { at = now + M.BLINK_DURATION_S, fn = sigFn }
+end
+
 -- Is a scan due (navgraph's overtakeScan asks first: the traffic list and the snapshots it builds for a scan are
 -- worth making only every SCAN_S, not every frame)?
 function M.due(now)
@@ -193,10 +212,21 @@ end
 -- One scan (navgraph.update calls it every frame; it runs every SCAN_S). cars: {id = true} of the traffic cars; player:
 -- the player's car id while it autodrives, else nil. nearJunction(x, y, r) -> bool. leftHand: traffic on the left.
 -- personaFn(id) -> persona table (optional: enforces Rechtsfahrgebot & speeder pass thresholds).
-function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn, personaFn)
-  if not M.enabled or now - lastScan < M.SCAN_S then return end
-  lastScan = now
+-- dwellingFn(id) -> boolean (optional: excludes dwelling vans/buses from passing/lane-hold commands).
+function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn, personaFn, dwellingFn)
+  if not M.enabled then return end
   if simTimeAuthority and simTimeAuthority.getPause and simTimeAuthority.getPause() then return end
+  for id, sig in pairs(signalOffAt) do
+    if now >= sig.at then
+      local o = getObjectByID(id)
+      if o and o:getActive() and o.queueLuaCommand and not (dwellingFn and dwellingFn(id)) then
+        o:queueLuaCommand(string.format('if electrics and electrics.%s then electrics.%s(0) end', sig.fn, sig.fn))
+      end
+      signalOffAt[id] = nil
+    end
+  end
+  if now - lastScan < M.SCAN_S then return end
+  lastScan = now
   local m = map and map.getMap and map.getMap()
   if not m or not m.nodes then return end
   -- every vehicle that may block or be passed: positions, headings, speeds
@@ -207,8 +237,9 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       local f = o:getDirectionVector()
       f.z = 0
       if f:length() > 0.1 then
+        local dwelling = dwellingFn and dwellingFn(id) and true or false
         all[#all + 1] = { id = id, o = o, p = o:getPosition(), f = f:normalized(), v = o:getVelocity():length(),
-                          passer = passer }
+                          dwelling = dwelling, passer = passer and (not dwelling) }
       end
     end
   end
@@ -216,6 +247,10 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
   if playerAuto then add(playerAuto, M.PLAYER) end
   for _, c in ipairs(all) do
     local ok, err = pcall(function()
+      if c.dwelling then
+        held[c.id], passing[c.id], campSince[c.id], laneHoldSent[c.id], signalOffAt[c.id] = nil, nil, nil, nil, nil
+        return
+      end
       if not c.passer then return end
       local road = onRoad(m, c.o, c.p, c.f)
       if not road then held[c.id], passing[c.id], campSince[c.id] = nil, nil, nil return end
@@ -265,8 +300,7 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
             and now - (lastPass[c.id] or -math.huge) >= M.LANE_CHANGE_COOLDOWN_S then
           if not (nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M))
               and M.laneClear(others, rightShift, M.CLEAR_BACK_M, M.CLEAR_AHEAD_M * 0.75, c.v) then
-            c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
-              rightShift))
+            queueLaneChangeWithBlink(c, rightShift, now)
             lastLaneChange[c.id], lastPass[c.id], campSince[c.id], held[c.id] = now, now, nil, nil
             stats.mergesRight = (stats.mergesRight or 0) + 1
             return
@@ -300,8 +334,7 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       if not shift or c.v < M.MIN_MS then return end
       if nearJunction and nearJunction(c.p.x + road.dir.x * 60, c.p.y + road.dir.y * 60, M.JUNCTION_M) then return end
       if not M.laneClear(others, shift, M.CLEAR_BACK_M, M.CLEAR_AHEAD_M, c.v) then return end
-      c.o:queueLuaCommand(string.format('ai.laneChange(nil, %.1f, %.2f)', math.max(M.SHIFT_MIN_M, c.v * M.SHIFT_S),
-        shift))
+      queueLaneChangeWithBlink(c, shift, now)
       passing[c.id] = { lead = lead.id, at = now }
       lastLaneChange[c.id], lastPass[c.id], held[c.id], campSince[c.id] = now, now, nil, nil
       stats.passes = stats.passes + 1
@@ -319,12 +352,17 @@ function M.update(now, carIds, playerAuto, nearJunction, leftHand, controlledFn,
       laneHoldSent[id] = nil
     end
   end
+  for id in pairs(signalOffAt) do
+    if not carIds[id] and id ~= playerAuto then
+      signalOffAt[id] = nil
+    end
+  end
 end
 
 function M.status() return { passes = stats.passes, mergesRight = stats.mergesRight or 0 } end
 
 function M.reset()
-  held, passing, lastPass, lastLaneChange, campSince, laneHoldSent, lastScan = {}, {}, {}, {}, {}, {}, -math.huge
+  held, passing, lastPass, lastLaneChange, campSince, laneHoldSent, signalOffAt, lastScan = {}, {}, {}, {}, {}, {}, {}, -math.huge
 end
 
 return M

@@ -269,7 +269,8 @@ settings = nil
 T.check(math.abs(N.boxMoved({ -708, -452, 196, 452 }, { -1092, -452, -188, 452 }) - 384) < 1e-9,
   'the block moved 384 m: measured between the boxes\' centres')
 T.check(N.boxMoved(nil, { 0, 0, 1, 1 }) == 0 and N.boxMoved({}, { 0, 0, 1, 1 }) == 0, 'no box yet: not moved')
-T.check(384 >= N.RECLIP_M and 128 < N.RECLIP_M, 'a 384 m move re-clips the graph, one step of 128 m does not')
+T.check(384 >= N.RECLIP_M and 128 >= N.RECLIP_M and N.RECLIP_M <= 96,
+  'a 384 m move and a 128 m block step both re-clip the graph (RECLIP_M <= 96)')
 -- GitHub #353: at motorway speed a respawned car goes ahead, short of the block's edge guard; slower: behind (nil)
 do
   local box = { -256, -256, 256, 256 }
@@ -1073,56 +1074,97 @@ do
   end
   T.check(allSpaced, 'extractDeliveryPoints: enforces >= 35 m spacing between delivery points')
 
-  -- AI Courier curbside delivery stop lifecycle: pull-over, hazard lights, 4-6 s dwell, release & 45 s cooldown
+  -- AI Courier 2-stage curbside delivery stop lifecycle: urban residential gating, approach turn signal,
+  -- hazards dwell, traffic-side merge signal, rear-traffic yield, release & 45 s cooldown
   N.reset()
-  local dCount = N.onDeliveryPoints('tile_deliv', { { id = 'drop_1', x = 100, y = 4, z = 0, yaw = 0 } })
-  T.check(dCount == 1 and N.status().deliveryPointsLoaded == 1, 'onDeliveryPoints registers tile drop points')
+  local jd0, rf0 = rawget(_G, 'jsonDecode'), rawget(_G, 'readFile')
+  readFile = function() return '{}' end
+  jsonDecode = function()
+    return { nodes = { a = { 0, 0, 0, 4 } }, edges = {}, trafficProfile = { band = 'urban' } }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  N.rules = { rightHandDrive = false, turnOnRed = true }
+  local dCount = N.onDeliveryPoints('tile_deliv', { { id = 'drop_1', x = 100, y = 4, z = 0, yaw = 0, roadClass = 'residential' } })
+  T.check(dCount == 1 and N.status().deliveryPointsLoaded == 1 and N.deliveryPoints()['tile_deliv'][1].roadClass == 'residential',
+    'onDeliveryPoints registers tile drop points and preserves roadClass')
   local cCmds = {}
   local cObj = { queueLuaCommand = function(_, c) cCmds[#cCmds + 1] = c end }
+  local urbanResRoad = { dist = 1.5, highway = false, unlimited = false, isLink = false,
+    roadClass = 'residential', posted = 13.9, speedLimit = 13.9 }
 
-  -- Too fast (>= 15 m/s): must not trigger stop
-  local stFast = N.stepCourierStop(60, 90, 0, 1, 0, 15.0, 100, cObj)
+  -- Too fast (>= 12.5 m/s): must not trigger stop
+  local stFast = N.stepCourierStop(60, 70, 0, 1, 0, 15.0, 100, cObj, urbanResRoad)
   T.check(stFast == 'none' and not N.isCourierDwelling(60) and #cCmds == 0,
-    'courier stop: ignored at >= 15 m/s')
+    'courier stop: ignored at >= 12.5 m/s')
 
-  -- Out of range (> 16 m): must not trigger stop
-  local stFar = N.stepCourierStop(60, 80, 0, 1, 0, 8.0, 100, cObj)
+  -- Out of approach range (> 40 m): must not trigger stop
+  local stFar = N.stepCourierStop(60, 50, 0, 1, 0, 8.0, 100, cObj, urbanResRoad)
   T.check(stFar == 'none' and not N.isCourierDwelling(60) and #cCmds == 0,
-    'courier stop: ignored when > 16 m away')
+    'courier stop: ignored when > 40 m away')
 
-  -- Approaching within <= 16 m at 8 m/s: triggers right-curb pull-over (0.85 m) + hazards + 0 m/s dwell
-  local stStop = N.stepCourierStop(60, 90, 0, 1, 0, 8.0, 100, cObj)
-  T.check(stStop == 'stopped' and N.isCourierDwelling(60),
-    'courier stop: triggers dwell within <= 16 m at < 15 m/s')
+  -- Approaching within <= 40 m at 8 m/s on urban residential street: Phase 1 ('approach') with right signal
+  local stApproach = N.stepCourierStop(60, 70, 0, 1, 0, 8.0, 100, cObj, urbanResRoad)
+  T.check(stApproach == 'approach' and N.isCourierDwelling(60),
+    'courier stop: enters approach phase within <= 40 m at < 12.5 m/s')
   T.check(#cCmds == 1
-    and cCmds[1]:find('electrics.set_warn_signal(1)', 1, true)
-    and cCmds[1]:find('ai.setSpeed(0)', 1, true)
+    and cCmds[1]:find('electrics.toggle_right_signal(1)', 1, true)
     and cCmds[1]:find('ai.driveInLane("off")', 1, true)
-    and cCmds[1]:find('ai.laneChange(nil, 10.0, 0.85)', 1, true),
-    'courier stop: activates hazards, 0.85 m right curb pull-over, and holds at 0 m/s')
+    and cCmds[1]:find('ai.laneChange(nil, 28.0, 0.85)', 1, true)
+    and cCmds[1]:find('ai.setSpeed(', 1, true),
+    'courier stop (approach): activates right turn signal, gentle curb pull-over, and speed ramp')
 
-  -- Still dwelling at +3.5 s (< 4.0 s minimum dwell)
-  local stHold = N.stepCourierStop(60, 95, 0, 1, 0, 0.0, 103.5, cObj)
-  T.check(stHold == 'dwelling' and N.isCourierDwelling(60) and #cCmds == 1,
+  -- Mid-approach ramp at +1.5 s (still > 4 m away): ramps down speed without hazards or stacked laneChange
+  local stRamp = N.stepCourierStop(60, 88, 0, 1, 0, 4.0, 101.5, cObj, urbanResRoad)
+  T.check(stRamp == 'approach' and #cCmds == 2
+    and cCmds[2]:find('ai.setSpeed(', 1, true) ~= nil
+    and cCmds[2]:find('set_warn_signal', 1, true) == nil
+    and cCmds[2]:find('ai.laneChange', 1, true) == nil
+    and cCmds[2]:find('ai.driveInLane', 1, true) == nil,
+    'courier stop (approach): ramps deceleration with ai.setSpeed only (no stacked ai.laneChange)')
+
+  -- Arrives within <= 4 m of drop point at +2.5 s -> Phase 2 ('stopped'): right blinker off, hazards on, 0 m/s, no stacked laneChange
+  local stStop = N.stepCourierStop(60, 99, 2, 1, 0, 1.0, 102.5, cObj, urbanResRoad)
+  T.check(stStop == 'stopped' and N.isCourierDwelling(60),
+    'courier stop: transitions to stopped dwell when reaching drop point')
+  T.check(#cCmds == 3
+    and cCmds[3]:find('electrics.toggle_right_signal(0)', 1, true)
+    and cCmds[3]:find('electrics.set_warn_signal(1)', 1, true)
+    and cCmds[3]:find('ai.driveInLane("off")', 1, true)
+    and cCmds[3]:find('ai.setSpeedMode("set")', 1, true)
+    and cCmds[3]:find('ai.setSpeed(0)', 1, true)
+    and cCmds[3]:find('ai.laneChange', 1, true) == nil,
+    'courier stop (stopped): turns off right blinker, enables hazards, holds at 0 m/s without stacking ai.laneChange')
+
+  -- Still dwelling at +6.0 s (< 4.0 s dwell elapsed since 102.5)
+  local stHold = N.stepCourierStop(60, 99, 2, 1, 0, 0.0, 106.0, cObj, urbanResRoad)
+  T.check(stHold == 'dwelling' and N.isCourierDwelling(60) and #cCmds == 3,
     'courier stop: holds dwell during 4.0-6.0 s package delivery window')
 
-  -- Released after 6.1 s (> 6.0 s maximum dwell)
-  local stRel = N.stepCourierStop(60, 95, 0, 1, 0, 0.0, 106.1, cObj)
-  T.check(stRel == 'released' and not N.isCourierDwelling(60),
-    'courier stop: releases smoothly after dwell completes')
-  T.check(#cCmds == 2
-    and cCmds[2]:find('electrics.set_warn_signal(0)', 1, true)
-    and cCmds[2]:find('ai.setMode("traffic")', 1, true)
-    and cCmds[2]:find('ai.driveInLane("on")', 1, true)
-    and cCmds[2]:find('ai.laneChange(nil, 12.0, -0.85)', 1, true),
-    'courier stop: clears hazards, resets curb offset, and resumes traffic')
+  -- Dwell ends at 108.6 s (> 102.5 + 6.0): Phase 3 ('merging'), hazards off, left merge signal on
+  local stMerge = N.stepCourierStop(60, 99, 2, 1, 0, 0.0, 108.6, cObj, urbanResRoad, true)
+  T.check(stMerge == 'merging' and N.isCourierDwelling(60),
+    'courier stop: enters merging phase after dwell completes')
+  T.check(#cCmds == 4
+    and cCmds[4]:find('electrics.set_warn_signal(0)', 1, true)
+    and cCmds[4]:find('electrics.toggle_left_signal(1)', 1, true)
+    and cCmds[4]:find('ai.setMode("traffic")', 1, true)
+    and cCmds[4]:find('ai.driveInLane("on")', 1, true)
+    and cCmds[4]:find('ai.laneChange(nil, 12.0, -0.85)', 1, true),
+    'courier stop (merging): clears hazards, activates left merge signal, and merges back into lane')
 
-  -- 45 s per-point cooldown blocks re-trigger at +30 s, allows again after +45 s (106.1 + 45 = 151.1)
-  local stCd = N.stepCourierStop(61, 90, 0, 1, 0, 6.0, 136.0, cObj)
+  -- Merge accel finishes after +1.5 s (110.2 >= 108.6 + 1.5): left blinker off & released
+  local stRel = N.stepCourierStop(60, 105, 0, 1, 0, 6.0, 110.2, cObj, urbanResRoad, true)
+  T.check(stRel == 'released' and not N.isCourierDwelling(60),
+    'courier stop: releases smoothly after merge acceleration completes')
+  T.check(#cCmds == 5 and cCmds[5]:find('electrics.toggle_left_signal(0)', 1, true),
+    'courier stop: cancels left merge signal after merge completes')
+
+  -- 45 s per-point cooldown blocks re-trigger at +30 s, allows again after +45 s (110.2 + 45 = 155.2)
+  local stCd = N.stepCourierStop(61, 70, 0, 1, 0, 6.0, 140.0, cObj, urbanResRoad)
   T.check(stCd == 'none' and not N.isCourierDwelling(61),
     'courier stop: 45 s per-point cooldown blocks immediate re-trigger')
-  local stAfter = N.stepCourierStop(61, 90, 0, 1, 0, 6.0, 152.0, cObj)
-  T.check(stAfter == 'stopped' and N.isCourierDwelling(61),
+  local stAfter = N.stepCourierStop(61, 70, 0, 1, 0, 6.0, 156.0, cObj, urbanResRoad)
+  T.check(stAfter == 'approach' and N.isCourierDwelling(61),
     'courier stop: triggers again after 45 s cooldown expires')
 
   -- Dwelling courier is excluded from behind-player horizon recycling in updateTrafficDirector
@@ -1130,7 +1172,7 @@ do
   local sg2 = { gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
                 be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map') }
   local clock0 = os.clock
-  os.clock = function() return 153.0 end
+  os.clock = function() return 157.0 end
   local function v(ax, ay, az)
     return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
   end
@@ -1159,6 +1201,7 @@ do
 
   os.clock = clock0
   for k, val in pairs(sg2) do _G[k] = val end
+  jsonDecode, readFile = jd0, rf0
   N.dropDeliveryPoints('tile_deliv')
   T.check(N.status().deliveryPointsLoaded == 0, 'dropDeliveryPoints clears tile drop points')
   N.reset()
@@ -1408,24 +1451,32 @@ do
   }, nil)
   T.check(#trunkTilePts == 0, 'extractDeliveryPoints: excludes delivery points along trunk/motorway/primary road geometry')
 
-  -- stepCourierStop: requires vehicle speed < 12.5 m/s (45 km/h) AND local road speed limit <= 15.3 m/s (55 km/h)
+  -- stepCourierStop: requires urban band, residential/service roadClass, vehicle speed < 12.5 m/s, and posted limit <= 13.9 m/s (50 km/h)
   N.reset()
-  N.onDeliveryPoints('village_tile', { { id = 'v_drop', x = 100, y = 4, z = 0, yaw = 0 } })
+  local jd1, rf1 = rawget(_G, 'jsonDecode'), rawget(_G, 'readFile')
+  readFile = function() return '{}' end
+  jsonDecode = function()
+    return { nodes = { a = { 0, 0, 0, 4 } }, edges = {}, trafficProfile = { band = 'urban' } }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  N.onDeliveryPoints('village_tile', { { id = 'v_drop', x = 100, y = 4, z = 0, yaw = 0, roadClass = 'residential' } })
   local vCmds = {}
   local vObj = { queueLuaCommand = function(_, c) vCmds[#vCmds + 1] = c end }
+  local res50 = { dist = 1.0, highway = false, unlimited = false, isLink = false, roadClass = 'residential', posted = 13.9, speedLimit = 13.9 }
   -- Vehicle speed >= 12.5 m/s (45 km/h): blocked
-  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 12.5, 300, vObj, 13.9) == 'none' and #vCmds == 0,
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 12.5, 300, vObj, res50) == 'none' and #vCmds == 0,
     'stepCourierStop: blocked at vehicle speed >= 12.5 m/s (45 km/h)')
-  -- Rural highway speed limit 100 km/h (27.8 m/s > 15.3 m/s): blocked even at slow vehicle speed
-  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 27.8) == 'none' and #vCmds == 0,
-    'stepCourierStop: blocked on rural highway (limit 100 km/h > 55 km/h)')
-  -- 60 km/h arterial (16.7 m/s > 15.3 m/s): blocked
-  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 16.7) == 'none' and #vCmds == 0,
-    'stepCourierStop: blocked when road speed limit > 15.3 m/s (55 km/h)')
-  -- Village 50 km/h street (13.9 m/s <= 15.3 m/s) at 8.0 m/s (< 12.5 m/s): triggers stop!
-  local stVill = N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, 13.9)
-  T.check(stVill == 'stopped' and N.isCourierDwelling(90) and #vCmds == 1,
-    'stepCourierStop: triggers curbside stop in 50 km/h village street at < 12.5 m/s')
+  -- Rural highway speed limit 100 km/h (27.8 m/s > 13.9 m/s): blocked even at slow vehicle speed
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, { dist = 1.0, roadClass = 'residential', posted = 27.8, speedLimit = 27.8 }) == 'none' and #vCmds == 0,
+    'stepCourierStop: blocked on road with limit > 13.9 m/s (50 km/h)')
+  -- Primary / secondary arterial at 50 km/h: blocked by strict roadClass gating
+  T.check(N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, { dist = 1.0, roadClass = 'primary', posted = 13.9, speedLimit = 13.9 }) == 'none' and #vCmds == 0,
+    'stepCourierStop: blocked on primary arterial even at <= 50 km/h')
+  -- Urban 50 km/h residential street (13.9 m/s) at 8.0 m/s (< 12.5 m/s): triggers approach pull-over!
+  local stVill = N.stepCourierStop(90, 90, 0, 1, 0, 8.0, 300, vObj, res50)
+  T.check(stVill == 'approach' and N.isCourierDwelling(90) and #vCmds == 1,
+    'stepCourierStop: triggers curbside approach in 50 km/h urban residential street at < 12.5 m/s')
+  jsonDecode, readFile = jd1, rf1
   N.reset()
 end
 
@@ -1544,8 +1595,8 @@ do
       tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
     end,
   }
-  -- Player moving slightly angled across lane (vx=36, vy=6) on eastbound Autobahn
-  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 36, vy = 6 }, hwyBox)
+  -- Player moving slightly angled across lane (vx=36, vy=2) on eastbound Autobahn
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 36, vy = 2 }, hwyBox)
   T.check(#tports == 1 and tports[1].id == 401 and tports[1].dmin == 340 and tports[1].dmax == 480,
     'director (highway): recycles behind-player vehicle into [340, 480] m forward window')
   T.check(math.abs(tports[1].dir.x - 1) < 1e-6 and math.abs(tports[1].dir.y) < 1e-6,
@@ -1617,7 +1668,7 @@ do
   ruralObj.getPosition = function() return v(-600, 0, 0) end
   core_camera = { getPosition = function() return v(-100, 0, 0) end }
   os.clock = function() return 4020 end
-  N.updateTrafficDirector(0.30, { x = -100, y = 0, z = 0, vx = 20, vy = 5 }, { -800, -600, 600, 600 })
+  N.updateTrafficDirector(0.30, { x = -100, y = 0, z = 0, vx = 20, vy = 2 }, { -800, -600, 600, 600 })
   T.check(#ruralTports == 1 and ruralTports[1].dmin == 160 and ruralTports[1].dmax == 340
     and math.abs(ruralTports[1].dir.x - 1) < 1e-6 and math.abs(ruralTports[1].dir.y) < 1e-6,
     'director (rural): snaps rural horizon forceTeleport heading strictly to road edge tangent (1, 0)')
@@ -1867,6 +1918,760 @@ do
     'transform: rebases anchor-tile deliveryPoints into the new anchor frame')
 
   os.clock = clock0
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 11. Pass 2.1: RECLIP_M <= 96 (128 m step), forward-only FAST_HALO_M (380 m), and highway early cut despawn
+do
+  T.check(N.RECLIP_M <= 96, 'RECLIP_M <= 96 so every 128 m block step refreshes graph cuts')
+  T.check(N.FAST_HALO_M == 380, 'FAST_HALO_M defaults to 380 m')
+
+  local fg = {
+    nodes = {
+      a = { -400, 0, 1, 4 }, b = { 400, 0, 1, 4 },
+      ahead = { 700, 0, 1, 4 }, tooFarAhead = { 1000, 0, 1, 4 },
+      behind = { -700, 0, 1, 4 },
+    },
+    edges = {
+      { 'behind', 'a', 1, 2, 0, 30.0, 1, 4, nil, nil, false, false, 2, 1 },
+      { 'a', 'b', 1, 2, 0, 30.0, 1, 4, nil, nil, false, false, 2, 1 },
+      { 'b', 'ahead', 1, 2, 0, 30.0, 1, 4, nil, nil, false, false, 2, 1 },
+      { 'ahead', 'tooFarAhead', 1, 2, 0, 30.0, 1, 4, nil, nil, false, false, 2, 1 },
+    },
+  }
+  local box = { -500, -500, 500, 500 }
+  local fn, _, _, fcuts = N.toNodes(fg, box, 60, false, nil, 0, 380, { x = 1, y = 0 })
+  T.check(fn.ahead ~= nil and fn.tooFarAhead == nil and fn.behind == nil,
+    'forward-only FAST_HALO_M: keeps 380 m ahead motorway node, drops behind-player halo node')
+  T.check(fn.a.links.b.roadClass == 'motorway', 'e[14]=1 decodes to roadClass=motorway')
+  T.check(#fcuts >= 2, 'forward-only FAST_HALO_M: physical box cuts kept at both ends')
+
+  -- ROAD_CLASSES decoding & compactShortEdges boundary preservation on roadClass change
+  local rcg = {
+    nodes = { a = { 0, 0, 0, 4 }, b = { 50, 0, 0, 4 }, c = { 50.3, 0, 0, 4 }, d = { 100, 0, 0, 4 } },
+    edges = {
+      { 'a', 'b', 1, 2, 0, 30, 1, 4, nil, nil, false, false, 1, 1 },
+      { 'b', 'c', 1, 2, 0, 30, 1, 4, nil, nil, false, false, 1, 2 },
+      { 'c', 'd', 1, 2, 0, 30, 1, 4, nil, nil, false, false, 1, 'Motorway_Link' },
+    },
+  }
+  local rcn = N.toNodes(rcg, nil, 0, false)
+  T.check(rcn.a.links.b.roadClass == 'motorway' and rcn.b and rcn.b.links.c.roadClass == 'motorway_link'
+    and rcn.c.links.d.roadClass == 'motorway_link',
+    'ROAD_CLASSES: numeric and string e[14] decoded and motorway/motorway_link seam not compacted')
+
+  -- 128 m block step triggers reclip in N.update & highway boundary early-despawn ignores followsPlayer/FRESH_S/COOLDOWN_S
+  T.check(N.highwayCutReach(0, 0) == 120 and N.highwayCutReach(30, 0) == N.stopReach(30) + 60,
+    'highwayCutReach: >= max(120, stopReach(sp) + 60)')
+
+  N.reset()
+  N.enabled = true
+  local names = { 'jsonDecode', 'readFile', 'writeFile', 'jsonEncode', 'map', 'be', 'path',
+                  'getObjectByID', 'gameplay_traffic', 'core_camera' }
+  local sg = {}
+  for _, k in ipairs(names) do sg[k] = rawget(_G, k) end
+  local log0 = rawget(_G, 'log')
+  if not log0 then log = function() end end
+  local clock0 = os.clock
+  local now = 6000
+  os.clock = function() return now end
+  local function v(x, y, z)
+    return { x = x, y = y, z = z or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  jsonDecode = function()
+    return {
+      nodes = {
+        p = { -200, 0, 12.5, 5 }, h = { 200, 0, 12.5, 5 }, c = { 420, 0, 12.5, 5 }, far = { 1200, 0, 12.5, 5 },
+      },
+      edges = {
+        { 'p', 'h', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+        { 'h', 'c', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+        { 'c', 'far', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+      },
+    }
+  end
+  readFile = function() return '{}' end
+  writeFile = function() end
+  jsonEncode = function() return '{}' end
+  path = { getPathLevelInfo = function() return '' end }
+  local world = {}
+  map = {
+    reset = function(n) world.nodes = n end,
+    getMap = function() return world end,
+    findClosestRoad = function(pt)
+      if pt.x < 200 then return 'p', 'h' end
+      return 'h', 'c'
+    end,
+  }
+  local playerVel = v(30, 0, 0)
+  local cars = {
+    [1] = { pos = v(0, 0, 12.5), vel = playerVel, dir = v(1, 0, 0) },
+    -- Highway car 240 m from cut at (420, 0): followsPlayer is true and fresh (< FRESH_S), still despawned early!
+    [701] = { pos = v(180, 0, 12.5), vel = v(30, 0, 0), dir = v(1, 0, 0) },
+    -- Highway car stopped/turning 90 m from cut (> 30 m non-hwy CUT_NEAR_M, < 120 m hwy nearM), still caught!
+    [702] = { pos = v(330, 0, 12.5), vel = v(0.2, 0.2, 0), dir = v(0, 1, 0) },
+  }
+  be = {
+    getPlayerVehicleID = function() return 1 end,
+    queueAllObjectLua = function() end,
+    sendToMailbox = function() end,
+  }
+  core_camera = { getPosition = function() return v(0, 0, 15) end, getForward = function() return v(1, 0, 0) end }
+  getObjectByID = function(id)
+    local c = cars[id]
+    if not c then return nil end
+    return {
+      getActive = function() return true end,
+      getPosition = function() return c.pos end,
+      getVelocity = function() return c.vel end,
+      getDirectionVector = function() return c.dir end,
+    }
+  end
+  local ports = {}
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function() return { [701] = { isAi = true }, [702] = { isAi = true } } end,
+    getTrafficList = function() return { 701, 702 } end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      ports[#ports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  local tc0 = rawget(table, 'clear')
+  table.clear = tc0 or function(t) for k in pairs(t) do t[k] = nil end end
+  local b1 = { -500, -500, 500, 500 }
+  T.check(N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1), 'test 11 graph accepted')
+  N.update(1, b1)
+  local app1 = N.applies()
+  -- Shift block by 128 m (1 grid step): RECLIP_M = 96 must re-apply!
+  now = 6002
+  N.update(1, { b1[1] + 128, b1[2], b1[3] + 128, b1[4] })
+  T.check(N.applies() == app1 + 1, '128 m block step triggers navgraph reclip and cut refresh')
+
+  -- Reset ports and test fresh highway cars at 6003 (caught immediately) and 6004 (bypasses COOLDOWN_S)
+  ports = {}
+  now = 6003
+  N.update(1, { b1[1] + 128, b1[2], b1[3] + 128, b1[4] })
+  local hit701, hit702 = 0, 0
+  for _, p in ipairs(ports) do
+    if p.id == 701 then hit701 = hit701 + 1 end
+    if p.id == 702 then hit702 = hit702 + 1 end
+  end
+  T.check(hit701 == 1, 'highway early cut despawn: catches car heading to cut without followsPlayer/FRESH_S suppression')
+  T.check(hit702 == 1, 'highway early cut despawn: catches car stopped/turning within 120 m of cut without FRESH_S suppression')
+
+  -- Immediate second tick within COOLDOWN_S: highwayCut still bypasses COOLDOWN_S!
+  now = 6004
+  N.update(1, { b1[1] + 128, b1[2], b1[3] + 128, b1[4] })
+  local hit701After = 0
+  for _, p in ipairs(ports) do if p.id == 701 then hit701After = hit701After + 1 end end
+  T.check(hit701After == 2, 'highway early cut despawn: COOLDOWN_S does not suppress highway boundary cut despawn')
+
+  os.clock = clock0
+  table.clear = tc0
+  if not log0 then log = nil end
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 12. Pass 2.2: Highway spawn >= 320 m clearance, no aheadSpot face-spawns, roadZ, multi-sample tangent, *_link/wrong-way rejection, initial launch
+do
+  -- horizonSpawnWindow enforces >= 320 m on highways, never falls back to 95 m
+  T.check(N.HORIZON_HWY_SAFE_MIN_M == 320, 'HORIZON_HWY_SAFE_MIN_M == 320')
+  T.check(N.horizonSpawnWindow(0, 0, 1, 0, { -500, -500, 340, 500 }, 0, 0, true) == nil,
+    'horizonSpawnWindow (highway): returns nil when < 320 m ahead in box (never falls back to 95 m)')
+  local _, _, _, _, hloCam = N.horizonSpawnWindow(0, 0, 1, 0, { -600, -600, 600, 600 }, 100, 0, true)
+  T.check(hloCam and hloCam >= 420 - 1e-6,
+    'horizonSpawnWindow (highway): maintains >= 320 m clearance ahead of camera')
+
+  -- Multi-sample roadTangentAt across curved highway edges
+  local function v(ax, ay, az) return { x = ax, y = ay, z = az or 0 } end
+  local e01 = { inNode = 'n0', outNode = 'n1', oneWay = true, highway = true }
+  local e12 = { inNode = 'n1', outNode = 'n2', oneWay = true, highway = true }
+  local e23 = { inNode = 'n2', outNode = 'n3', oneWay = true, highway = true }
+  local curveNodes = {
+    n0 = { pos = v(-40, -15, 0), links = { n1 = e01 } },
+    n1 = { pos = v(0, 0, 0), links = { n0 = e01, n2 = e12 } },
+    n2 = { pos = v(40, 0, 0), links = { n1 = e12, n3 = e23 } },
+    n3 = { pos = v(80, 15, 0), links = { n2 = e23 } },
+  }
+  local curveMap = { nodes = curveNodes }
+  local txMid, tyMid = N.roadTangentAt(curveMap, e12, curveNodes.n1, curveNodes.n2, 0.5)
+  local txEnd, tyEnd = N.roadTangentAt(curveMap, e12, curveNodes.n1, curveNodes.n2, 0.95)
+  local txBeg, tyBeg = N.roadTangentAt(curveMap, e12, curveNodes.n1, curveNodes.n2, 0.05)
+  T.check(math.abs(txMid - 1) < 1e-6 and math.abs(tyMid) < 1e-6,
+    'roadTangentAt: middle sample matches segment tangent')
+  T.check(tyEnd > 0.1 and tyBeg > 0.1,
+    'roadTangentAt: blends smoothly into aligned upstream/downstream neighbor edges')
+
+  -- isValidHighwaySpawnCandidate: rejects *_link, dist > 35, wrong carriageway
+  T.check(not N.isValidHighwaySpawnCandidate(nil, 1, 0), 'isValidHighwaySpawnCandidate: rejects nil')
+  T.check(not N.isValidHighwaySpawnCandidate({ dist = 40, dx = 1, dy = 0, oneWay = true, roadClass = 'motorway' }, 1, 0),
+    'isValidHighwaySpawnCandidate: rejects dist > 35 m')
+  T.check(not N.isValidHighwaySpawnCandidate({ dist = 2, dx = 1, dy = 0, oneWay = true, roadClass = 'motorway_link', isLink = true }, 1, 0),
+    'isValidHighwaySpawnCandidate: rejects *_link ramps')
+  T.check(not N.isValidHighwaySpawnCandidate({ dist = 2, dx = -1, dy = 0, oneWay = true, roadClass = 'motorway' }, 1, 0),
+    'isValidHighwaySpawnCandidate: rejects wrong one-way carriageway')
+  T.check(N.isValidHighwaySpawnCandidate({ dist = 2, dx = 1, dy = 0, oneWay = true, roadClass = 'motorway' }, 1, 0),
+    'isValidHighwaySpawnCandidate: accepts aligned motorway candidate')
+
+  -- launchSpeed highway junction exemption & LAUNCH_DELAY_S = 0.18
+  T.check(math.abs(N.LAUNCH_DELAY_S - 0.18) < 1e-9, 'LAUNCH_DELAY_S == 0.18 s')
+  T.check(N.launchSpeed(29, 1.0, true, true) == nil and N.launchSpeed(29, 1.0, true, true, true) ~= nil,
+    'launchSpeed: exempts nearJunction when isHighway == true while keeping non-highway blocked')
+
+  -- End-to-end: updateTrafficDirector rejects motorway_link, skips rP fallback, preserves roadZ, disables enableRespawn,
+  -- and initial spawn launch() fires near highway node after 0.18 s
+  N.reset()
+  N.enabled = true
+  local sg = {
+    gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+    be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map'),
+    readFile = rawget(_G, 'readFile'), jsonDecode = rawget(_G, 'jsonDecode'),
+    writeFile = rawget(_G, 'writeFile'), jsonEncode = rawget(_G, 'jsonEncode'), path = rawget(_G, 'path'),
+  }
+  local log0 = rawget(_G, 'log')
+  if not log0 then log = function() end end
+  local tc0 = rawget(table, 'clear')
+  table.clear = tc0 or function(t) for k in pairs(t) do t[k] = nil end end
+  local clock0 = os.clock
+  local simT = 7000
+  os.clock = function() return simT end
+  local function v3(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  readFile = function() return '{}' end
+  writeFile = function() end
+  jsonEncode = function() return '{}' end
+  path = { getPathLevelInfo = function() return '' end }
+  -- Highway graph with a junction node at (-100, 0) (for launch test) and elevated roadZ = 37.5 ahead
+  jsonDecode = function()
+    return {
+      nodes = {
+        w = { -300, 0, 37.5, 5 }, j = { -100, 0, 37.5, 5 }, e = { 600, 0, 37.5, 5 }, rmp = { -100, 100, 37.5, 4 },
+      },
+      edges = {
+        { 'w', 'j', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+        { 'j', 'e', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+        { 'j', 'rmp', 1, 1, 0, 16.7, 1, 4, nil, nil, false, false, 1, 2 },
+      },
+    }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+
+  local rampEdge = {
+    inNode = 'r0', outNode = 'r1', oneWay = true, highway = true, speedLimit = 16.7, roadClass = 'motorway_link',
+  }
+  local hwyMainEdge = {
+    inNode = 'h0', outNode = 'h1', oneWay = true, highway = true, unlimited = true, speedLimit = 36.1, roadClass = 'motorway',
+  }
+  local testNodes = {
+    r0 = { pos = v3(400, 0, 37.5), radius = 4, links = { r1 = rampEdge } },
+    r1 = { pos = v3(430, 10, 37.5), radius = 4, links = { r0 = rampEdge } },
+    h0 = { pos = v3(-300, 0, 37.5), radius = 5, links = { h1 = hwyMainEdge } },
+    h1 = { pos = v3(600, 0, 37.5), radius = 5, links = { h0 = hwyMainEdge } },
+  }
+  map = {
+    reset = function() end,
+    getMap = function() return { nodes = testNodes } end,
+    findClosestRoad = function(pt)
+      -- At 0.5 offset (410 m): return a motorway_link ramp -> must be rejected!
+      -- At 0.75 offset (445 m) and elsewhere: return main motorway at z=37.5
+      if pt.x >= 400 and pt.x <= 425 then return 'r0', 'r1' end
+      return 'h0', 'h1'
+    end,
+  }
+  local cmds801, cmds802, tports = {}, {}, {}
+  local objs = {
+    [801] = {
+      getActive = function() return true end, getPosition = function() return v3(-500, 0, 0) end,
+      getVelocity = function() return v3(25, 0, 0) end, getDirectionVector = function() return v3(1, 0, 0) end,
+      queueLuaCommand = function(_, c) cmds801[#cmds801 + 1] = c end,
+    },
+    [802] = {
+      getActive = function() return true end, getPosition = function() return v3(-105, 0, 37.5) end,
+      getVelocity = function() return v3(0, 0, 0) end, getDirectionVector = function() return v3(1, 0, 0) end,
+      queueLuaCommand = function(_, c) cmds802[#cmds802 + 1] = c end,
+    },
+  }
+  getObjectByID = function(id) return objs[id] end
+  be = { getPlayerVehicleID = function() return 1 end, queueAllObjectLua = function() end, sendToMailbox = function() end }
+  core_camera = { getPosition = function() return v3(0, 0, 0) end }
+  local tvars = { enableRespawn = true }
+  local tdata = {
+    [801] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0, enableRespawn = true, state = 'active' },
+    [802] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0, enableRespawn = true, state = 'active' },
+  }
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficVars = function() return tvars end,
+    setTrafficVars = function(vset) for k, val in pairs(vset) do tvars[k] = val end end,
+    getTrafficData = function() return tdata end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  -- Apply graph first so launchRespawned runs in N.update
+  N.update(1, { -600, -600, 600, 600 })
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 30, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(tvars.enableRespawn == false and tdata[801].enableRespawn == false and tdata[802].enableRespawn == false,
+    'director: disables stock gameplay_traffic enableRespawn globally and per active AI vehicle')
+  T.check(#tports == 1 and tports[1].id == 801 and tports[1].dmin == 430 and tports[1].dmax == 460
+    and math.abs(tports[1].pos.z - 37.5) < 1e-6,
+    'director (highway): rejects 0.5 motorway_link candidate, narrows range around valid 0.75 motorway with exact roadZ=37.5')
+  local had802Rolling = false
+  for _, c in ipairs(cmds802) do if c:find('ai.setSpeed(', 1, true) then had802Rolling = true end end
+  T.check(had802Rolling,
+    'director (highway): section 4 applies rolling cruise even within LAUNCH_JUNCTION_M of highway node')
+
+  -- Initial spawn launch() fires after LAUNCH_DELAY_S (0.18 s) near highway node (802 at x=-105, junction at x=-100)
+  simT = 7000.20
+  N.update(1, { -600, -600, 600, 600 })
+  local hadLaunchTooEarly = false
+  for _, c in ipairs(cmds802) do if c:find('thrusters.applyVelocity', 1, true) then hadLaunchTooEarly = true end end
+  T.check(not hadLaunchTooEarly, 'launchRespawned: waits LAUNCH_DELAY_S (0.18 s) before firing thruster launch')
+  simT = 7000.40
+  N.update(1, { -600, -600, 600, 600 })
+  local hadLaunch802 = false
+  for _, c in ipairs(cmds802) do if c:find('thrusters.applyVelocity', 1, true) then hadLaunch802 = true end end
+  T.check(hadLaunch802,
+    'launchRespawned: initial spawn near highway junction receives rolling thruster launch after 0.18 s')
+
+  os.clock = clock0
+  table.clear = tc0
+  if not log0 then log = nil end
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 13. Pass 2.3: Strict Courier roadClass/urban/speed gating, 2-stage signals, rear-traffic merge hold, LHT, dwell cleanup
+do
+  N.reset()
+  local jd, rf = rawget(_G, 'jsonDecode'), rawget(_G, 'readFile')
+  readFile = function() return '{}' end
+  local testBand = 'urban'
+  jsonDecode = function()
+    return { nodes = { a = { 0, 0, 0, 4 } }, edges = {}, trafficProfile = { band = testBand } }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  N.onDeliveryPoints('p23_tile', {
+    { id = 'p_res', x = 100, y = 4, z = 0, yaw = 0, roadClass = 'residential' },
+    { id = 'p_lat', x = 200, y = 10, z = 0, yaw = 0, roadClass = 'residential' },
+    { id = 'p_pri', x = 300, y = 4, z = 0, yaw = 0, roadClass = 'primary' },
+  })
+  local cmds = {}
+  local obj = { queueLuaCommand = function(_, c) cmds[#cmds + 1] = c end }
+
+  -- Rural band rejected
+  testBand = 'rural'
+  N.onMessage({ anchorId = 1, path = 'x', serial = 2 }, 1)
+  T.check(N.stepCourierStop(11, 80, 0, 1, 0, 8, 100, obj, { dist = 1, roadClass = 'residential', posted = 13.9 }) == 'none',
+    'stepCourierStop: rejected when trafficProfile.band ~= urban')
+
+  testBand = 'urban'
+  N.onMessage({ anchorId = 1, path = 'x', serial = 3 }, 1)
+  -- road.dist > 12 m rejected
+  T.check(N.stepCourierStop(11, 80, 0, 1, 0, 8, 100, obj, { dist = 12.5, roadClass = 'residential', posted = 13.9 }) == 'none',
+    'stepCourierStop: rejected when road.dist > 12 m')
+  -- Disallowed roadClass & _link rejected
+  for _, badRc in ipairs({ 'primary', 'secondary', 'tertiary', 'motorway_link', 'residential_link' }) do
+    T.check(N.stepCourierStop(11, 80, 0, 1, 0, 8, 100, obj,
+      { dist = 1, roadClass = badRc, isLink = badRc:sub(-5) == '_link', posted = 13.9 }) == 'none',
+      'stepCourierStop: rejects roadClass=' .. badRc)
+  end
+  -- Posted limit > 13.9 (both positive and negative) rejected
+  T.check(N.stepCourierStop(11, 80, 0, 1, 0, 8, 100, obj, { dist = 1, roadClass = 'residential', posted = -16.7 }) == 'none',
+    'stepCourierStop: rejects negative inferred posted limit > 13.9 m/s')
+  T.check(N.stepCourierStop(11, 80, 0, 1, 0, 8, 100, obj, { dist = 1, roadClass = 'residential', posted = 16.7 }) == 'none',
+    'stepCourierStop: rejects positive posted limit > 13.9 m/s')
+  -- Lateral > 8.0 m rejected (p_lat at y=10)
+  T.check(N.stepCourierStop(11, 180, 0, 1, 0, 8, 100, obj, { dist = 1, roadClass = 'residential', posted = -13.9 }) == 'none',
+    'stepCourierStop: rejects delivery point with lateral > 8.0 m')
+  -- Point with roadClass='primary' rejected (p_pri at x=300)
+  T.check(N.stepCourierStop(11, 280, 0, 1, 0, 8, 100, obj, { dist = 1, roadClass = 'residential', posted = -13.9 }) == 'none',
+    'stepCourierStop: rejects delivery point tagged roadClass=primary')
+
+  -- Valid living_street / service / unclassified with negative -13.9 posted triggers approach, plus rear-traffic hold!
+  N.rules = { rightHandDrive = false, turnOnRed = true }
+  local roadOk = { dist = 2.0, roadClass = 'living_street', posted = -13.9, speedLimit = 13.9 }
+  T.check(N.stepCourierStop(12, 70, 0, 1, 0, 8.0, 200, obj, roadOk) == 'approach',
+    'stepCourierStop: accepts urban living_street with posted=-13.9 within 40 m')
+  T.check(N.stepCourierStop(12, 99, 2, 1, 0, 1.0, 202.0, obj, roadOk) == 'stopped',
+    'stepCourierStop: transitions to stopped with hazards')
+  local cmdsBeforeHold = #cmds
+  -- Dwell complete at 208.5 s, but rearClear == false -> turns off hazards, turns on left blinker, holds merge!
+  local stWait = N.stepCourierStop(12, 99, 2, 1, 0, 0.0, 208.5, obj, roadOk, false)
+  T.check(stWait == 'merging' and N.isCourierDwelling(12)
+    and #cmds == cmdsBeforeHold + 1
+    and cmds[#cmds]:find('electrics.set_warn_signal(0)', 1, true) ~= nil
+    and cmds[#cmds]:find('electrics.toggle_left_signal(1)', 1, true) ~= nil
+    and cmds[#cmds]:find('ai.setMode("traffic")', 1, true) == nil,
+    'stepCourierStop: rear traffic holds merge while left blinker stays active')
+  -- Still blocked at +2 s -> holds without re-spamming commands
+  T.check(N.stepCourierStop(12, 99, 2, 1, 0, 0.0, 210.5, obj, roadOk, false) == 'merging'
+    and #cmds == cmdsBeforeHold + 1,
+    'stepCourierStop: continues yielding while rearClear == false')
+  -- Rear clears at 211.0 s -> starts merge acceleration, then releases at 212.6 s
+  T.check(N.stepCourierStop(12, 99, 2, 1, 0, 0.0, 211.0, obj, roadOk, true) == 'merging'
+    and cmds[#cmds]:find('ai.setMode("traffic")', 1, true) ~= nil,
+    'stepCourierStop: begins merge once rear traffic clears')
+  T.check(N.stepCourierStop(12, 106, 0, 1, 0, 5.0, 212.6, obj, roadOk, true) == 'released'
+    and not N.isCourierDwelling(12)
+    and cmds[#cmds]:find('electrics.toggle_left_signal(0)', 1, true) ~= nil,
+    'stepCourierStop: cancels left blinker and releases after merge accel')
+
+  -- LHT signal reversal (rightHandDrive == true -> drive on left -> left curb, right merge)
+  N.rules = { rightHandDrive = true, turnOnRed = true }
+  local lhtCmds = {}
+  local lhtObj = { queueLuaCommand = function(_, c) lhtCmds[#lhtCmds + 1] = c end }
+  N.onDeliveryPoints('p23_lht', { { id = 'p_lht', x = 500, y = -4, z = 0, yaw = 0, roadClass = 'service' } })
+  T.check(N.stepCourierStop(13, 470, 0, 1, 0, 7.0, 300, lhtObj, { dist = 1, roadClass = 'service', posted = 11.1 }) == 'approach'
+    and lhtCmds[1]:find('electrics.toggle_left_signal(1)', 1, true) ~= nil
+    and lhtCmds[1]:find('ai.laneChange(nil, 28.0, -0.85)', 1, true) ~= nil,
+    'stepCourierStop (LHT): signals left and pulls to -0.85 m left curb')
+  T.check(N.stepCourierStop(13, 499, -2, 1, 0, 1.0, 302.0, lhtObj, { dist = 1, roadClass = 'service', posted = 11.1 }) == 'stopped'
+    and lhtCmds[2]:find('electrics.toggle_left_signal(0)', 1, true) ~= nil
+    and lhtCmds[2]:find('electrics.set_warn_signal(1)', 1, true) ~= nil,
+    'stepCourierStop (LHT): cancels left blinker and turns on hazards while stopped')
+  T.check(N.stepCourierStop(13, 499, -2, 1, 0, 0.0, 308.5, lhtObj, { dist = 1, roadClass = 'service', posted = 11.1 }, true) == 'merging'
+    and lhtCmds[3]:find('electrics.toggle_right_signal(1)', 1, true) ~= nil
+    and lhtCmds[3]:find('ai.laneChange(nil, 12.0, 0.85)', 1, true) ~= nil,
+    'stepCourierStop (LHT): signals right to merge back to left-hand traffic lane')
+  T.check(N.stepCourierStop(13, 505, 0, 1, 0, 5.0, 310.1, lhtObj, { dist = 1, roadClass = 'service', posted = 11.1 }, true) == 'released'
+    and lhtCmds[4]:find('electrics.toggle_right_signal(0)', 1, true) ~= nil,
+    'stepCourierStop (LHT): cancels right merge blinker on release')
+
+  -- Dwell cleanup on onVehicleSpawned / onVehicleSwitched
+  N.stepCourierStop(14, 70, 0, 1, 0, 7.0, 400, lhtObj, roadOk)
+  T.check(N.isCourierDwelling(14), 'dwell active before respawn/switch')
+  N.onVehicleSpawned(14)
+  T.check(not N.isCourierDwelling(14), 'onVehicleSpawned clears courierDwell')
+  N.stepCourierStop(15, 470, 0, 1, 0, 7.0, 400, lhtObj, { dist = 1, roadClass = 'service', posted = 11.1 })
+  T.check(N.isCourierDwelling(15), 'dwell active before switch')
+  N.onVehicleSwitched(15, 1, 0)
+  T.check(not N.isCourierDwelling(15), 'onVehicleSwitched clears courierDwell')
+
+  jsonDecode, readFile = jd, rf
+  N.reset()
+end
+
+-- 14. Pass 2 end-to-end: guard() never face-spawns at 100-200 m, director rearClear hold, dwell cleanup on respawn/inactive, overtake dwellingFn
+do
+  N.reset()
+  N.enabled = true
+  local sg = {
+    gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+    be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map'),
+    readFile = rawget(_G, 'readFile'), jsonDecode = rawget(_G, 'jsonDecode'),
+    writeFile = rawget(_G, 'writeFile'), jsonEncode = rawget(_G, 'jsonEncode'), path = rawget(_G, 'path'),
+  }
+  local log0 = rawget(_G, 'log')
+  if not log0 then log = function() end end
+  local tc0 = rawget(table, 'clear')
+  table.clear = tc0 or function(t) for k in pairs(t) do t[k] = nil end end
+  local clock0 = os.clock
+  local simT = 8000
+  os.clock = function() return simT end
+  local function v3(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  readFile = function() return '{}' end
+  writeFile = function() end
+  jsonEncode = function() return '{}' end
+  path = { getPathLevelInfo = function() return '' end }
+  jsonDecode = function()
+    return {
+      nodes = { w = { -400, 0, 21.5, 5 }, e = { 800, 0, 21.5, 5 } },
+      edges = { { 'w', 'e', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 } },
+      trafficProfile = { band = 'urban' },
+    }
+  end
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+
+  local hwyEdge = { inNode = 'w', outNode = 'e', oneWay = true, highway = true, unlimited = true, speedLimit = 36.1, roadClass = 'motorway' }
+  local worldNodes = {
+    w = { pos = v3(-400, 0, 21.5), radius = 5, links = { e = hwyEdge } },
+    e = { pos = v3(800, 0, 21.5), radius = 5, links = { w = hwyEdge } },
+  }
+  map = {
+    reset = function() end,
+    getMap = function() return { nodes = worldNodes } end,
+    findClosestRoad = function() return 'w', 'e' end,
+  }
+  local tports = {}
+  local cars = {
+    [1] = { active = true, pos = v3(0, 0, 21.5), vel = v3(30, 0, 0), dir = v3(1, 0, 0) },
+    -- Car outside small box (x = -450) when forward room is only 220 m (< 320 m): guard() must fall back behind camera, NOT 100-200 m ahead!
+    [951] = { active = true, pos = v3(-450, 0, 21.5), vel = v3(25, 0, 0), dir = v3(1, 0, 0) },
+  }
+  getObjectByID = function(id)
+    local c = cars[id]
+    if not c then return nil end
+    return {
+      getActive = function() return c.active end,
+      getPosition = function() return c.pos end,
+      getVelocity = function() return c.vel end,
+      getDirectionVector = function() return c.dir end,
+      queueLuaCommand = function() end,
+    }
+  end
+  be = { getPlayerVehicleID = function() return 1 end, queueAllObjectLua = function() end, sendToMailbox = function() end }
+  core_camera = { getPosition = function() return v3(-5, 0, 23) end, getForward = function() return v3(1, 0, 0) end }
+  local tdata = { [951] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0 } }
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function() return tdata end,
+    getTrafficList = function() return { 951 } end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  N.ONCOMING = false
+  -- Small box: only 220 m ahead of player at (0, 0) -> no 100-200 m aheadSpot, falls back behind camera (-cf)
+  N.update(1, { -400, -400, 220, 400 })
+  simT = 8001
+  N.update(1, { -400, -400, 220, 400 })
+  T.check(#tports == 1 and tports[1].dmin == N.RESPAWN_M[1] and tports[1].dir.x < 0,
+    'guard(): never uses 100-200 m aheadSpot fallback when < 320 m forward room; falls back behind camera')
+
+  -- Large box: >= 320 m ahead -> guard() uses [340, 480] m window with exact roadZ = 21.5
+  tports = {}
+  simT = 8010
+  N.update(1, { -400, -600, 700, 600 })
+  T.check(#tports == 1 and tports[1].dmin >= 320 and math.abs(tports[1].pos.z - 21.5) < 1e-6,
+    'guard(): forward highway respawn enforces >= 320 m clearance and passes target roadZ')
+
+  -- Director clears courierDwell on respawnActive / inactive, and overtakeScan passes dwellingFn
+  N.onDeliveryPoints('d14', { { id = 'dp14', x = 100, y = 4, z = 0, roadClass = 'residential' } })
+  N.stepCourierStop(952, 70, 0, 1, 0, 8, 8010, nil, { dist = 1, roadClass = 'residential', posted = 13.9 })
+  T.check(N.isCourierDwelling(952), 'courier 952 dwelling before respawnActive')
+  cars[952] = { active = true, pos = v3(99, 2, 0), vel = v3(0, 0, 0), dir = v3(1, 0, 0) }
+  tdata[952] = { isAi = true, model = 'scout', config = 'scout_hhl', respawnCount = 0, respawnActive = true }
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(not N.isCourierDwelling(952), 'director clears courierDwell when respawnActive == true')
+
+  -- Inactive vehicle clears busDwell
+  N.onBusStops('b14', { { id = 'bs14', x = 100, y = 4, z = 0 } })
+  N.stepBusStop(953, 90, 0, 1, 0, 8, 8010, nil)
+  T.check(N.isBusDwelling(953), 'bus 953 dwelling before inactive')
+  cars[953] = { active = false, pos = v3(95, 0, 0), vel = v3(0, 0, 0), dir = v3(1, 0, 0) }
+  tdata[953] = { isAi = true, model = 'citybus', config = 'city', respawnCount = 0 }
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 0, vx = 0, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(not N.isBusDwelling(953), 'director clears busDwell when vehicle becomes inactive')
+
+  -- overtake.update receives 8th arg dwellingFn returning isBusDwelling or isCourierDwelling
+  local overtakeMod = require('beamngEarth/overtake')
+  local origOvertakeUpdate, origOvertakeDue = overtakeMod.update, overtakeMod.due
+  local capturedDwellFn = nil
+  overtakeMod.due = function() return true end
+  overtakeMod.update = function(_, _, _, _, _, _, _, dwellFn) capturedDwellFn = dwellFn end
+  N.stepBusStop(954, 90, 0, 1, 0, 8, 8060, nil)
+  simT = 8060
+  N.update(1, { -600, -600, 600, 600 })
+  T.check(type(capturedDwellFn) == 'function' and capturedDwellFn(954) == true and capturedDwellFn(999) == false,
+    'overtakeScan passes dwellingFn (isBusDwelling or isCourierDwelling) as 8th arg to overtake.update')
+  overtakeMod.update, overtakeMod.due = origOvertakeUpdate, origOvertakeDue
+
+  N.ONCOMING = true
+  os.clock = clock0
+  table.clear = tc0
+  if not log0 then log = nil end
+  for k, val in pairs(sg) do _G[k] = val end
+  N.reset()
+end
+
+-- 15. openCuts vs cuts with FAST_HALO_M = 380, and curved-highway director fallback & skipRecycle
+do
+  -- 15a. toNodes: cuts stays at phys box edge while openCuts moves out to the true dead-end past FAST_HALO_M
+  local box = { -500, -500, 500, 500 } -- EDGE_M=60 -> phys ends at 440; FAST_HALO_M=380 -> halo ends at 820
+  local hg = {
+    nodes = {
+      a = { -300, 0, 10, 5 }, b = { 420, 0, 10, 5 }, h = { 750, 0, 10, 5 }, far = { 1100, 0, 10, 5 },
+    },
+    edges = {
+      { 'a', 'b', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+      { 'b', 'h', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+      { 'h', 'far', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+    },
+  }
+  local hnodes, _, _, fcuts, ocuts = N.toNodes(hg, box, 60, false, nil, 0, N.FAST_HALO_M, { x = 1, y = 0 })
+  T.check(hnodes.h ~= nil and hnodes.far == nil,
+    'openCuts: FAST_HALO_M=380 keeps node h=(750,0) and drops far=(1100,0)')
+  T.check(#fcuts == 1 and fcuts[1][1] == 420 and fcuts[1][2] == 0,
+    'openCuts: 4th return cuts stays at phys box edge b=(420,0)')
+  T.check(#ocuts == 1 and ocuts[1][1] == 750 and ocuts[1][2] == 0,
+    'openCuts: 5th return openCuts moves out to true dead-end h=(750,0) past the halo')
+
+  -- When halo == 0 and fastHalo == 0, openCuts equals cuts
+  local _, _, _, cNoHalo, oNoHalo = N.toNodes(hg, box, 60, false, nil, 0, 0)
+  T.check(#cNoHalo == 1 and #oNoHalo == 1 and cNoHalo[1][1] == 420 and oNoHalo[1][1] == 420,
+    'openCuts: equals cuts when halo == 0 and fastHalo == 0')
+
+  -- 15b. End-to-end guard() with FAST_HALO_M = 380:
+  -- cruising car inside block (170 m from phys cut b=(420,0), 500 m from openCut h=(750,0)) is NOT falsely despawned;
+  -- car approaching a true openCut IS despawned early without followsPlayer / FRESH_S / COOLDOWN_S suppression.
+  N.reset()
+  N.enabled = true
+  local sg = {
+    gameplay_traffic = rawget(_G, 'gameplay_traffic'), getObjectByID = rawget(_G, 'getObjectByID'),
+    be = rawget(_G, 'be'), core_camera = rawget(_G, 'core_camera'), map = rawget(_G, 'map'),
+    readFile = rawget(_G, 'readFile'), jsonDecode = rawget(_G, 'jsonDecode'),
+    writeFile = rawget(_G, 'writeFile'), jsonEncode = rawget(_G, 'jsonEncode'), path = rawget(_G, 'path'),
+  }
+  local log0 = rawget(_G, 'log')
+  if not log0 then log = function() end end
+  local tc0 = rawget(table, 'clear')
+  table.clear = tc0 or function(t) for k in pairs(t) do t[k] = nil end end
+  local clock0 = os.clock
+  local simT = 9000
+  os.clock = function() return simT end
+  local function v3(ax, ay, az)
+    return { x = ax, y = ay, z = az or 0, length = function(s) return math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z) end }
+  end
+  readFile = function() return '{}' end
+  writeFile = function() end
+  jsonEncode = function() return '{}' end
+  path = { getPathLevelInfo = function() return '' end }
+  local activeGraph = hg
+  jsonDecode = function() return activeGraph end
+  local world = {}
+  map = {
+    reset = function(n) world.nodes = n end,
+    getMap = function() return world end,
+    findClosestRoad = function(pt)
+      if pt.x < 420 then return 'a', 'b' end
+      return 'b', 'h'
+    end,
+  }
+  local cars = {
+    [1] = { pos = v3(0, 0, 10), vel = v3(30, 0, 0), dir = v3(1, 0, 0) },
+    [710] = { pos = v3(250, 0, 10), vel = v3(30, 0, 0), dir = v3(1, 0, 0) },
+  }
+  getObjectByID = function(id)
+    local c = cars[id]
+    if not c then return nil end
+    return {
+      getActive = function() return true end,
+      getPosition = function() return c.pos end,
+      getVelocity = function() return c.vel end,
+      getDirectionVector = function() return c.dir end,
+    }
+  end
+  be = { getPlayerVehicleID = function() return 1 end, queueAllObjectLua = function() end, sendToMailbox = function() end }
+  core_camera = { getPosition = function() return v3(0, 0, 12) end, getForward = function() return v3(1, 0, 0) end }
+  local tports = {}
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function()
+      local d = {}
+      for id in pairs(cars) do if id ~= 1 then d[id] = { isAi = true } end end
+      return d
+    end,
+    getTrafficList = function()
+      local l = {}
+      for id in pairs(cars) do if id ~= 1 then l[#l + 1] = id end end
+      return l
+    end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  N.onMessage({ anchorId = 1, path = 'x', serial = 1 }, 1)
+  N.update(1, box)
+  simT = 9001
+  N.update(1, box)
+  T.check(#tports == 0,
+    'guard (openCuts): cruising highway car 170 m from phys cut (500 m from openCut) is NOT falsely despawned')
+
+  -- Now graph ends at h=(580, 0) (kept in openCuts via FAST_HALO_M): car 711 at x=350 (230 m < highwayCutReach(30)=270 m)
+  -- is despawned immediately without followsPlayer / FRESH_S / COOLDOWN_S suppression
+  activeGraph = {
+    nodes = {
+      a = { -300, 0, 10, 5 }, b = { 420, 0, 10, 5 }, h = { 580, 0, 10, 5 }, far = { 1100, 0, 10, 5 },
+    },
+    edges = {
+      { 'a', 'b', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+      { 'b', 'h', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+      { 'h', 'far', 1, 3, 0, 36.1, 1, 5, nil, nil, false, false, 2, 1 },
+    },
+  }
+  cars[710] = nil
+  cars[711] = { pos = v3(350, 0, 10), vel = v3(30, 0, 0), dir = v3(1, 0, 0) }
+  N.onMessage({ anchorId = 1, path = 'x', serial = 2 }, 1)
+  simT = 9002.5
+  N.update(1, box)
+  simT = 9003.5
+  N.update(1, box)
+  T.check(#tports == 1 and tports[1].id == 711,
+    'guard (openCuts): car approaching true openCut past halo IS despawned early without followsPlayer/FRESH_S suppression')
+  simT = 9004.5
+  N.update(1, box)
+  T.check(#tports == 2 and tports[2].id == 711,
+    'guard (openCuts): true openCut despawn bypasses COOLDOWN_S on highway')
+
+  -- 15c. Curved-highway recycling in updateTrafficDirector():
+  -- enters >= 320 m highway window when playerRoad is highway even if closestRoad(mid) misses,
+  -- and skips recycling when no valid targetRoad exists.
+  N.reset()
+  N.enabled = true
+  local cEdge0 = { inNode = 'c0', outNode = 'c1', oneWay = true, highway = true, unlimited = true, speedLimit = 36.1, roadClass = 'motorway' }
+  local cEdge1 = { inNode = 'c2', outNode = 'c3', oneWay = true, highway = true, unlimited = true, speedLimit = 36.1, roadClass = 'motorway' }
+  local curveHwyNodes = {
+    c0 = { pos = v3(-100, 0, 15), radius = 5, links = { c1 = cEdge0 } },
+    c1 = { pos = v3(100, 0, 15), radius = 5, links = { c0 = cEdge0 } },
+    c2 = { pos = v3(430, 0, 15), radius = 5, links = { c3 = cEdge1 } },
+    c3 = { pos = v3(520, 40, 15), radius = 5, links = { c2 = cEdge1 } },
+  }
+  local missMidOnly = true
+  map = {
+    getMap = function() return { nodes = curveHwyNodes } end,
+    findClosestRoad = function(pt)
+      -- At player (0, 0): returns highway c0->c1
+      if pt.x < 100 then return 'c0', 'c1' end
+      -- Straight ray midpoint [160, 340] (mid=250) and 0.5 highway offset (410) miss (> 35 m away from road)
+      if not missMidOnly then return nil, nil end
+      if pt.x >= 435 and pt.x <= 465 then return 'c2', 'c3' end
+      return nil, nil
+    end,
+  }
+  local curveCars = {
+    [960] = { pos = v3(-500, 0, 15), vel = v3(28, 0, 0), dir = v3(1, 0, 0) },
+  }
+  getObjectByID = function(id)
+    local c = curveCars[id]
+    if not c then return nil end
+    return {
+      getActive = function() return true end,
+      getPosition = function() return c.pos end,
+      getVelocity = function() return c.vel end,
+      getDirectionVector = function() return c.dir end,
+      queueLuaCommand = function() end,
+    }
+  end
+  tports = {}
+  gameplay_traffic = {
+    getState = function() return 'on' end,
+    getTrafficData = function() return { [960] = { isAi = true, model = 'vivace', config = '160_diesel', respawnCount = 0 } } end,
+    forceTeleport = function(id, pos, dir, dmin, dmax)
+      tports[#tports + 1] = { id = id, pos = pos, dir = dir, dmin = dmin, dmax = dmax }
+    end,
+  }
+  simT = 9100
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 15, vx = 30, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(#tports == 1 and tports[1].dmin >= 340 and tports[1].dmin == 430 and tports[1].dmax == 460,
+    'director (curved highway): enters >= 320 m highway window from playerRoad even when mid misses, and narrows range around 0.75 offset')
+
+  -- When map.getMap exists and no valid targetRoad exists (offsets and oncomingSpot both miss), skips recycling
+  missMidOnly = false
+  tports = {}
+  simT = 9120
+  N.updateTrafficDirector(0.30, { x = 0, y = 0, z = 15, vx = 30, vy = 0 }, { -600, -600, 600, 600 })
+  T.check(#tports == 0,
+    'director (curved highway): skips recycling when map exists and no valid targetRoad is found')
+
+  os.clock = clock0
+  table.clear = tc0
+  if not log0 then log = nil end
   for k, val in pairs(sg) do _G[k] = val end
   N.reset()
 end

@@ -52,6 +52,22 @@ WINDOW_M = 1100.0           # half size of the square around the player the grap
 CURVE_ACCEL = 2.0           # m/s^2: comfortable lateral acceleration, a driving target rather than a posted limit
 MOTORWAY_CURVE_ACCEL = 3.2  # m/s^2: banked motorway/trunk sweeps (avoids AI braking on gentle Autobahn curves)
 HIGHWAY_CLASSES = {"motorway", "trunk"}
+ROAD_CLASS_CODES = {
+    "motorway": 1,
+    "motorway_link": 2,
+    "trunk": 3,
+    "trunk_link": 4,
+    "primary": 5,
+    "primary_link": 6,
+    "secondary": 7,
+    "secondary_link": 8,
+    "tertiary": 9,
+    "residential": 10,
+    "living_street": 11,
+    "unclassified": 12,
+    "service": 13,
+    "tertiary_link": 14,
+}
 DE_RICHTGESCHWINDIGKEIT_MS = 130.0 / 3.6
 BRAKE_ACCEL = 2.5           # m/s^2: spread a tight bend's target back along its approaches
 NARROW_M = 5.5              # narrower two-way town streets need slower encounters with oncoming traffic (parked cars,
@@ -249,6 +265,26 @@ def highway_flag(feats, i, spec, at=0.5, country=None):
     return 1
 
 
+def road_class_name(spec):
+    """Canonical road-class name for navgraph edge metadata (e[13]), or None."""
+    if spec is None:
+        return None
+    cls = getattr(spec, "cls", None)
+    if getattr(spec, "link", False):
+        link_name = f"{cls}_link"
+        if link_name in ROAD_CLASS_CODES:
+            return link_name
+    if cls in ROAD_CLASS_CODES:
+        return cls
+    return None
+
+
+def road_class_code(spec):
+    """Compact integer road-class code (ROAD_CLASS_CODES) for navgraph edge[13], or 0."""
+    name = road_class_name(spec)
+    return ROAD_CLASS_CODES.get(name, 0) if name else 0
+
+
 def road_mph(feats, i, spec, mph=True, at=0.5, country=None, de_on=False, propagated=None):
     """The speed limit (mph) of road feature i at fraction at (default: its middle), else the class default
     (capped in town for arterials), or None for a class the AI does not drive. Shared by the graph and the speed-limit
@@ -420,6 +456,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
     rough_edges = set()          # id(edge) -> OSM smoothness class says traffic should not overspeed
     rumble_edges = set()         # id(edge) -> likely ATLM/rural rumble strip corridor
     highway_edges = {}           # id(edge) -> 1 (posted motorway/trunk) | 2 (unlimited DE Autobahn)
+    road_class_edges = {}        # id(edge) -> ROAD_CLASS_CODES int
     carriage, carriage_ll = [], []     # sampled ground carriageways, with heights batched below
     signal_parts, signal_walks, signal_depths = [], {}, {}
     copies = roads.copies_of(feats_list)
@@ -617,6 +654,7 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                 incoming = direction == 0 or (direction > 0) == (end == -1)   # unless one-way out of it
                 approaches[(names[j], fid, end)] = (names[nb], incoming)
             rough = rough_road(feats, i)
+            rc = road_class_code(spec)
             for j in range(len(names) - 1):
                 a, b = names[j], names[j + 1]
                 if a == b:
@@ -685,6 +723,8 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
                     rumble_edges.add(id(edges[-1]))
                 if hwy_flag:
                     highway_edges[id(edges[-1])] = hwy_flag
+                if rc:
+                    road_class_edges[id(edges[-1])] = rc
                 if in_tunnel:
                     tube_edges.add(id(edges[-1]))
     # The static props use 3D solved roads/decks. A 2D graph clearance line would falsely block every level below
@@ -779,21 +819,24 @@ def build(frame, feats_list, elev, centre, urban_fn=None, window=WINDOW_M, decks
             uniq.append(e)
     if tube_edges:
         portal_taper(nodes, uniq, tube_edges, set(tunnel_node))
-    for e in uniq:              # (posted e[9], rough e[10], rumble e[11], highway/unlimited e[12], after optional portal radius e[8])
+    for e in uniq:              # (posted e[9], rough e[10], rumble e[11], highway/unlimited e[12], roadClass e[13], after optional portal radius e[8])
         pf = posted.get(id(e))
         rough = id(e) in rough_edges
         rumble = id(e) in rumble_edges
         hwy = highway_edges.get(id(e), 0)
-        if pf is not None or rough or rumble or hwy:
+        rc = road_class_edges.get(id(e), 0)
+        if pf is not None or rough or rumble or hwy or rc:
             if len(e) == 8:
                 e.append(None)
             e.append(pf)
-            if rough or rumble or hwy:
-                e.append(bool(rough))      # (false, not null: no hole before rumble/highway in the mod's array)
-            if rumble or hwy:
+            if rough or rumble or hwy or rc:
+                e.append(bool(rough))      # (false, not null: no hole before rumble/highway/roadClass in the mod's array)
+            if rumble or hwy or rc:
                 e.append(bool(rumble))
-            if hwy:
+            if hwy or rc:
                 e.append(int(hwy))
+            if rc:
+                e.append(int(rc))
     lines = [ln for ln in lines if max(abs(ln[0] - cx), abs(ln[1] - cy), abs(ln[2] - cx), abs(ln[3] - cy)) <= window]
     return {"nodes": nodes, "edges": uniq, "signals": signals, "lines": lines,
             "trafficProfile": _traffic_profile(frame, density_lines, cx, cy), "mph": bool(mph)}

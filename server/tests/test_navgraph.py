@@ -107,7 +107,9 @@ class GraphTest(unittest.TestCase):
         self.assertAlmostEqual(p["roadDensityKmKm2"], 0.3 / (np.pi * 0.75 ** 2), places=2)
         self.assertEqual(p["roadClass"], "primary")
         self.assertIn("target", p)
-        self.assertTrue(all(len(e) == 8 for e in g["edges"]), "the edges as before")
+        self.assertTrue(all(len(e) >= 14 and e[13] == navgraph.ROAD_CLASS_CODES["primary"] and e[12] == 0
+                            for e in g["edges"]),
+                        "primary edges carry compact roadClass code and highway flag 0")
 
     def test_rough_osm_smoothness_marks_road_without_changing_speed_targets(self):
         """Roughness is metadata for the traffic driver profile, not a fabricated speed limit."""
@@ -1052,3 +1054,37 @@ class AutobahnMetadataTest(unittest.TestCase):
         v_mw = navgraph._speed_profile(xy, 7.4, True, limit=40.0, urban=False, curve_accel=navgraph.MOTORWAY_CURVE_ACCEL)
         self.assertGreater(float(v_mw.min()), float(v_std.min()) + 5.0,
                            "banked motorway curve profile avoids unnecessary braking")
+
+    def test_road_class_codes_emitted_and_survive_short_ids(self):
+        expected = [
+            ("motorway", False, "motorway"),
+            ("motorway", True, "motorway_link"),
+            ("trunk", False, "trunk"),
+            ("trunk", True, "trunk_link"),
+            ("primary", False, "primary"),
+            ("primary", True, "primary_link"),
+            ("secondary", False, "secondary"),
+            ("secondary", True, "secondary_link"),
+            ("tertiary", False, "tertiary"),
+            ("tertiary", True, "tertiary_link"),
+            ("residential", False, "residential"),
+            ("living_street", False, "living_street"),
+            ("unclassified", False, "unclassified"),
+            ("service", False, "service"),
+        ]
+        self.assertEqual({name for _, _, name in expected}, set(navgraph.ROAD_CLASS_CODES))
+        for cls, is_link, name in expected:
+            with self.subTest(name=name):
+                f = features([[(0, 0), (120, 0)]], [cls], subclasses=[(0, "link")] if is_link else [])
+                f.rules["connectors"] = rules([(0, "A", 0.0, 0.0), (0, "B", 1.0, 1.0)])
+                g = navgraph.build(FRAME, [f], flat, (0.0, 0.0), mph=False)
+                self.assertTrue(g["edges"])
+                want_code = navgraph.ROAD_CLASS_CODES[name]
+                for e in g["edges"]:
+                    self.assertGreaterEqual(len(e), 14)
+                    self.assertEqual(e[13], want_code)
+                short = navgraph.short_ids(g)
+                self.assertTrue(short["edges"])
+                for e in short["edges"]:
+                    self.assertGreaterEqual(len(e), 14)
+                    self.assertEqual(e[13], want_code)

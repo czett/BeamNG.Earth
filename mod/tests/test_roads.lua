@@ -1170,4 +1170,83 @@ do -- Blocker 4: deckReady ignores tile-wide t.colDirty from unrelated colliders
   getPlayerVehicle = nil
   roads.clear()
 end
+do -- P2.3: delivery point roadClass propagation and gating
+  local clusterBld = {
+    { 10, 10, 0, 20, 20, 6 },
+    { 60, 10, 0, 70, 20, 6 },
+    { 110, 10, 0, 120, 20, 6 },
+  }
+  local ptsFeat = roads.extractDeliveryPoints('p23_feat', {
+    buildings = {
+      { 10, 10, 0, 20, 20, 6 },
+      { 60, 10, 0, 70, 20, 6 },
+      { x = 115, y = 15, z = 0, highway = 'secondary' },
+    },
+    deliveryPoints = {
+      { x = 15, y = 15, z = 0, highway = 'Residential' },
+      { x = 65, y = 15, z = 0, roadClass = 'Living_Street' },
+      { x = 115, y = 15, z = 0, highway = 'secondary' },
+    },
+  })
+  T.check(#ptsFeat == 2
+    and ptsFeat[1].roadClass == 'residential'
+    and ptsFeat[2].roadClass == 'living_street',
+    'p23: extractDeliveryPoints normalizes feature roadClass and rejects secondary')
+
+  local ptsNearest = roads.extractDeliveryPoints('p23_near', {
+    buildings = clusterBld,
+    roads = {
+      { highway = 'UNCLASSIFIED', pts = { { 15, 25 }, { 30, 25 } } },
+      { roadClass = 'Service', pts = { { 65, 25 }, { 80, 25 } } },
+      { highway = 'secondary_link', pts = { { 115, 25 }, { 130, 25 } } },
+    },
+  })
+  T.check(#ptsNearest == 2
+    and ptsNearest[1].roadClass == 'unclassified'
+    and ptsNearest[2].roadClass == 'service',
+    'p23: extractDeliveryPoints propagates nearest data.roads roadClass and rejects secondary_link')
+
+  for _, badHw in ipairs({
+    'motorway', 'motorway_link',
+    'trunk', 'trunk_link',
+    'primary', 'primary_link',
+    'secondary', 'secondary_link',
+    'tertiary_link',
+  }) do
+    local rejFeat = roads.extractDeliveryPoints('p23_rej_f_' .. badHw, {
+      buildings = clusterBld,
+      deliveryPoints = { { x = 15, y = 15, z = 0, highway = badHw } },
+    })
+    -- Buildings themselves have no highway tag so only the 3 buildings would remain if not careful;
+    -- use data.roads proximity to verify all buildings near badHw are rejected.
+    local rejRoad = roads.extractDeliveryPoints('p23_rej_r_' .. badHw, {
+      buildings = clusterBld,
+      roads = { { highway = badHw, pts = { { 15, 15 }, { 65, 15 }, { 115, 15 } } } },
+    })
+    T.check(rejFeat[1] == nil or rejFeat[1].id ~= 'p23_rej_f_' .. badHw .. ':a1',
+      'p23: rejects feature highway=' .. badHw)
+    T.check(#rejRoad == 0, 'p23: rejects points near data.roads highway=' .. badHw)
+  end
+
+  local acc = roads.extractDeliveryPoints('p23_acc', {
+    buildings = {
+      { 10, 10, 0, 20, 20, 6 },
+      { 60, 10, 0, 70, 20, 6 },
+      { 110, 10, 0, 120, 20, 6 },
+      { 160, 10, 0, 170, 20, 6 },
+    },
+    deliveryPoints = {
+      { x = 15, y = 15, z = 0, highway = 'residential' },
+      { x = 65, y = 15, z = 0, highway = 'living_street' },
+      { x = 115, y = 15, z = 0, highway = 'unclassified' },
+      { x = 165, y = 15, z = 0, highway = 'service' },
+    },
+  })
+  T.check(#acc == 4
+    and acc[1].roadClass == 'residential'
+    and acc[2].roadClass == 'living_street'
+    and acc[3].roadClass == 'unclassified'
+    and acc[4].roadClass == 'service',
+    'p23: accepts residential, living_street, unclassified, service clusters with roadClass')
+end
 T.done('test_roads')
