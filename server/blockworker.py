@@ -912,6 +912,8 @@ def _build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None
             idx = surfacemod.paint_golf(idx, keep["lat"], keep["lon"], lots)   # (golf over it: courses win)
         if road_feats:
             before = idx
+            # Provisional blocks pass widths=None (road_specs preserves full motorway/trunk lane+shoulder widths)
+            # while paint_roads keeps highway shoulder buffers and gore fills active in quick mode.
             idx = surfacemod.paint_roads(idx, keep["lat"], keep["lon"], road_feats, heightmap.SQUARE,
                                          _s.surface.urban, None if provisional else _s.widths, _open_tunnels(g, keep),
                                          quick=provisional or quick_paint)

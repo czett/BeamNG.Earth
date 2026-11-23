@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import areas  # noqa: E402
 import blockworker  # noqa: E402
 import de_enhancer  # noqa: E402
@@ -853,6 +854,41 @@ class QuickBaseRoadPaintTest(unittest.TestCase):
             self.assertEqual(len(painted_shapes), 1)
             self.assertEqual(painted_shapes[0], ((1024, 1024), True))
             self.assertEqual(res[0].shape[:2], (512, 512))
+
+    def test_quick_paint_keeps_highway_widths_and_shoulder_buffer(self):
+        import numpy as np
+        from test_roads import features, LAT, LON, M_LAT, M_LON
+
+        n = 128
+        sq = 1.0
+        rows = np.arange(n)[:, None]
+        cols = np.arange(n)[None, :]
+        lat = LAT + (n / 2 - rows) * sq / M_LAT + np.zeros((1, n))
+        lon = LON + (cols - n / 2) * sq / M_LON + np.zeros((n, 1))
+        dirt = np.full(lat.shape, surface.DIRT, np.uint8)
+
+        # Equal 9.5 m carriageway width (half = 4.75 m): motorway/trunk get +HIGHWAY_ROAD_EDGE_BUFFER_M (+0.5 m -> 5.75 m)
+        # so samples at +/-5.5 m from centreline stay ASPHALT instead of DIRT; residential keeps ROAD_EDGE_M (5.25 m).
+        for cls in ("motorway", "trunk"):
+            with self.subTest(cls=cls):
+                fh = features([[(-200, 0), (200, 0)]], [cls], widths=[(0, 9.5)])
+                out_h = surface.paint_roads(dirt, lat, lon, [fh], sq, quick=True)
+                self.assertEqual(int(out_h[64 - 5, 10]), surface.ASPHALT)
+                self.assertEqual(int(out_h[64 + 6, 10]), surface.ASPHALT)
+
+        fr = features([[(-200, 0), (200, 0)]], ["residential"], widths=[(0, 9.5)])
+        out_r = surface.paint_roads(dirt, lat, lon, [fr], sq, quick=True)
+        self.assertEqual(int(out_r[64 - 4, 10]), surface.ASPHALT)
+        self.assertEqual(int(out_r[64 + 5, 10]), surface.ASPHALT)
+        self.assertEqual(int(out_r[64 - 5, 10]), surface.DIRT)
+        self.assertEqual(int(out_r[64 + 6, 10]), surface.DIRT)
+
+        # Default (unmeasured) motorway width in quick=True matches full non-quick width (lanes + shoulders intact).
+        fm_default = features([[(-200, 0), (200, 0)]], ["motorway"])
+        out_quick = surface.paint_roads(dirt, lat, lon, [fm_default], sq, quick=True)
+        out_full = surface.paint_roads(dirt, lat, lon, [fm_default], sq, quick=False)
+        self.assertEqual(int((out_quick[:, 10] == surface.ASPHALT).sum()),
+                         int((out_full[:, 10] == surface.ASPHALT).sum()))
 
 
 if __name__ == "__main__":

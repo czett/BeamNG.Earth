@@ -160,6 +160,129 @@ do
   T.check(singleOutLC == 0 and singleOutHold == 1,
     'overtake.update (lanesOut==1, totalLanes==2): suppresses ai.laneChange and enforces ai.driveInLane("on")')
 
+  -- Pass 2 P2.3: dwelling-vehicle exclusion and turn-signal blinks
+  do
+    local function setupScene(edgeOpts, v1Pos, v1Vel, v2Pos, v2Vel)
+      O.reset()
+      local edge = {
+        inNode = 'a', outNode = 'b', oneWay = edgeOpts.oneWay ~= false,
+        lanes = edgeOpts.lanes or '++',
+        lanesOut = edgeOpts.lanesOut or 2, lanesIn = edgeOpts.lanesIn,
+        speedLimit = edgeOpts.limit or 22.2, inRadius = 3.6, outRadius = 3.6,
+        highway = edgeOpts.highway == true, unlimited = edgeOpts.unlimited == true,
+      }
+      local nodes = {
+        a = { pos = vec3(0, 0, 0), radius = 3.6, links = { b = edge } },
+        b = { pos = vec3(500, 0, 0), radius = 3.6, links = { a = edge } },
+      }
+      map = {
+        getMap = function() return { nodes = nodes } end,
+        findClosestRoad = function() return 'a', 'b' end,
+      }
+      local cmds1, cmds2 = {}, {}
+      local objs = {
+        [1] = {
+          getActive = function() return true end,
+          getPosition = function() return v1Pos end,
+          getDirectionVector = function() return vec3(1, 0, 0) end,
+          getVelocity = function() return vec3(v1Vel, 0, 0) end,
+          queueLuaCommand = function(_, c) cmds1[#cmds1 + 1] = c end,
+        },
+      }
+      if v2Pos then
+        objs[2] = {
+          getActive = function() return true end,
+          getPosition = function() return v2Pos end,
+          getDirectionVector = function() return vec3(1, 0, 0) end,
+          getVelocity = function() return vec3(v2Vel, 0, 0) end,
+          queueLuaCommand = function(_, c) cmds2[#cmds2 + 1] = c end,
+        }
+      end
+      getObjectByID = function(id) return objs[id] end
+      return cmds1, cmds2
+    end
+
+    local function countPat(list, pat)
+      local n = 0
+      for _, s in ipairs(list) do
+        if s:find(pat, 1, true) then n = n + 1 end
+      end
+      return n
+    end
+
+    -- 1a. Dwelling vehicle excluded from ai.laneChange on multi-lane non-highway road
+    local dwellCmds = setupScene({ highway = false }, vec3(100, -1.8, 0), 16, vec3(125, -1.8, 0), 10)
+    local isDwell1 = function(id) return id == 1 end
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell1)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell1)
+    T.check(countPat(dwellCmds, 'ai.laneChange') == 0 and countPat(dwellCmds, 'ai.driveInLane("on")') == 0,
+      'dwelling exclusion (urban): dwelling vehicle receives neither ai.laneChange nor ai.driveInLane("on")')
+
+    -- 1b. Dwelling vehicle excluded from ai.driveInLane("on") on highway
+    local dwellHwyCmds = setupScene({ highway = true, unlimited = true, limit = 36.11 }, vec3(100, -1.8, 0), 20, vec3(125, -1.8, 0), 15)
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell1)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell1)
+    T.check(countPat(dwellHwyCmds, 'ai.laneChange') == 0 and countPat(dwellHwyCmds, 'ai.driveInLane("on")') == 0,
+      'dwelling exclusion (highway): dwelling vehicle receives neither ai.laneChange nor ai.driveInLane("on")')
+
+    -- 1c. Non-dwelling car still sees dwelling vehicle in `all` and overtakes it
+    local passerCmds, dwellLeadCmds = setupScene({ highway = false }, vec3(100, -1.8, 0), 16, vec3(125, -1.8, 0), 5)
+    local isDwell2 = function(id) return id == 2 end
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell2)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, isDwell2)
+    T.check(countPat(passerCmds, 'ai.laneChange') == 1 and countPat(dwellLeadCmds, 'ai.laneChange') == 0,
+      'dwelling exclusion: passing car still sees and overtakes slow dwelling vehicle')
+
+    -- 2. Left lane-change overtake in RHT queues toggle_left_signal(1) and auto-cancels after BLINK_DURATION_S (2.0 s)
+    local rhtPassCmds = setupScene({ highway = false }, vec3(100, -1.8, 0), 16, vec3(125, -1.8, 0), 10)
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, nil)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, nil)
+    T.check(countPat(rhtPassCmds, 'toggle_left_signal(1)') == 1 and countPat(rhtPassCmds, 'ai.laneChange(') == 1,
+      'RHT overtake pass: queues toggle_left_signal(1) alongside ai.laneChange')
+    O.update(14.5, { [1] = true, [2] = true }, nil, nil, false, nil, nil, nil)
+    T.check(countPat(rhtPassCmds, 'toggle_left_signal(0)') == 0,
+      'RHT overtake pass: does not cancel signal before BLINK_DURATION_S (2.0 s)')
+    O.update(15.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, nil)
+    T.check(countPat(rhtPassCmds, 'toggle_left_signal(0)') == 1,
+      'RHT overtake pass: auto-cancels with toggle_left_signal(0) at BLINK_DURATION_S (2.0 s)')
+
+    -- 3a. Rechtsfahrgebot merge-right in RHT queues toggle_right_signal(1) and cancels after 2.0 s
+    local rhtMergeCmds = setupScene({ highway = false }, vec3(100, 1.8, 0), 16, nil, nil)
+    local truckPersona = function(id) return id == 1 and { persona = 'truck', overtakeAllowed = false } or nil end
+    O.update(10.0, { [1] = true }, nil, nil, false, nil, truckPersona, nil)
+    O.update(11.0, { [1] = true }, nil, nil, false, nil, truckPersona, nil)
+    T.check(countPat(rhtMergeCmds, 'toggle_right_signal(1)') == 1 and countPat(rhtMergeCmds, 'ai.laneChange(') == 1,
+      'RHT Rechtsfahrgebot merge-right: queues toggle_right_signal(1) alongside ai.laneChange')
+    O.update(12.5, { [1] = true }, nil, nil, false, nil, truckPersona, nil)
+    T.check(countPat(rhtMergeCmds, 'toggle_right_signal(0)') == 0,
+      'RHT Rechtsfahrgebot merge-right: holds signal before BLINK_DURATION_S')
+    O.update(13.0, { [1] = true }, nil, nil, false, nil, truckPersona, nil)
+    T.check(countPat(rhtMergeCmds, 'toggle_right_signal(0)') == 1,
+      'RHT Rechtsfahrgebot merge-right: cancels with toggle_right_signal(0) after BLINK_DURATION_S')
+
+    -- 3b. Rechtsfahrgebot merge in LHT queues toggle_left_signal(1) and cancels after 2.0 s
+    local lhtMergeCmds = setupScene({ highway = false }, vec3(100, -1.8, 0), 16, nil, nil)
+    O.update(10.0, { [1] = true }, nil, nil, true, nil, truckPersona, nil)
+    O.update(11.0, { [1] = true }, nil, nil, true, nil, truckPersona, nil)
+    T.check(countPat(lhtMergeCmds, 'toggle_left_signal(1)') == 1 and countPat(lhtMergeCmds, 'ai.laneChange(') == 1,
+      'LHT Rechtsfahrgebot merge: queues toggle_left_signal(1) alongside ai.laneChange')
+    O.update(13.0, { [1] = true }, nil, nil, true, nil, truckPersona, nil)
+    T.check(countPat(lhtMergeCmds, 'toggle_left_signal(0)') == 1,
+      'LHT Rechtsfahrgebot merge: cancels with toggle_left_signal(0) after BLINK_DURATION_S')
+
+    -- 4. Becoming dwelling clears pending blink without sending toggle_*_signal(0)
+    local becomeDwellCmds = setupScene({ highway = false }, vec3(100, -1.8, 0), 16, vec3(125, -1.8, 0), 10)
+    local dwellingActive = false
+    local dynDwell = function(id) return id == 1 and dwellingActive end
+    O.update(10.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, dynDwell)
+    O.update(13.0, { [1] = true, [2] = true }, nil, nil, false, nil, nil, dynDwell)
+    dwellingActive = true
+    O.update(13.5, { [1] = true, [2] = true }, nil, nil, false, nil, nil, dynDwell)
+    O.update(15.5, { [1] = true, [2] = true }, nil, nil, false, nil, nil, dynDwell)
+    T.check(countPat(becomeDwellCmds, 'toggle_left_signal(1)') == 1 and countPat(becomeDwellCmds, 'toggle_left_signal(0)') == 0,
+      'becoming dwelling clears pending signalOffAt without overwriting courier blinkers/hazards')
+  end
+
   O.reset()
   for k, val in pairs(sg) do _G[k] = val end
 end
