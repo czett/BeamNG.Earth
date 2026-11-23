@@ -346,10 +346,15 @@ do
   T.check(G.brake({ danger = { d = 5 }, dNow = 5 }, { v = 0.2, dt = 1 / 60 }) < 1, 'creeping towards it at the line: stopped')
   -- a drive: 45 m/s, the gap 300 m on, throttle kept (the car would gain 2 m/s^2)
   local gd = { danger = { d = 300 }, dNow = 300 }
-  local x, v, worst = 0, 45, 0
+  local x, v, worst, heldAt = 0, 45, 0, nil
   for _ = 1, 60 * 40 do
     local sc, h = G.brake(gd, { v = v, dt = 1 / 60 })
-    T.check(not h, 'braked in time: never held')
+    if 300 - x - v / 60 > G.HOLD_DIST_M then
+      T.check(not h, 'braked in time: never held before HOLD_DIST_M')
+    elseif h then
+      heldAt = 300 - x
+      break
+    end
     local nv = v * sc
     worst = math.max(worst, (v - nv) * 60)
     v = nv + 2 / 60
@@ -357,7 +362,8 @@ do
     gd.danger.d, gd.dNow = 300 - x, 300 - x     -- (the look's distance again)
     if x > 300 then break end
   end
-  T.check(x < 300 - G.STOP_M / 2, 'at rest short of the gap: ' .. string.format('%.1f m', 300 - x))
+  T.check(x < 300 - G.STOP_M and heldAt ~= nil and heldAt >= G.STOP_M,
+    'at rest/held short of the gap: ' .. string.format('%.1f m', 300 - x))
   T.check(worst <= G.A_MAX + 1e-6, string.format('never more than A_MAX taken off (%.2f m/s^2)', worst))
 end
 
@@ -453,7 +459,8 @@ do
   T.check(#g.spans == 0 and g.aid == nil, 'a new frame: no spans until the next message')
 end
 
--- Phase 2: nil groundAt past the current TerrainBlock edge must not cause false bridge-loading stalls
+-- P1.5: nil groundAt past the 1 km TerrainBlock edge must still detect unloaded bridge spans early,
+-- while ready tiles never stall
 do
   local w = world()
   w.groundAt = function(x, y)
@@ -461,8 +468,92 @@ do
     return 10
   end
   local g = guard({ SPAN })
-  T.check(look(g, w, 120, 0, 10.5, 65, 0) == nil,
-    'missing tile over un-sampled ground past block edge: no false stall')
+  local dg = look(g, w, 120, 0, 10.5, 65, 0)
+  T.check(dg ~= nil and dg.key == 'g17_1_2',
+    'missing tile over un-sampled ground past block edge: detected early for smooth braking')
+  w.ready = true
+  T.check(look(g, w, 120, 0, 10.5, 65, 0, 0.25) == nil,
+    'ready tile over un-sampled ground past block edge: no stall')
+end
+
+-- P1.5: both abutment and valley groundAt == nil past 1 km block edge still detects missing span,
+-- and optional msg.z / sp.z0,sp.z1 abutment elevations work when provided
+do
+  local w = world()
+  w.groundAt = function(x, y) return nil end
+  local g = guard({ SPAN })
+  local dg = look(g, w, 20, 0, 10.5, 45, 0)
+  T.check(dg ~= nil and dg.d >= 270 and dg.d <= 290,
+    'abutment past 1 km block edge (groundAt == nil everywhere): still detected ' .. tostring(dg and dg.d))
+
+  local gz = G.new()
+  G.onSpans(gz, { anchorId = 1, spans = { SPAN }, abut = { 3 }, z = { { 10, 10 } } }, 1)
+  T.check(gz.spans[1] and gz.spans[1].z0 == 10 and gz.spans[1].z1 == 10, 'onSpans stores optional msg.z elevations')
+  T.check(look(gz, w, 20, 0, 10.5, 45, 0) ~= nil, 'msg.z span detected at highway speed with nil groundAt')
+  -- road under bridge with msg.z still rejected when groundAt is known and low
+  local wu = world()
+  wu.groundAt = function(x, y) return 2 end
+  T.check(look(gz, wu, 200, 0, 2.5, 30, 0) == nil, 'msg.z span still rejects low road under bridge')
+end
+
+-- P1.5: early 280-400 m highway lookahead & 250-350 m braking onset, plus smooth hold condition
+do
+  T.check(G.A == 3.0 and G.STOP_M == 20 and G.LEAD_S == 3 and G.HIGH_SPEED_MS == 25.0
+    and G.LOOK_FAST_MIN_M == 280 and G.HOLD_DIST_M == 25, 'P1.5 deckguard tuning constants')
+  local w = world({ x0 = 500, x1 = 560 })
+  w.groundAt = function(x, y)
+    if x > 503 and x < 557 then return 2 end
+    return 10
+  end
+  local g = guard({ { 500, 0, 560, 0 } })
+  -- At 40 m/s (144 km/h) from x=190 (310 m from bridge): within 280-400+ m lookahead, detects & starts braking
+  local dg = look(g, w, 190, 0, 10.5, 40, 0, 0)
+  T.check(dg ~= nil and dg.d >= 300 and dg.d <= 320, 'highway lookahead >= 280 m catches bridge ~310 m ahead')
+  local sc = G.brake(g, { v = 40, dt = 1 / 60 })
+  T.check(sc < 1, 'smooth deceleration starts 250-350 m ahead at highway speed')
+
+  -- hold fires when v^2 / (2 * A_MAX) > d - STOP_M, or when d <= HOLD_DIST_M (25 m)
+  local _, h1 = G.brake({ danger = { d = 120 }, dNow = 120 }, { v = 40, dt = 1 / 60 })
+  T.check(h1, 'hold engages when stopping distance v^2/(2*A_MAX) exceeds d - STOP_M')
+  local _, h2 = G.brake({ danger = { d = 150 }, dNow = 150 }, { v = 40, dt = 1 / 60 })
+  T.check(not h2, 'hold does not engage when stopping distance < d - STOP_M and d > 25 m')
+  local _, h3 = G.brake({ danger = { d = 24 }, dNow = 24 }, { v = 2.5, dt = 1 / 60 })
+  T.check(h3, 'hold engages at <= 25 m close-range distance when moving > HOLD_MIN_MS')
+end
+
+-- P1.5: roads.deckGrid.at requires deck instantiation + be:reloadCollision() completion
+do
+  local files = {}
+  local oldRead, oldDecode = readFile, jsonDecode
+  readFile = function(p) return files[p] end
+  jsonDecode = function(s) return assert(load('return ' .. s))() end
+  local roads = require('beamngEarth/roads')
+  roads.clear()
+  roads.setGeo(false)
+  local gov = { try = function() return true end, charge = function() end, chargeMotion = function() end }
+  local car = { pos = vec3(128, 128, 0.5) }
+  function car:getPosition() return self.pos end
+  function car:getVelocity() return vec3(0, 0, 0) end
+  local oldGetVeh = getPlayerVehicle
+  getPlayerVehicle = function() return car end
+  files['/t/dg_deck.json'] = '{ chunks = { }, deck = { shape = "/t/deck_0_0.cdae", pos = { 0, 0, 0 } }, ' ..
+    'colliders = { deck = { { 10, 10, 5, 20, 20, 15 } } } }'
+  local oldReloadEvery, oldUrgentGap = roads.RELOAD_EVERY_S, roads.URGENT_GAP_S
+  roads.RELOAD_EVERY_S, roads.URGENT_GAP_S = 999, 999
+  roads.onTile({ anchorId = 1, key = '0_0', path = '/t/dg_deck.json', n = 0 }, 1)
+  local st0 = roads.deckGrid.at(0, 0)
+  T.check(st0 == 'missing', 'deckGrid.at is missing while deck is still queued in walkQ')
+  -- instantiate deck without running reloadCollision
+  for _ = 1, 5 do roads.update(gov, 1) end
+  local st1 = roads.deckGrid.at(0, 0)
+  T.check(st1 == 'missing', 'deckGrid.at stays missing after deck instantiation until reloadCollision')
+  roads.collisionRebuilt()
+  local st2 = roads.deckGrid.at(0, 0)
+  T.check(st2 == 'ready', 'deckGrid.at becomes ready after reloadCollision completes')
+  roads.RELOAD_EVERY_S, roads.URGENT_GAP_S = oldReloadEvery, oldUrgentGap
+  roads.clear()
+  getPlayerVehicle = oldGetVeh
+  readFile, jsonDecode = oldRead, oldDecode
 end
 
 T.done('test_deckguard')

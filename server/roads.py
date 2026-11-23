@@ -27,6 +27,7 @@ import types
 import collections
 import contextlib
 import hashlib
+import inspect
 import os
 import threading
 import time
@@ -12626,12 +12627,16 @@ class GeoTracker:
         self.frame = None
         self.frames = {}        # anchor id -> its frame (the exact variants' error: _shown_err)
         self.sent = set()       # (gx, gy) whose content the mod has
+        self.fast_sent = set()  # (gx, gy) sent with fast_lane=True whose full scenery is deferred
         self.info = {}          # (gx, gy) -> its content's {"h", "parts": {what: {pivot, relief, col}}}
         self.skins = set()      # (gx, gy) with self.aid's skin sent
         self.shown = {}         # (gx, gy) -> {what: anchor id of the exact variant the mod shows}
         self.need = {}          # ((gx, gy), aid) -> {what: pivot} its exact variants due (exact_need, cached)
         self.building = set()
-        self.pool = None
+        self.building_low = set()
+        from runtimeprofiler import ThreadPoolExecutor
+        self.pool = ThreadPoolExecutor(max_workers=BUILD_PER_POSE_FAST, thread_name_prefix="geo-roads")
+        self.low_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="geo-scenery")
         self.futs = {}
         self.retry = {}
         self.fails = {}
@@ -12673,6 +12678,8 @@ class GeoTracker:
         self.closed = True
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
+        if getattr(self, "low_pool", None) is not None:
+            self.low_pool.shutdown(wait=False, cancel_futures=True)
 
     def progress(self, near_m=None):
         """(done, wanted) of the tiles round the car: done = content and this anchor's skin sent, or waiting for a
@@ -12706,6 +12713,7 @@ class GeoTracker:
         for k in set(keys) & self.sent:
             self.sent.discard(k)
             self.skins.discard(k)
+            self.fast_sent.discard(k)
             self.need = {nk: v for nk, v in self.need.items() if nk[0] != k}
 
     def _shown_err(self, key, what, part, frame):
@@ -12776,7 +12784,7 @@ class GeoTracker:
         if aid != self.aid:
             for f in self.futs.values():
                 f.cancel()
-            self.aid, self.frame, self.building, self.futs = aid, frame, set(), {}
+            self.aid, self.frame, self.building, self.building_low, self.futs = aid, frame, set(), set(), {}
             self._pending = None
             self.frames[aid] = frame
             while len(self.frames) > 4:
@@ -12787,7 +12795,10 @@ class GeoTracker:
             self.stats["anchors"] += 1
         if self.pool is None:
             from runtimeprofiler import ThreadPoolExecutor
-            self.pool = ThreadPoolExecutor(BUILD_PER_POSE, thread_name_prefix="roads-geo")
+            self.pool = ThreadPoolExecutor(max_workers=BUILD_PER_POSE_FAST, thread_name_prefix="geo-roads")
+        if getattr(self, "low_pool", None) is None:
+            from runtimeprofiler import ThreadPoolExecutor
+            self.low_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="geo-scenery")
         vx, vy = (float(vel[0]), float(vel[1])) if vel else (0.0, 0.0)
         s = math.hypot(vx, vy)
         ht = _high_speed_t(s)
@@ -12837,13 +12848,14 @@ class GeoTracker:
             start |= (set(deck_first) & wanted)
         else:
             start = wanted
+        fast_lane = (s > HIGH_SPEED_MS)
         jobs = []
         self.redo &= self.sent
         for k in (set(start) | self.redo) if self.redo else start:
             if k in self.building or self.retry.get(k, 0.0) > now:
                 continue
             if k not in self.sent or k in self.redo:
-                jobs.append((k, True, True, "auto"))
+                jobs.append((k, True, True, "auto", fast_lane, False))
                 continue
             make = None
             if k not in self.skins or (k, self.aid) not in self.need:
@@ -12857,12 +12869,23 @@ class GeoTracker:
                                "parts": {w: False for w in base}})
             make = self.need.get((k, self.aid)) or None
             if k not in self.skins or make:
-                jobs.append((k, False, k not in self.skins, make))
+                jobs.append((k, False, k not in self.skins, make, False, False))
+
+        if self.fast_sent and (not fast_lane or not jobs):
+            queued_hi = {j[0] for j in jobs}
+            for k in self.fast_sent & wanted:
+                if k in self.building or self.retry.get(k, 0.0) > now or k in queued_hi:
+                    continue
+                dist = car.get(k, seen.get(k, others.get(k, 1e9)))
+                if dist <= SEND_M or not fast_lane:
+                    jobs.append((k, True, True, "auto", False, True))
 
         build_s = getattr(self, "build_s", None) or reach_build_est()
 
         def order(job):
             k = job[0]
+            if len(job) > 5 and job[5]:
+                return (3, car.get(k, seen.get(k, others.get(k, 1e9))))
             if k in deck_first:         # (a bridge's tile the mod's deck guard slows the car for: first, deckguard.lua)
                 return (-1, 0.0)
             if not job[1] and job[2] and k in car:
@@ -12927,6 +12950,7 @@ class GeoTracker:
             return all(geotiles.quad_dist(q, f[0], f[1]) > f[2] + TILE for f in foci)
         for k in [k for k in self.sent if k not in wanted and k not in self.building and far(k)]:
             self.sent.discard(k)
+            self.fast_sent.discard(k)
             self.skins.discard(k)
             self.skin_h.pop(k, None)
             self.redo.discard(k)
@@ -12940,6 +12964,18 @@ class GeoTracker:
         if self.retry:
             self.retry = {k: t for k, t in self.retry.items() if t > now}
 
+    @staticmethod
+    def _build_n_args(build):
+        try:
+            sig = inspect.signature(build)
+        except (TypeError, ValueError):
+            return 6
+        params = list(sig.parameters.values())
+        if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            return 8
+        return sum(1 for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                                   inspect.Parameter.POSITIONAL_OR_KEYWORD))
+
     def _dispatch_pending(self, now=None):
         pend = getattr(self, "_pending", None)
         if not pend or self.closed:
@@ -12948,28 +12984,49 @@ class GeoTracker:
         if aid != self.aid:
             return
         now = (getattr(self, "clock", None) or time.monotonic)() if now is None else now
-        slots = max(0, limit - len(self.building))
-        if not slots or not jobs:
+        if not jobs:
             return
-        started = 0
-        while jobs and started < slots:
-            k, content, skin, make = jobs.pop(0)
+        n_args = self._build_n_args(build)
+        while jobs:
+            item = jobs[0]
+            k, content, skin, make = item[:4]
+            fast_lane = bool(item[4]) if len(item) > 4 else False
+            low_prio = bool(item[5]) if len(item) > 5 else False
             if k in self.building or self.retry.get(k, 0.0) > now:
+                jobs.pop(0)
                 continue
+            hi_active = len(self.building - getattr(self, "building_low", set()))
+            if not low_prio:
+                if hi_active >= limit:
+                    break
+            elif len(getattr(self, "building_low", set())) >= 2:
+                break
+            jobs.pop(0)
             self.building.add(k)
+            if low_prio:
+                self.building_low.add(k)
+            else:
+                self.building_low.discard(k)
             self.started[k] = now
             # (the content's and the skin's files read in the worker, not on the event loop)
             job = functools.partial(staging.build_inline_paths, build,
                                     getattr(getattr(conn, "s", None), "out_dir", None), _geo_inline_paths)
-            fut = self.futs[k] = loop.run_in_executor(self.pool, job, aid, k[0], k[1], content, skin, make)
-            fut.add_done_callback(lambda f, kk=k, a=aid, c=content, sk=skin, m=make, lp=loop:
-                                  self._built(conn, a, kk, f, c, sk, m, lp))
-            started += 1
+            if n_args >= 8:
+                bargs = (aid, k[0], k[1], content, skin, make, fast_lane, low_prio)
+            elif n_args == 7:
+                bargs = (aid, k[0], k[1], content, skin, make, fast_lane)
+            else:
+                bargs = (aid, k[0], k[1], content, skin, make)
+            target_pool = (getattr(self, "low_pool", None) or self.pool) if low_prio else self.pool
+            fut = self.futs[k] = loop.run_in_executor(target_pool, job, *bargs)
+            fut.add_done_callback(lambda f, kk=k, a=aid, c=content, sk=skin, m=make, lp=loop, fl=fast_lane:
+                                  self._built(conn, a, kk, f, c, sk, m, lp, fl))
 
-    def _built(self, conn, aid, key, fut, content, skin, make, loop=None):
+    def _built(self, conn, aid, key, fut, content, skin, make, loop=None, fast_lane=False):
         import geotiles
         if self.futs.get(key) is fut:
             self.building.discard(key)
+            self.building_low.discard(key)
             self.futs.pop(key, None)
             t0 = self.started.pop(key, None)
             if t0 is not None and fut.done() and not fut.cancelled() and fut.exception() is None \
@@ -13019,18 +13076,33 @@ class GeoTracker:
         c = res.get("content")
         ex = (res.get("exact") or {}) if aid == self.aid else {}
         again = key in self.redo and not res.get("stale")
+        upgrade = (not fast_lane and key in self.fast_sent and not res.get("stale"))
+        replacing = again or upgrade
         held_content = False
-        if again and c is not None:
-            self.redo.discard(key)
-            self.stats["redo"] += 1
+        replaced_content = False
+        unchanged_replace = False
+        if replacing and c is not None:
+            if again:
+                self.redo.discard(key)
+                self.stats["redo"] += 1
             h0 = (self.info.get(key) or {}).get("h")
-            if h0 is not None and h0 == (c[2] or {}).get("h") and key in self.sent:
+            new_h = (c[2] or {}).get("h")
+            if h0 is not None and new_h == h0 and key in self.sent:
                 # (the same content as the one the mod has: nothing sent, its exact variants stand)
-                self.stats["redo_same"] += 1
+                if again:
+                    self.stats["redo_same"] += 1
+                if not fast_lane:
+                    self.fast_sent.discard(key)
                 c, ex = None, {}
+                unchanged_replace = True
         if c is not None:
+            replaced_content = replacing and key in self.sent
             path, n, info = c[0], c[1], c[2]
             self.sent.add(key)
+            if fast_lane:
+                self.fast_sent.add(key)
+            else:
+                self.fast_sent.discard(key)
             self.info[key] = info
             self.shown.pop(key, None)
             self.stats["content"] += 1
@@ -13049,7 +13121,7 @@ class GeoTracker:
                 slots = pool(conn, files)
                 if slots:
                     m["slots"] = slots
-            if self.swap is not None and again:
+            if self.swap is not None and replacing:
                 self.swap_held.append((conn, m))    # (a tile the mod has: its content after the swap's commit)
                 held_content = True
             else:
@@ -13059,7 +13131,9 @@ class GeoTracker:
         sk = sk0 = res.get("skin")
         if skin and sk is not None:
             h1 = (sk[1] or {}).get("h") if len(sk) > 1 else None
-            if again and h1 is not None and self.skin_h.get(key) == h1 and key in self.skins:
+            if unchanged_replace and key in self.skins and ((upgrade and not again) or (h1 is not None and self.skin_h.get(key) == h1)):
+                sk = None               # (same content kept by the mod: skin stays too)
+            elif again and not replaced_content and h1 is not None and self.skin_h.get(key) == h1 and key in self.skins:
                 sk = None               # (the same skin as the one the mod has)
             else:
                 self.skin_h[key] = h1

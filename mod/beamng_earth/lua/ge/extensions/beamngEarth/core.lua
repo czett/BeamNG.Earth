@@ -3196,8 +3196,13 @@ local function onUpdate(dtReal, dtSim)
     t = mark('roads', t)
     local roadDue = (not cover) and roads.hasDueForward and roads.hasDueForward() or false
     if roadDue then
-      gov._roadYieldN = (gov._roadYieldN or 0) + 1
-      gov.roadYield = (gov._roadYieldN % 3) ~= 0
+      if st.player and (st.player.speed or 0) > 28 then
+        gov._roadYieldN = 0
+        gov.roadYield = true
+      else
+        gov._roadYieldN = (gov._roadYieldN or 0) + 1
+        gov.roadYield = (gov._roadYieldN % 3) ~= 0
+      end
     else
       gov._roadYieldN = 0
       gov.roadYield = false

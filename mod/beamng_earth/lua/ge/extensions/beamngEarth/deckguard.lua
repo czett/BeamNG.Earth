@@ -39,20 +39,20 @@ M.LEVEL_M = 6               -- m: the car this near the deck's level is at it
 M.LEVEL_UP_M = 4            -- m more over the abutments' line a car on it may be mid-span (a deck raised over a road)
 M.LEVEL_NEAR_M = 80         -- ... tested only this near the end it enters (farther, the road there may climb or fall)
 M.DROP_M = 2.0              -- m: the block's ground this far under the deck's level is a gap (less: driven on as ground)
-M.A = 4.0                   -- m/s^2: the braking profile (at 4, a tile 600 m ahead, where they arrive on time at
-                            -- ~180 mph, slows a car only from ~155 mph up)
+M.A = 3.0                   -- m/s^2: the braking profile (smooth 2.5-3.5 m/s^2 deceleration target)
 M.A_MAX = 7.0               -- m/s^2 at most taken off
-M.STOP_M = 12               -- m short of the gap the car comes to rest
+M.STOP_M = 20               -- m short of the gap the car comes to rest
 M.DRAG_S = 8                -- s to the gap where the drag starts ...
 M.FULL_S = 2.5              -- ... and where it is full
 M.K_MAX = 0.08              -- of the speed lost per second at full drag
-M.LEAD_S = 2                -- s of driving looked at past the braking distance
+M.LEAD_S = 3                -- s of driving looked at past the braking distance
+M.HIGH_SPEED_MS = 25.0      -- m/s: highway threshold for extended lookahead
+M.LOOK_FAST_MIN_M = 280     -- m: minimum highway lookahead floor
 M.LOOK_MIN_M = 60
 M.LOOK_MAX_M = 900          -- (the server lists the spans within 1200 m: deckspans.RADIUS_M)
 M.MOVE_MIN = 0.5            -- m/s: slower, the path keeps the last heading (a car at rest at the line keeps its gap)
 M.YAW_MAX = 0.35            -- rad/s at most of the path's turn rate
-M.HOLD_LEAD_S = 0.4         -- s: held when the gap is this near and the car cannot stop before it
-M.HOLD_PAD_M = 2
+M.HOLD_DIST_M = 25          -- m: hard close-range hold distance
 M.HOLD_MIN_MS = 1.0
 M.RESUME_GRACE_S = 5
 M.RESCUE_DROP = 3           -- m under the deck's level
@@ -74,8 +74,9 @@ function M.new()
     stats = { looks = 0, dangers = 0, frames = 0, lost = 0, holds = 0, rescues = 0, giveUps = 0, spans = 0 } }
 end
 
--- A span from the message: pts { x1, y1, x2, y2, ... } (>= 2 points), abut bits (1 first end, 2 last end on the ground).
-local function makeSpan(flat, bits)
+-- A span from the message: pts { x1, y1, x2, y2, ... } (>= 2 points), abut bits (1 first end, 2 last end on the ground),
+-- optional abutment elevations z0, z1 (from msg.z or sp.z0/sp.z1).
+local function makeSpan(flat, bits, z0, z1)
   if type(flat) ~= 'table' then return nil end
   local n = floor(#flat / 2)
   if n < 2 then return nil end
@@ -95,18 +96,31 @@ local function makeSpan(flat, bits)
     end
   end
   bits = tonumber(bits) or 0
-  return { pts = pts, n = n, cum = cum, len = cum[n], box = { x0, y0, x1, y1 },
+  local sp = { pts = pts, n = n, cum = cum, len = cum[n], box = { x0, y0, x1, y1 },
     abut0 = bits % 2 == 1, abut1 = floor(bits / 2) % 2 == 1,
     id = string.format('%.0f_%.0f_%.0f_%.0f', pts[1], pts[2], pts[2 * n - 1], pts[2 * n]) }
+  z0 = z0 ~= nil and z0 or flat.z0
+  z1 = z1 ~= nil and z1 or flat.z1
+  local nz0 = z0 ~= nil and tonumber(z0) or nil
+  local nz1 = z1 ~= nil and tonumber(z1) or nil
+  if nz0 and nz0 == nz0 then sp.z0 = nz0 end
+  if nz1 and nz1 == nz1 then sp.z1 = nz1 end
+  return sp
 end
 M._makeSpan = makeSpan
 
--- Server message `deck_spans` {anchorId, cx, cy, r, spans, abut}: the bridges round the car (deckspans.py).
+-- Server message `deck_spans` {anchorId, cx, cy, r, spans, abut, z}: the bridges round the car (deckspans.py).
 function M.onSpans(g, msg, currentAnchor)
   if type(msg) ~= 'table' or msg.anchorId ~= currentAnchor or type(msg.spans) ~= 'table' then return false end
   local out, abut = {}, type(msg.abut) == 'table' and msg.abut or {}
+  local zs = type(msg.z) == 'table' and msg.z or nil
   for i, flat in ipairs(msg.spans) do
-    local sp = makeSpan(flat, abut[i])
+    local z0, z1
+    if zs and zs[i] ~= nil then
+      if type(zs[i]) == 'table' then z0, z1 = zs[i][1] or zs[i].z0, zs[i][2] or zs[i].z1
+      elseif type(zs[i]) == 'number' then z0, z1 = zs[i], zs[i] end
+    end
+    local sp = makeSpan(flat, abut[i], z0, z1)
     if sp then out[#out + 1] = sp end
   end
   g.spans, g.aid = out, msg.anchorId
@@ -193,12 +207,12 @@ entersAt = function(g, sp, k, d, u, x, y, z, groundAt, px, py)
       if near and abs(z - ez) > M.LEVEL_M then return false end     -- (rejected: nothing overrides it)
       if k > 1 then
         local gb = groundAt(px[k - 1], py[k - 1])
-        return gb ~= nil and abs(gb - ez) <= M.LEVEL_M
+        return gb == nil or abs(gb - ez) <= M.LEVEL_M
       end
       return true
     end
     if not abutted then return k == 1 and next(g.riding) ~= nil end   -- (off a deck it rides, at a fork)
-    if k > 1 then return false end                            -- (its height not known yet: no braking for it yet)
+    if k > 1 then return true end                             -- (past 1 km block edge: allow early scan)
   elseif k > 1 then
     return false                                              -- (into its middle: it is crossed or passed under)
   end
@@ -260,9 +274,9 @@ scanSpan = function(sp, dir, a, b, grid, groundAt)
       local qx, qy = pointAt(sp, u)
       local lz = levelAt(sp, u, groundAt)
       local gz = lz and groundAt(qx, qy)
-      -- When lz is unknown (un-abutted deck fork) or sampled ground drops below lz - DROP_M, flag the gap.
-      -- When lz is known and gz is nil (past the loaded TerrainBlock edge), do not stall before edgeguard.
-      if not lz or (gz and gz < lz - M.DROP_M) then
+      -- When lz is unknown (un-abutted deck fork or past block edge) or gz is nil (past 1 km TerrainBlock edge)
+      -- or sampled ground drops below lz - DROP_M, flag the gap so deckguard slows early instead of waiting for swap.
+      if not lz or gz == nil or gz < lz - M.DROP_M then
         found = { u = u, x = qx, y = qy, key = key, level = lz }
         return true
       end
@@ -318,7 +332,11 @@ function M.look(g, inp)
   end
   if v >= M.MOVE_MIN then g.theta, g.thetaT = th, inp.clock end
   if not th or #spans == 0 then g.danger, g.dNow, g.riding = nil, nil, {}; return nil end
-  local L = min(M.LOOK_MAX_M, max(M.LOOK_MIN_M, v * v / (2 * M.A) + M.STOP_M + v * M.LEAD_S))
+  local L = v * v / (2 * M.A) + M.STOP_M + v * M.LEAD_S
+  if v >= M.HIGH_SPEED_MS then
+    L = max(L, min(400, max(M.LOOK_FAST_MIN_M, v * 9)))
+  end
+  L = min(M.LOOK_MAX_M, max(M.LOOK_MIN_M, L))
   -- the spans that come within reach (none: nothing else done)
   local cands = nil
   local r = L + M.LAT_M
@@ -458,8 +476,7 @@ function M.brake(g, inp)
       scale = min(scale, target / v)
     end
   end
-  local hold = v > M.HOLD_MIN_MS and d - M.HOLD_PAD_M <= v * M.HOLD_LEAD_S
-    and v * v / (2 * M.A_MAX) > d - M.HOLD_PAD_M
+  local hold = v > M.HOLD_MIN_MS and ((v * v) / (2 * M.A_MAX) > d - M.STOP_M or d <= M.HOLD_DIST_M)
   return scale, hold
 end
 

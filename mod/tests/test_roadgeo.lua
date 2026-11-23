@@ -103,6 +103,9 @@ run(1, A)
 do  -- the deck guard's grid (deckguard.lua scanSpan): this tile in, its neighbour missing, in the geotiles' own cells
   local fx, fy = roads.deckGrid.xy(car.x, car.y)
   T.check(math.floor(fx) == gx and math.floor(fy) == gy, 'deckGrid.xy: the geotile under the point')
+  T.check(roads.deckGrid.at(gx, gy) == 'missing' and roads.deckAt(car.x, car.y) == 'missing',
+    'deckGrid.at: missing before reloadCollision makes the deck solid')
+  roads.collisionRebuilt()
   T.check(roads.deckGrid.at(gx, gy) == 'ready' and roads.deckAt(car.x, car.y) == 'ready', 'deckGrid.at: the tile in')
   local st, k = roads.deckGrid.at(gx + 1, gy)
   T.check(st == 'missing' and k == geotile.key(gx + 1, gy), 'deckGrid.at: its neighbour missing, by its key')
